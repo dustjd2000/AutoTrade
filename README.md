@@ -33,7 +33,8 @@ src/llm/                  LLM 추천 모듈 (Anthropic Claude API)
 src/data/                 대형주 유니버스 및 당일 데이터 수집
 src/logger/trade_store.py 체결 내역 SQLite 저장 및 손익 집계
 src/notification/         이메일 발송 (추천 결과·성과 리포트·운영 알림)
-src/ui/                   PyQt6 설정 UI
+src/core/runtime.py       매매 런타임 조립 및 구동 (UI 스레드가 사용)
+src/ui/                   PyQt6 UI — 설정 및 엔진 시작/정지 제어
 ```
 
 ## 시작하기
@@ -42,10 +43,13 @@ src/ui/                   PyQt6 설정 UI
 pip install -r requirements.txt
 cp .env.example .env      # 값을 채운다 (.env는 커밋되지 않음)
 
-python scripts/run_ui.py       # 설정 UI
-python scripts/run_trading.py  # 매매 엔진
-pytest                         # 테스트
+python scripts/run_ui.py  # 유일한 진입점 — 설정과 엔진 제어를 모두 담당
+pytest                    # 테스트
 ```
+
+**엔진은 UI로만 제어한다.** 매매 엔진은 UI가 띄우는 별도 스레드에서 돌며,
+UI의 시작/정지 버튼으로만 켜고 끈다. 창을 닫으면 엔진도 함께 정지한다.
+(단독 실행용 `scripts/run_trading.py`는 제거했다.)
 
 ### 필요한 것
 
@@ -57,4 +61,3 @@ pytest                         # 테스트
 
 - 뉴스/공시 헤드라인 수집 (데이터 소스 미확정 — 없어도 등락률·거래량·시가갭만으로 동작)
 - 백테스팅 모듈, 모니터링 대시보드
-- UI에서 엔진 직접 실행 (현재는 `scripts/run_trading.py`로 구동)

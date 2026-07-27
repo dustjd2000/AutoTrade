@@ -15,10 +15,11 @@ class StockDetail:
     """주식기본정보(ka10001)에서 뽑아낸 당일 지표."""
 
     ticker: str
-    price: float        # 현재가
-    volume: int         # 누적 거래량
+    price: float        # 현재가 (장 전에는 동시호가 예상체결가)
+    volume: int         # 누적 거래량 (장 전에는 예상체결량)
     change_rate: float  # 전일 대비 등락률 (%)
-    gap_rate: float     # 시가 갭 (%) — 전일 종가 대비 당일 시가
+    gap_rate: float     # 시가 갭 (%) — 전일 종가 대비 시가(장 전에는 예상체결가)
+    is_premarket: bool = False  # 동시호가 예상체결 기준 값인지 여부
 
 # 키움 API ID / 경로 (경로는 /api/dostk/{분류} 규약)
 STOCK_INFO_API_ID = "ka10001"   # 주식기본정보요청
@@ -58,27 +59,50 @@ class MarketDataClient:
         )
 
     def get_stock_detail(self, ticker: str) -> StockDetail:
-        """등락률·시가갭까지 포함한 당일 지표를 한 번의 호출로 가져온다 (LLM 프롬프트용)."""
+        """등락률·시가갭까지 포함한 당일 지표를 한 번의 호출로 가져온다 (LLM 프롬프트용).
+
+        1호 전략은 장 시작 전(08:45)에 이 값을 쓰는데, 그 시점에는 시가·등락률·거래량이
+        모두 0이다. 따라서 정규장 데이터가 아직 없으면 동시호가(08:30~09:00)의
+        예상체결가·예상체결량으로 대체한다 — 장 전에 얻을 수 있는 유일한 실질 신호다.
+        """
         data, _ = self._client.request(STOCK_INFO_PATH, STOCK_INFO_API_ID, {"stk_cd": ticker})
 
         # 키움은 가격에 등락 방향 부호를 붙여 보내므로 절댓값을 취한다
         price = abs(to_float(_first_present(data, "cur_prc", "prpr")))
         base_price = abs(to_float(_first_present(data, "base_pric")))   # 전일 종가
         open_price = abs(to_float(_first_present(data, "open_pric")))   # 당일 시가
+        volume = to_int(_first_present(data, "trde_qty", "acml_vol"))
 
-        # flu_rt는 키움이 계산해 주는 등락률. 없으면 전일 종가로 직접 계산한다.
+        expected_price = abs(to_float(_first_present(data, "exp_cntr_pric")))
+        expected_qty = to_int(_first_present(data, "exp_cntr_qty"))
+
+        # 시가가 잡히지 않았고 거래도 없으면 아직 정규장이 시작되지 않은 것이다
+        is_premarket = open_price <= 0 and volume <= 0
+        if is_premarket and expected_price > 0:
+            price = expected_price
+            volume = expected_qty
+            reference_price = expected_price
+        else:
+            reference_price = open_price
+
+        # flu_rt는 키움이 계산해 주는 등락률. 장 전이거나 값이 없으면 직접 계산한다.
         change_rate = to_float(_first_present(data, "flu_rt"))
         if change_rate == 0.0 and base_price > 0 and price > 0:
             change_rate = (price - base_price) / base_price * 100
 
-        gap_rate = ((open_price - base_price) / base_price * 100) if base_price > 0 else 0.0
+        gap_rate = (
+            (reference_price - base_price) / base_price * 100
+            if base_price > 0 and reference_price > 0
+            else 0.0
+        )
 
         return StockDetail(
             ticker=ticker,
             price=price,
-            volume=to_int(_first_present(data, "trde_qty", "acml_vol")),
+            volume=volume,
             change_rate=change_rate,
             gap_rate=gap_rate,
+            is_premarket=is_premarket,
         )
 
     def get_ohlcv(self, ticker: str, period: str = "D", count: int = 100) -> List[dict]:

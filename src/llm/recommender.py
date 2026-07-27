@@ -30,7 +30,18 @@ class StockRecommendation:
 
 
 def build_user_prompt(daily_data: List[DailyStockData]) -> str:
-    lines = ["오늘의 코스피 대형주 종목별 데이터:"]
+    is_premarket = any(d.is_premarket for d in daily_data)
+
+    if is_premarket:
+        lines = [
+            "장 시작 전(동시호가) 시점의 코스피 대형주 데이터입니다.",
+            "아래 수치는 정규장 체결이 아니라 **동시호가 예상체결가·예상체결량** 기준이며,",
+            "'등락률'과 '시가갭'은 전일 종가 대비 예상체결가의 괴리를 뜻합니다.",
+            "",
+        ]
+    else:
+        lines = ["오늘의 코스피 대형주 종목별 데이터:"]
+
     for d in daily_data:
         headlines = "; ".join(d.headlines) if d.headlines else "없음"
         lines.append(

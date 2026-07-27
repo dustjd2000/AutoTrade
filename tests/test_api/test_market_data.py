@@ -55,6 +55,52 @@ def test_get_stock_detail_survives_missing_base_price():
     assert detail.gap_rate == 0.0   # 0으로 나누지 않는다
 
 
+def test_premarket_falls_back_to_expected_auction_price():
+    # 장 시작 전: 시가·거래량·등락률이 모두 0이고 동시호가 예상체결만 존재
+    client = make_client(
+        {
+            "base_pric": "100000", "cur_prc": "100000", "open_pric": "0",
+            "flu_rt": "0.00", "trde_qty": "0",
+            "exp_cntr_pric": "+103000", "exp_cntr_qty": "12000",
+        }
+    )
+
+    detail = client.get_stock_detail("005930")
+
+    assert detail.is_premarket is True
+    assert detail.price == 103000.0          # 예상체결가를 현재가로 사용
+    assert detail.volume == 12000            # 예상체결량을 거래량으로 사용
+    assert round(detail.change_rate, 2) == 3.0   # 전일 종가 대비 예상 괴리
+    assert round(detail.gap_rate, 2) == 3.0
+
+
+def test_premarket_without_auction_data_yields_zeros_not_garbage():
+    # 08:30 이전에는 예상체결가도 없다 — 없는 신호를 지어내지 않아야 한다
+    client = make_client(
+        {"base_pric": "100000", "cur_prc": "100000", "open_pric": "0",
+         "flu_rt": "0.00", "trde_qty": "0", "exp_cntr_pric": "-0", "exp_cntr_qty": "0"}
+    )
+
+    detail = client.get_stock_detail("005930")
+
+    assert detail.is_premarket is True
+    assert detail.change_rate == 0.0
+    assert detail.gap_rate == 0.0
+
+
+def test_regular_session_data_is_not_treated_as_premarket():
+    client = make_client(
+        {"base_pric": "249500", "cur_prc": "+254000", "open_pric": "+257000",
+         "flu_rt": "+1.80", "trde_qty": "23296044", "exp_cntr_pric": "0"}
+    )
+
+    detail = client.get_stock_detail("005930")
+
+    assert detail.is_premarket is False
+    assert detail.price == 254000.0
+    assert round(detail.gap_rate, 2) == 3.01   # 실제 시가 기준
+
+
 def test_get_current_price_returns_absolute_price():
     client = make_client({"cur_prc": "-179000", "trde_qty": "1000"})
 

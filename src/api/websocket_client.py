@@ -64,6 +64,21 @@ class WebSocketClient:
                 logger.warning("WebSocket 재접속을 %d초 후 시도합니다.", RECONNECT_DELAY_SECONDS)
                 await asyncio.sleep(RECONNECT_DELAY_SECONDS)
 
+    def request_stop(self) -> None:
+        """수신 루프를 깨워 종료시킨다. 이벤트 루프 스레드에서 동기 호출한다.
+
+        `_receive_loop`는 메시지를 기다리며 블로킹되므로 플래그만 내려서는 빠져나오지
+        못한다. 연결을 닫아 ConnectionClosed가 나도록 만들어야 루프가 끝난다.
+        """
+        self._running = False
+        ws = self._ws
+        if ws is not None:
+            try:
+                asyncio.get_running_loop().create_task(ws.close())
+            except RuntimeError:
+                # 실행 중인 루프가 없으면 disconnect()가 정리한다
+                pass
+
     async def disconnect(self) -> None:
         self._running = False
         if self._ws is not None:

@@ -1,52 +1,51 @@
-"""자동매매 시스템 진입점."""
+"""매매 런타임 조립 및 구동.
+
+엔진 단독 실행은 하지 않고 UI에서만 제어하므로, UI 스레드가 이 모듈을 통해
+전체 구성요소를 만들고 돌린다.
+"""
 import asyncio
 import logging
-import signal
-import sys
+from dataclasses import dataclass
 from datetime import time as dt_time
-from pathlib import Path
-
-# 프로젝트 루트를 sys.path에 추가
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from dotenv import load_dotenv
-load_dotenv()
 
 from config.settings import Settings
-from src.logger.logger import setup_logging
+from src.api.account import AccountClient
 from src.api.auth import AuthClient
+from src.api.client import KiwoomClient
 from src.api.market_data import MarketDataClient
 from src.api.order import OrderClient
-from src.api.account import AccountClient
 from src.api.websocket_client import WebSocketClient
-from src.strategy.llm_momentum import LLMMomentumStrategy
-from src.risk.manager import RiskManager
-from src.core.engine import TradingEngine
 from src.core.daily_workflow import DailyWorkflow
-from src.scheduler.scheduler import TimeScheduler
+from src.core.engine import TradingEngine
+from src.data.collector import DataCollector, LargeCapUniverse, NewsClient
+from src.llm.recommender import LLMRecommender
 from src.logger.trade_store import TradeStore
 from src.notification.alert import AlertNotifier
 from src.notification.email import EmailNotifier
-from src.api.client import KiwoomClient
-from src.data.collector import DataCollector, LargeCapUniverse, NewsClient
-from src.llm.recommender import LLMRecommender
-
-# 1호 전략 하루 흐름 트리거 시각 (PRD 5.5-B, 5.11)
-RECOMMEND_TIME = dt_time(8, 45)   # 데이터 수집 → LLM 추천 → 이메일 발송
-BUY_TIME = dt_time(9, 0)          # 자금 산정 → 매수 실행
-FORCE_CLOSE_TIME = dt_time(15, 20)  # 당일 매도 원칙에 따른 미청산 포지션 강제 정리
-REPORT_TIME = dt_time(15, 30)     # 일일/월간 성과 리포트 이메일
+from src.risk.manager import RiskManager
+from src.scheduler.scheduler import TimeScheduler
+from src.strategy.llm_momentum import LLMMomentumStrategy
 
 logger = logging.getLogger(__name__)
 
+# 1호 전략 하루 흐름 트리거 시각 (PRD 5.5-B, 5.11)
+RECOMMEND_TIME = dt_time(8, 45)     # 데이터 수집 → LLM 추천 → 이메일 발송
+BUY_TIME = dt_time(9, 0)            # 자금 산정 → 매수 실행
+FORCE_CLOSE_TIME = dt_time(15, 20)  # 당일 매도 원칙에 따른 미청산 포지션 정리
+REPORT_TIME = dt_time(15, 30)       # 일일/월간 성과 리포트 이메일
 
-async def main() -> None:
-    setup_logging()
-    settings = Settings()
-    settings.validate()
 
-    logger.info("Mode: %s", settings.mode)
+@dataclass
+class Runtime:
+    settings: Settings
+    engine: TradingEngine
+    scheduler: TimeScheduler
+    ws_client: WebSocketClient
+    workflow: DailyWorkflow
 
+
+def build_runtime(settings: Settings) -> Runtime:
+    """설정으로부터 매매 런타임 전체를 조립한다 (아직 시작하지는 않는다)."""
     auth = AuthClient(settings)
     market_data = MarketDataClient(settings, auth)
     order_client = OrderClient(settings, auth)
@@ -63,7 +62,6 @@ async def main() -> None:
     )
     trade_store = TradeStore()
     email = EmailNotifier(settings)
-    notifier = AlertNotifier(email)
 
     engine = TradingEngine(
         auth=auth,
@@ -73,12 +71,10 @@ async def main() -> None:
         strategy=strategy,
         risk_manager=risk_manager,
         trade_store=trade_store,
-        notifier=notifier,
+        notifier=AlertNotifier(email),
         emergency_action=settings.emergency_action,
     )
-
     ws_client.on_data(engine.on_market_data)
-    engine.start()
 
     workflow = DailyWorkflow(
         collector=DataCollector(
@@ -103,19 +99,30 @@ async def main() -> None:
     )
     scheduler.add_job(REPORT_TIME, workflow.send_daily_report, name="daily_report")
 
-    loop = asyncio.get_running_loop()
-
-    def shutdown():
-        logger.info("Shutdown signal received.")
-        scheduler.stop()
-        engine.stop()
-        loop.stop()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, shutdown)
-
-    await asyncio.gather(ws_client.connect(), scheduler.run())
+    return Runtime(
+        settings=settings,
+        engine=engine,
+        scheduler=scheduler,
+        ws_client=ws_client,
+        workflow=workflow,
+    )
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+def request_stop(runtime: Runtime) -> None:
+    """구동 루프가 스스로 빠져나오도록 표시한다 (다른 스레드에서 호출해도 안전)."""
+    runtime.scheduler.stop()
+    runtime.engine.stop()
+    runtime.ws_client.request_stop()
+
+
+async def run(runtime: Runtime) -> None:
+    """엔진을 시작하고 스케줄러·실시간 시세를 함께 구동한다."""
+    runtime.engine.start()
+    try:
+        await asyncio.gather(runtime.ws_client.connect(), runtime.scheduler.run())
+    except asyncio.CancelledError:
+        pass
+    finally:
+        request_stop(runtime)
+        await runtime.ws_client.disconnect()
+        logger.info("매매 런타임이 종료되었습니다.")

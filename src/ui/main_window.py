@@ -10,8 +10,6 @@ from PyQt6.QtGui import QColor, QDoubleValidator, QFont, QIcon, QPalette
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
-    QDialog,
-    QDialogButtonBox,
     QFormLayout,
     QFrame,
     QGroupBox,
@@ -19,7 +17,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
-    QMessageBox,
     QPushButton,
     QRadioButton,
     QScrollArea,
@@ -30,6 +27,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from dotenv import load_dotenv
+
+from config.settings import Settings
+from src.ui.engine_thread import EngineThread
 from src.ui.env_store import load_env, save_env
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,24 @@ COLOR_DANGER = "#ff5555"
 COLOR_WARNING = "#ffb86c"
 COLOR_TEXT = "#cdd6f4"
 COLOR_TEXT_DIM = "#6c7086"
+
+
+def _radio_style(color: str, checked: bool) -> str:
+    """선택 여부가 한눈에 보이도록 인디케이터와 글자 굵기를 함께 지정한다."""
+    if checked:
+        indicator = f"border: 2px solid {color}; background: {color};"
+        text_style = f"color: {color}; font-weight: bold;"
+    else:
+        indicator = f"border: 2px solid {COLOR_TEXT_DIM}; background: transparent;"
+        text_style = f"color: {COLOR_TEXT_DIM}; font-weight: normal;"
+    return f"""
+        QRadioButton {{ {text_style} spacing: 8px; padding: 4px 0; }}
+        QRadioButton::indicator {{
+            width: 14px; height: 14px;
+            border-radius: 9px;   /* (14 + 2*2) / 2 = 9 → 완전한 원 */
+            {indicator}
+        }}
+    """
 
 
 def _section_label(text: str) -> QLabel:
@@ -72,55 +91,6 @@ class _QtLogHandler(logging.Handler):
         self._signal.emit(record.levelno, msg)
 
 
-# ── 실전 계좌 확인 다이얼로그 ────────────────────────────────
-class LiveConfirmDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("실전 매매 시작 확인")
-        self.setFixedWidth(420)
-        self.setStyleSheet(f"background-color: {COLOR_BG}; color: {COLOR_TEXT};")
-
-        layout = QVBoxLayout(self)
-        layout.setSpacing(16)
-
-        warning = QLabel(
-            "⚠️  실전 계좌로 자동매매를 시작합니다.\n\n"
-            "모의투자를 지원하지 않으므로 실제 자금으로 주문이 집행됩니다.\n"
-            "소액으로 시작하고, 초기에는 장중 동작을 직접 확인하세요.\n\n"
-            "계속하려면 아래에 정확히 입력하세요:\n"
-        )
-        warning.setWordWrap(True)
-        warning.setStyleSheet(f"color: {COLOR_WARNING}; font-size: 13px;")
-        layout.addWidget(warning)
-
-        confirm_label = QLabel("YES_I_UNDERSTAND")
-        confirm_label.setStyleSheet(f"color: {COLOR_DANGER}; font-weight: bold; font-size: 14px;")
-        confirm_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(confirm_label)
-
-        self.input = QLineEdit()
-        self.input.setPlaceholderText("위 텍스트를 그대로 입력...")
-        self.input.setStyleSheet(
-            f"background: {COLOR_SURFACE}; border: 1px solid {COLOR_BORDER}; "
-            f"color: {COLOR_TEXT}; padding: 6px; border-radius: 4px;"
-        )
-        layout.addWidget(self.input)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self._check)
-        buttons.rejected.connect(self.reject)
-        buttons.setStyleSheet(f"color: {COLOR_TEXT};")
-        layout.addWidget(buttons)
-
-    def _check(self) -> None:
-        if self.input.text().strip() == "YES_I_UNDERSTAND":
-            self.accept()
-        else:
-            QMessageBox.warning(self, "입력 오류", "텍스트가 일치하지 않습니다.")
-
-
 # ── 메인 윈도우 ──────────────────────────────────────────────
 class MainWindow(QMainWindow):
     _log_signal = pyqtSignal(int, str)
@@ -129,6 +99,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("AutoTrade")
         self.setMinimumSize(560, 780)
+        self._engine_thread: Optional[EngineThread] = None
         self._setup_style()
         self._build_ui()
         self._setup_logging()
@@ -173,11 +144,8 @@ class MainWindow(QMainWindow):
                 font-weight: bold;
             }}
             QRadioButton {{
-                spacing: 6px;
-            }}
-            QRadioButton::indicator {{
-                width: 14px;
-                height: 14px;
+                spacing: 8px;
+                padding: 4px 0;
             }}
             QTextEdit {{
                 background: {COLOR_SURFACE};
@@ -229,8 +197,6 @@ class MainWindow(QMainWindow):
         self._radio_paper = QRadioButton("모의투자 (Paper)")
         self._radio_live = QRadioButton("실전 (Live)")
         self._radio_paper.setChecked(True)
-        self._radio_paper.setStyleSheet(f"color: {COLOR_SUCCESS};")
-        self._radio_live.setStyleSheet(f"color: {COLOR_DANGER};")
 
         self._mode_group = QButtonGroup(self)
         self._mode_group.addButton(self._radio_paper, 0)
@@ -240,6 +206,10 @@ class MainWindow(QMainWindow):
         mode_layout.addWidget(self._radio_paper)
         mode_layout.addWidget(self._radio_live)
         mode_layout.addStretch()
+
+        # 현재 선택된 모드를 글자로도 한 번 더 보여준다
+        self._mode_badge = QLabel()
+        mode_layout.addWidget(self._mode_badge)
         root.addWidget(mode_box)
 
         self._mode_hint = QLabel()
@@ -370,10 +340,12 @@ class MainWindow(QMainWindow):
         self._take_profit.setText(env.get("TAKE_PROFIT_PERCENT", "2"))
         self._stop_loss.setText(env.get("STOP_LOSS_PERCENT", "2"))
         mode = env.get("TRADE_MODE", "paper")
-        # 실전이 저장돼 있어도 확인 다이얼로그 없이 조용히 켜지지 않도록 모의로 시작한다
-        self._radio_paper.setChecked(True)
+        if mode == "live":
+            self._radio_live.setChecked(True)
+        else:
+            self._radio_paper.setChecked(True)
         self._update_mode_hint()
-        logger.info("설정 불러오기 완료 (저장된 mode=%s, 안전을 위해 모의투자로 시작)", mode)
+        logger.info("설정 불러오기 완료 (mode=%s)", mode)
 
     def _save_settings(self) -> None:
         mode = "live" if self._radio_live.isChecked() else "paper"
@@ -400,41 +372,83 @@ class MainWindow(QMainWindow):
         self._statusbar.showMessage("설정이 저장되었습니다.", 3000)
 
     def _update_mode_hint(self) -> None:
-        if self._radio_live.isChecked():
+        is_live = self._radio_live.isChecked()
+
+        # 선택된 쪽만 색이 켜지고 굵어지며, 인디케이터도 채워진다
+        self._radio_paper.setStyleSheet(_radio_style(COLOR_SUCCESS, not is_live))
+        self._radio_live.setStyleSheet(_radio_style(COLOR_DANGER, is_live))
+
+        badge_color = COLOR_DANGER if is_live else COLOR_SUCCESS
+        badge_text = "✔ 실전 선택됨" if is_live else "✔ 모의투자 선택됨"
+        self._mode_badge.setText(badge_text)
+        self._mode_badge.setStyleSheet(
+            f"color: {badge_color}; font-weight: bold; font-size: 12px;"
+        )
+
+        if is_live:
             self._mode_hint.setText("⚠️  실전 계좌입니다. 실제 자금으로 주문이 집행됩니다.")
             self._mode_hint.setStyleSheet(f"color: {COLOR_WARNING}; font-size: 11px;")
         else:
             self._mode_hint.setText("모의투자 서버(mockapi.kiwoom.com)로 연결됩니다. 실제 자금은 쓰이지 않습니다.")
             self._mode_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
 
-    # ── 실전 전환 확인 ───────────────────────────────────────
+    # ── 매매 모드 전환 ───────────────────────────────────────
     def _on_live_toggled(self, checked: bool) -> None:
-        if not checked:
-            self._update_mode_hint()
-            return
-        dlg = LiveConfirmDialog(self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            self._radio_paper.setChecked(True)
-        else:
+        if checked:
             logger.warning("실전 계좌 모드로 전환되었습니다.")
         self._update_mode_hint()
 
     # ── 엔진 시작/정지 ───────────────────────────────────────
     def _start_engine(self) -> None:
-        mode = "live" if self._radio_live.isChecked() else "paper"
-        # 실전은 실제 자금이 움직이므로 시작할 때마다 다시 확인받는다
-        if mode == "live" and LiveConfirmDialog(self).exec() != QDialog.DialogCode.Accepted:
-            logger.info("실전 매매 확인이 취소되어 엔진을 시작하지 않습니다.")
+        if self._engine_thread is not None:
+            logger.warning("엔진이 이미 실행 중입니다.")
             return
 
-        logger.info("엔진 시작 요청 (mode=%s)", mode)
-        self._set_engine_running(True)
-        # TODO: 실제 TradingEngine을 별도 QThread에서 실행
+        # 화면의 현재 입력값을 그대로 반영해 시작한다
+        self._save_settings()
+        load_dotenv(ENV_PATH, override=True)
+
+        try:
+            settings = Settings()
+            settings.validate()
+        except Exception as e:
+            logger.error("설정이 올바르지 않아 엔진을 시작할 수 없습니다: %s", e)
+            self._statusbar.showMessage("설정 오류로 시작하지 못했습니다.", 5000)
+            return
+
+        logger.info("엔진 시작 요청 (mode=%s)", settings.mode)
+        self._btn_start.setEnabled(False)
+
+        thread = EngineThread(settings, parent=self)
+        thread.started_ok.connect(lambda: self._set_engine_running(True))
+        thread.failed.connect(self._on_engine_failed)
+        thread.finished_run.connect(self._on_engine_finished)
+        self._engine_thread = thread
+        thread.start()
 
     def _stop_engine(self) -> None:
+        if self._engine_thread is None:
+            return
         logger.info("엔진 정지 요청")
+        self._btn_stop.setEnabled(False)
+        self._statusbar.showMessage("엔진을 정지하는 중...")
+        self._engine_thread.stop()
+
+    def _on_engine_failed(self, message: str) -> None:
+        logger.error("엔진 오류: %s", message)
+        self._statusbar.showMessage(f"엔진 오류: {message}", 8000)
+
+    def _on_engine_finished(self) -> None:
+        self._engine_thread = None
         self._set_engine_running(False)
-        # TODO: TradingEngine.stop() 호출
+        self._statusbar.showMessage("엔진이 정지되었습니다.", 3000)
+
+    def closeEvent(self, event) -> None:
+        # 창을 닫으면 엔진도 함께 정리한다 (UI가 유일한 제어 지점이므로)
+        if self._engine_thread is not None:
+            logger.info("창 종료 — 엔진을 정지합니다.")
+            self._engine_thread.stop()
+        super().closeEvent(event)
 
     def _set_engine_running(self, running: bool) -> None:
         if running:

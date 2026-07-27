@@ -2,12 +2,13 @@
 .env
 *.env.local
 
-# 로그/데이터
-logs/
-data/
+# 로그/데이터 (루트의 산출물 폴더만 — 앞의 /가 없으면 src/data/ 같은 소스 폴더까지 무시된다)
+/logs/
+/data/
 
 # Python
 __pycache__/
+.pytest_cache/
 *.py[cod]
 *.pyo
 .venv/

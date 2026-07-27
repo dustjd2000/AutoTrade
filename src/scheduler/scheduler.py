@@ -24,7 +24,8 @@ class TimeScheduler:
     병행 실행되는 것을 전제로 한다.
     """
 
-    def __init__(self, poll_interval_seconds: float = 5.0):
+    # 1초 간격이면 트리거 시각 정밀도와 정지 응답성을 함께 확보할 수 있다
+    def __init__(self, poll_interval_seconds: float = 1.0):
         self._jobs: List[ScheduledJob] = []
         self._poll_interval = poll_interval_seconds
         self._running = False
