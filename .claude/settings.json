@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(python -m pip show PyQt6)",
+      "Read(//c/Users/dustjd1990/AppData/Local/Programs/**)",
+      "Bash(rm \"c:/Users/dustjd1990/Desktop/Project/AutoTrade/src/notification/telegram.py\")"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\dustjd1990\\Desktop\\Project\\AutoTrade\\src\\notification"
+    ]
+  }
+}

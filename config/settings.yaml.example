@@ -1,0 +1,22 @@
+# 설정 예시 파일 — 실제 값은 .env 파일이나 환경변수로 관리하세요.
+# 이 파일은 .gitignore에 포함되지 않습니다 (예시 파일).
+
+trade_mode: paper  # paper(모의) | live(실전)
+
+kiwoom:
+  app_key: "YOUR_APP_KEY"
+  app_secret: "YOUR_APP_SECRET"
+  account_number: "YOUR_ACCOUNT_NUMBER"
+
+email:
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 465
+  smtp_user: "YOUR_EMAIL@gmail.com"
+  smtp_password: "YOUR_APP_PASSWORD"
+  email_from: "YOUR_EMAIL@gmail.com"
+  email_to: "RECIPIENT@example.com"
+
+risk:
+  max_position_ratio: 0.10   # 종목당 최대 계좌 비중 10%
+  max_daily_loss_ratio: 0.02 # 일일 최대 손실 비중 2%
+  stop_loss_ratio: 0.05      # 손절 라인 5%

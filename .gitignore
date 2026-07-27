@@ -1,0 +1,26 @@
+# 민감정보
+.env
+*.env.local
+
+# 로그/데이터
+logs/
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Claude Code 로컬 설정 (개인 환경별 권한 설정)
+.claude/settings.local.json
