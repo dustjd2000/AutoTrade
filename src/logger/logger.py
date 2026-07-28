@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 # 날짜 파일을 며칠까지 보관할지 (지난 파일은 자동 삭제)
-DEFAULT_RETENTION_DAYS = 30
+DEFAULT_RETENTION_DAYS = 40
 
 ALL_LOG_DIR = "autotrade"
 ERROR_LOG_DIR = "error"
