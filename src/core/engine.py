@@ -227,16 +227,18 @@ class TradingEngine:
         self._open_tickers.discard(ticker)
         # 제자리에서 지우지 않고 새 딕셔너리로 갈아끼운다 (position_snapshot 참고)
         self._positions = {t: p for t, p in self._positions.items() if t != ticker}
+        # 종목정보를 못 찾은 건은 메일로 알리지 않는다 — 로그로만 남긴다
         logger.warning(
             "보유 목록에서 제외합니다 — %s (상장폐지·거래정지 추정): %s", reason, label
         )
-        self.notify(f"[제외] {label} — {reason}. 매도할 수 없어 보유 목록에서 뺍니다.")
 
     def _note_untradable(self, result: OrderResult) -> bool:
         """매도가 '종목 정보 없음'으로 거부됐으면 보유 목록에서 제외한다.
 
         사전 확인(_screen_positions)이 통과시킨 종목이라도 장중에 거래정지될 수 있다.
         재시도해도 결과가 같으므로 목록에 남겨두면 청산할 때마다 무의미한 주문이 나간다.
+
+        True면 제외 처리를 마쳤다는 뜻 — 호출부는 거부 메일을 보내지 않는다.
         """
         if result.side != OrderSide.SELL:
             return False
@@ -378,8 +380,11 @@ class TradingEngine:
                 logger.error(
                     "강제청산 거부됨 (%s): %s — %s", reason, summary, result.error_message
                 )
-                self.notify(f"[실패] 강제청산 거부: {position.label} — {result.error_message}")
-                self._note_untradable(result)
+                # 종목정보 없음으로 제외한 건은 로그로 충분하다
+                if not self._note_untradable(result):
+                    self.notify(
+                        f"[실패] 강제청산 거부: {position.label} — {result.error_message}"
+                    )
                 continue
 
             self._mark_exited(position.ticker)
@@ -436,8 +441,9 @@ class TradingEngine:
                 result.quantity,
                 result.error_message,
             )
-            self.notify(f"[실패] 주문 거부: {result.label} — {result.error_message}")
-            self._note_untradable(result)
+            # 종목정보 없음으로 제외한 건은 로그로 충분하다
+            if not self._note_untradable(result):
+                self.notify(f"[실패] 주문 거부: {result.label} — {result.error_message}")
             return
 
         # 잔고가 바뀌었으므로 다음 틱에서 다시 읽는다
@@ -476,10 +482,11 @@ class TradingEngine:
             logger.error(
                 "청산 주문 거부됨 (%s): %s — %s", reason.value, summary, result.error_message
             )
-            self.notify(
-                f"[실패] {reason.value} 청산 거부: {position.label} — {result.error_message}"
-            )
-            self._note_untradable(result)
+            # 종목정보 없음으로 제외한 건은 로그로 충분하다
+            if not self._note_untradable(result):
+                self.notify(
+                    f"[실패] {reason.value} 청산 거부: {position.label} — {result.error_message}"
+                )
             return
 
         self._mark_exited(position.ticker)
