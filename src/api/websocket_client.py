@@ -32,8 +32,16 @@ class WebSocketClient:
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._running = False
 
+    @property
+    def is_connected(self) -> bool:
+        """현재 WebSocket 세션이 살아 있는지. 익절/손절 감시 가능 여부와 직결된다."""
+        return self._ws is not None
+
     def subscribe(self, tickers: List[str]) -> None:
-        """관심종목 등록. 연결 중이면 즉시 등록 요청을 보낸다."""
+        """관심종목 등록. 연결 중이면 즉시 등록 요청을 보낸다.
+
+        미연결 상태면 목록에만 담아두고, 재접속 시 connect()가 구독을 복구한다.
+        """
         new = [t for t in tickers if t not in self._tickers]
         self._tickers.extend(new)
         if self._ws is not None and new:
@@ -55,6 +63,13 @@ class WebSocketClient:
                     await self._receive_loop(ws)
             except asyncio.CancelledError:
                 raise
+            except websockets.ConnectionClosed as e:
+                # 연결 종료 자체는 오류가 아니다. 정지 요청으로 닫은 경우는 정상 종료이고,
+                # 장중에 끊긴 경우도 아래 재접속으로 복구되므로 오류 로그에 올리지 않는다.
+                if self._running:
+                    logger.warning("WebSocket 연결이 끊겼습니다: %s", e)
+                else:
+                    logger.info("WebSocket 연결을 종료했습니다.")
             except Exception as e:
                 logger.error("WebSocket error: %s", e)
             finally:

@@ -144,3 +144,49 @@ def test_execute_buys_does_nothing_without_recommendations():
     workflow.execute_buys()
 
     assert order_client.orders == []
+
+
+def test_rejected_buy_is_not_treated_as_ordered():
+    """거부된 주문을 접수로 처리하면 보유하지도 않은 종목을 구독하고 실패를 놓친다.
+
+    실제로 CB 발동 중 주문이 전부 거부됐는데 "Buy order sent"로 남아 원인 파악이 늦어졌다.
+    """
+    recs = [StockRecommendation(ticker="005930", name="삼성전자", reason="a")]
+    workflow, _, order_client, notifications, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+
+    subscribed = []
+    workflow.ws_client = SimpleNamespace(subscribe=subscribed.extend)
+    order_client.send_order = lambda request: OrderResult(
+        order_id="1",
+        ticker=request.ticker,
+        side=request.side,
+        status=OrderStatus.REJECTED,
+        quantity=request.quantity,
+        filled_quantity=0,
+        error_message="CB 발동중입니다. 취소주문만 가능합니다.",
+    )
+
+    workflow.execute_buys()
+
+    assert subscribed == []  # 거부된 종목은 실시간 구독하지 않는다
+    assert any("매수 거부" in n and "CB 발동중" in n for n in notifications)
+    assert any("한 건도 접수되지 않았습니다" in n for n in notifications)
+
+
+def test_buy_skipped_when_one_share_exceeds_allocation():
+    """삼성바이오로직스처럼 1주 가격이 종목당 배정액을 넘으면 건너뛰고 알린다."""
+    recs = [StockRecommendation(ticker="207940", name="삼성바이오로직스", reason="a")]
+    workflow, _, order_client, notifications, strategy = make_workflow(
+        recommendations=recs, cash=2_000_000
+    )
+    strategy.set_recommendations(recs)
+    # 종목당 배정 = 2,000,000 × 1/6 ≈ 333,333원 < 1주 1,000,000원
+    workflow.engine.market_data = SimpleNamespace(
+        get_current_price=lambda t: MarketData(ticker=t, price=1_000_000.0, volume=1)
+    )
+
+    workflow.execute_buys()
+
+    assert order_client.orders == []
+    assert any("배정액을 초과" in n for n in notifications)

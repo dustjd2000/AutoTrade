@@ -35,8 +35,25 @@ class OrderClient:
             try:
                 return self._call_api(request)
             except Exception as e:
-                logger.warning("Order attempt %d failed: %s", attempt, e)
+                logger.warning(
+                    "주문 시도 %d/%d 실패: %s %s x%d주 — %s",
+                    attempt,
+                    MAX_RETRIES,
+                    request.side.value,
+                    request.label,
+                    request.quantity,
+                    e,
+                )
                 if attempt == MAX_RETRIES:
+                    # 여기서 ERROR로 남기지 않으면 거부된 주문이 error 로그에 전혀 남지 않는다
+                    logger.error(
+                        "주문 최종 실패 (%d회 시도): %s %s x%d주 — %s",
+                        MAX_RETRIES,
+                        request.side.value,
+                        request.label,
+                        request.quantity,
+                        e,
+                    )
                     return OrderResult(
                         order_id=str(uuid.uuid4()),
                         ticker=request.ticker,
@@ -44,6 +61,7 @@ class OrderClient:
                         status=OrderStatus.REJECTED,
                         quantity=request.quantity,
                         error_message=str(e),
+                        name=request.name,
                     )
 
     def cancel_order(self, order_id: str, ticker: str, quantity: int = 0) -> bool:
@@ -87,12 +105,19 @@ class OrderClient:
         )
 
     def send_stop_order(self, ticker: str, quantity: int, trigger_price: float, side=OrderSide.SELL):
-        """조건부 예약주문(스탑오더).
+        """조건부 예약주문(스탑오더) — **키움 REST API 미지원 확정 (2026-07-28 확인)**.
 
-        키움 REST API에서 해당 엔드포인트가 확인되지 않아 미구현 상태다. 익절/손절은
-        RiskManager.check_exit 기반 실시간 모니터링으로 처리한다 (PRD 5.5-B).
+        국내주식 주문 엔드포인트는 매수/매도/정정/취소(kt10000~kt10003)뿐이고 조건부·스탑·
+        예약 주문은 존재하지 않는다. 따라서 익절/손절은 RiskManager.check_exit 기반 실시간
+        모니터링으로만 처리된다 — 이 프로그램이 떠 있는 동안에만 동작한다는 뜻이다.
+
+        서버 측 감시가 필요하면 영웅문4 [0624] 자동감시주문을 수동 등록해야 한다 (API 불가).
+        이 메서드는 향후 키움이 조건부 주문 엔드포인트를 추가할 경우를 위한 자리로만 남긴다.
         """
-        raise NotImplementedError("키움 REST API의 스탑오더 지원이 확인되지 않았습니다.")
+        raise NotImplementedError(
+            "키움 REST API는 조건부/스탑 주문을 제공하지 않는다 (2026-07-28 확인). "
+            "서버 측 감시가 필요하면 영웅문4 [0624] 자동감시주문을 수동 등록할 것."
+        )
 
     def _call_api(self, request: OrderRequest) -> OrderResult:
         api_id = BUY_API_ID if request.side == OrderSide.BUY else SELL_API_ID
@@ -121,4 +146,5 @@ class OrderClient:
             side=request.side,
             status=OrderStatus.PENDING,
             quantity=request.quantity,
+            name=request.name,
         )

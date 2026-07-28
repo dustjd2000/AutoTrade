@@ -55,9 +55,10 @@ class RiskManager:
     def check_exit(self, position: Position) -> Optional[ExitReason]:
         """보유 종목이 익절/손절 라인에 도달했는지 확인한다.
 
-        1차 청산 수단은 매수 직후 등록하는 키움 스탑오더(OrderClient.send_stop_order)이며,
-        이 메서드는 스탑오더 실패·미지원 상황을 대비해 전략 신호와 무관하게 항상 동작하는
-        2차 안전장치다 (PRD 5.5-B, 5.6).
+        키움 REST API에 조건부 예약주문(스탑오더) 엔드포인트가 확인되지 않아, 이 실시간
+        모니터링이 **1차이자 사실상 유일한 청산 수단**이다 (PRD 5.5-B, 2026-07-27 확정).
+        즉 익절/손절은 증권사 서버가 아니라 이 프로그램이 떠 있는 동안에만 동작한다 —
+        앱이 꺼지거나 WebSocket이 끊기면 감시 공백이 생긴다.
         """
         if position.avg_price <= 0 or position.quantity <= 0:
             return None

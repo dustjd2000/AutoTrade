@@ -1,11 +1,12 @@
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Optional
 
 from config.settings import Settings
 from src.api.auth import AuthClient
 from src.api.client import KiwoomClient, to_float, to_int
+from src.core.events import format_stock
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +24,16 @@ class Position:
     quantity: int
     avg_price: float
     current_price: float = 0.0
+    name: Optional[str] = None
 
     @property
     def unrealized_pnl(self) -> float:
         return (self.current_price - self.avg_price) * self.quantity
+
+    @property
+    def label(self) -> str:
+        """로그·알림 표기 — `(종목코드)종목명`."""
+        return format_stock(self.ticker, self.name)
 
 
 @dataclass
@@ -98,10 +105,12 @@ class AccountClient:
 
             # 키움은 가격에 등락 방향 부호를 붙여 보낸다(하락 시 '-'). 절댓값을 취하지 않으면
             # 하락 종목의 현재가가 음수가 되어 손절/익절 판정이 완전히 어긋난다.
+            name = _first_present(row, "stk_nm", "prdt_name", "stk_nm_shrt", "hts_kor_isnm")
             positions[ticker] = Position(
                 ticker=ticker,
                 quantity=quantity,
                 avg_price=abs(to_float(_first_present(row, "pur_pric", "pchs_avg_pric", "avg_prc"))),
                 current_price=abs(to_float(_first_present(row, "cur_prc", "prpr", "now_pric"))),
+                name=str(name).strip() if name else None,
             )
         return positions

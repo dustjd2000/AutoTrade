@@ -1,6 +1,7 @@
 from datetime import date
 from typing import List
 
+from src.core.events import format_stock
 from src.llm.recommender import StockRecommendation
 from src.logger.trade_store import DailySummary
 
@@ -11,7 +12,7 @@ def recommendation_email(recommendations: List[StockRecommendation], today: date
 
     lines = [f"{today:%Y-%m-%d} LLM 추천 결과입니다.", ""]
     for i, r in enumerate(recommendations, start=1):
-        lines.extend([f"{i}. {r.name} ({r.ticker})", f"   추천 근거: {r.reason}", ""])
+        lines.extend([f"{i}. {format_stock(r.ticker, r.name)}", f"   추천 근거: {r.reason}", ""])
 
     if len(recommendations) < 3:
         lines.append(

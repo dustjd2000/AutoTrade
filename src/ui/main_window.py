@@ -12,11 +12,13 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QRadioButton,
     QScrollArea,
@@ -30,6 +32,7 @@ from PyQt6.QtWidgets import (
 from dotenv import load_dotenv
 
 from config.settings import Settings
+from src.core.runtime import MANUAL_ACTIONS, ORDER_ACTIONS
 from src.ui.engine_thread import EngineThread
 from src.ui.env_store import load_env, save_env
 
@@ -98,7 +101,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AutoTrade")
-        self.setMinimumSize(560, 780)
+        self.setMinimumSize(560, 640)
+        self.resize(600, 900)
         self._engine_thread: Optional[EngineThread] = None
         self._setup_style()
         self._build_ui()
@@ -164,9 +168,9 @@ class MainWindow(QMainWindow):
 
     # ── UI 조립 ──────────────────────────────────────────────
     def _build_ui(self) -> None:
-        central = QWidget()
-        self.setCentralWidget(central)
-        root = QVBoxLayout(central)
+        # 설정·제어·즉시실행·로그를 모두 세로로 쌓으므로 작은 화면에서도 잘리지 않게 스크롤에 담는다
+        content = QWidget()
+        root = QVBoxLayout(content)
         root.setContentsMargins(20, 16, 20, 16)
         root.setSpacing(12)
 
@@ -296,14 +300,48 @@ class MainWindow(QMainWindow):
         ctrl_layout.addLayout(btn_row)
         root.addWidget(ctrl_box)
 
+        # 즉시 실행 — 스케줄 시각을 기다리지 않고 하루 흐름의 각 단계를 바로 돌린다
+        run_box = QGroupBox("즉시 실행 (시간 무시)")
+        run_layout = QVBoxLayout(run_box)
+        run_layout.setSpacing(8)
+
+        run_hint = QLabel(
+            "스케줄(08:45 / 09:00 / 15:20 / 15:30)과 무관하게 지금 바로 실행합니다. "
+            "엔진이 실행 중일 때만 동작하며, 장 시간 외에는 주문이 거부될 수 있습니다.\n"
+            "일괄 수행은 ①② (추천→매수)만 돌립니다. 매수 후에는 설정된 익절/손절 라인이 자동 감시되며, "
+            "청산(15:20)·리포트(15:30)는 스케줄에 맡깁니다."
+        )
+        run_hint.setWordWrap(True)
+        run_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
+        run_layout.addWidget(run_hint)
+
+        grid = QGridLayout()
+        grid.setSpacing(8)
+        self._action_buttons: dict[str, QPushButton] = {}
+        self._action_accent: dict[str, bool] = {}
+        for index, action in enumerate(("recommend", "buy", "sell_all", "report")):
+            btn = self._make_action_button(action)
+            grid.addWidget(btn, index // 2, index % 2)
+        run_layout.addLayout(grid)
+
+        btn_full = self._make_action_button("full", accent=True)
+        run_layout.addWidget(btn_full)
+        root.addWidget(run_box)
+
         # 로그 뷰
         log_box = QGroupBox("실행 로그")
         log_layout = QVBoxLayout(log_box)
         self._log_view = QTextEdit()
         self._log_view.setReadOnly(True)
-        self._log_view.setMinimumHeight(180)
+        self._log_view.setMinimumHeight(140)
         log_layout.addWidget(self._log_view)
         root.addWidget(log_box)
+
+        scroll = QScrollArea()
+        scroll.setWidget(content)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.setCentralWidget(scroll)
 
         self._statusbar = QStatusBar()
         self.setStatusBar(self._statusbar)
@@ -423,6 +461,8 @@ class MainWindow(QMainWindow):
         thread.started_ok.connect(lambda: self._set_engine_running(True))
         thread.failed.connect(self._on_engine_failed)
         thread.finished_run.connect(self._on_engine_finished)
+        thread.action_started.connect(self._on_action_started)
+        thread.action_finished.connect(self._on_action_finished)
         self._engine_thread = thread
         thread.start()
 
@@ -431,8 +471,96 @@ class MainWindow(QMainWindow):
             return
         logger.info("엔진 정지 요청")
         self._btn_stop.setEnabled(False)
-        self._statusbar.showMessage("엔진을 정지하는 중...")
+        self._set_actions_enabled(False)
+        if self._engine_thread.action_busy:
+            # 주문 시퀀스를 중간에 끊지 않으려고 완료를 기다리므로 잠시 멈춘 것처럼 보인다
+            self._statusbar.showMessage("즉시 실행이 끝날 때까지 기다린 뒤 정지합니다...")
+        else:
+            self._statusbar.showMessage("엔진을 정지하는 중...")
         self._engine_thread.stop()
+
+    # ── 즉시 실행 ────────────────────────────────────────────
+    def _make_action_button(self, action: str, accent: bool = False) -> QPushButton:
+        btn = QPushButton(MANUAL_ACTIONS[action])
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.clicked.connect(lambda _checked=False, a=action: self._run_action(a))
+        self._action_buttons[action] = btn
+        self._action_accent[action] = accent
+        self._style_action_button(action, enabled=False)  # 엔진이 돌기 전에는 잠가둔다
+        return btn
+
+    def _style_action_button(self, action: str, enabled: bool) -> None:
+        btn = self._action_buttons[action]
+        btn.setEnabled(enabled)
+        if not enabled:
+            style = f"background: {COLOR_SURFACE}; color: {COLOR_TEXT_DIM}; border: 1px solid {COLOR_BORDER};"
+        elif self._action_accent[action]:
+            style = f"background: {COLOR_ACCENT}; color: white; border: none;"
+        else:
+            style = f"background: {COLOR_SURFACE}; color: {COLOR_TEXT}; border: 1px solid {COLOR_ACCENT};"
+        btn.setStyleSheet(style)
+
+    def _set_actions_enabled(self, enabled: bool) -> None:
+        for action in self._action_buttons:
+            self._style_action_button(action, enabled)
+
+    def _run_action(self, action: str) -> None:
+        thread = self._engine_thread
+        if thread is None:
+            logger.warning("엔진이 정지 상태입니다. 먼저 시작한 뒤 즉시 실행하세요.")
+            self._statusbar.showMessage("엔진을 먼저 시작하세요.", 4000)
+            return
+
+        # 주문이 나가는 액션은 실수 클릭을 막기 위해 한 번 확인한다
+        if action in ORDER_ACTIONS and not self._confirm_action(action):
+            return
+
+        if thread.run_action(action):
+            self._set_actions_enabled(False)
+            self._statusbar.showMessage(f"즉시 실행 요청: {MANUAL_ACTIONS[action]}")
+
+    def _confirm_action(self, action: str) -> bool:
+        detail = {
+            "buy": "추천 종목을 시장가로 매수합니다.",
+            "sell_all": "보유 중인 모든 포지션을 시장가로 청산합니다.",
+            "full": (
+                "LLM 추천 + 메일 → 시장가 매수를 순서대로 실행합니다.\n"
+                f"매수 후에는 익절 +{self._take_profit.text().strip() or '2'}% / "
+                f"손절 -{self._stop_loss.text().strip() or '2'}% 라인이 자동 감시됩니다 "
+                "(엔진이 켜져 있는 동안만).\n"
+                "청산(15:20)과 최종 리포트(15:30)는 지금 실행하지 않고 예정 시각에 맡깁니다."
+            ),
+        }[action]
+        is_live = self._radio_live.isChecked()
+        head = "⚠️  실전 계좌입니다. 실제 자금으로 주문이 집행됩니다.\n\n" if is_live else ""
+
+        box = QMessageBox(self)
+        box.setWindowTitle("즉시 실행 확인")
+        box.setIcon(QMessageBox.Icon.Warning if is_live else QMessageBox.Icon.Question)
+        box.setText(f"{head}{MANUAL_ACTIONS[action]}\n\n{detail}\n\n지금 실행할까요?")
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        box.setStyleSheet(f"""
+            QLabel {{ color: {COLOR_TEXT}; }}
+            QPushButton {{
+                background: {COLOR_SURFACE}; color: {COLOR_TEXT};
+                border: 1px solid {COLOR_BORDER}; padding: 6px 18px; min-width: 64px;
+            }}
+        """)
+        return box.exec() == QMessageBox.StandardButton.Yes
+
+    def _on_action_started(self, action: str) -> None:
+        self._statusbar.showMessage(f"즉시 실행 중: {MANUAL_ACTIONS.get(action, action)} …")
+
+    def _on_action_finished(self, action: str, ok: bool, message: str) -> None:
+        label = MANUAL_ACTIONS.get(action, action)
+        if ok:
+            logger.info("[즉시 실행] %s — 종료", label)
+            self._statusbar.showMessage(f"즉시 실행 완료: {label}", 5000)
+        else:
+            self._statusbar.showMessage(f"즉시 실행 실패: {label} — {message}", 8000)
+        # 엔진이 계속 돌고 있다면 버튼을 다시 열어준다
+        self._set_actions_enabled(self._engine_thread is not None)
 
     def _on_engine_failed(self, message: str) -> None:
         logger.error("엔진 오류: %s", message)
@@ -446,11 +574,44 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         # 창을 닫으면 엔진도 함께 정리한다 (UI가 유일한 제어 지점이므로)
         if self._engine_thread is not None:
+            # 익절/손절은 이 프로그램이 떠 있는 동안에만 동작한다 (키움 REST 스탑오더 미지원).
+            # 보유 종목을 남긴 채 닫으면 손절이 사라지므로 반드시 확인을 받는다.
+            held = self._engine_thread.open_tickers()
+            if held and not self._confirm_close_with_positions(held):
+                event.ignore()
+                return
             logger.info("창 종료 — 엔진을 정지합니다.")
             self._engine_thread.stop()
         super().closeEvent(event)
 
+    def _confirm_close_with_positions(self, held: list) -> bool:
+        logger.warning("보유 종목이 있는 상태에서 창 종료를 시도했습니다: %s", held)
+        box = QMessageBox(self)
+        box.setWindowTitle("보유 종목이 있습니다")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(
+            f"아직 청산되지 않은 보유 종목이 {len(held)}개 있습니다.\n{', '.join(held)}\n\n"
+            "익절/손절 감시는 이 프로그램이 실행 중일 때만 동작합니다.\n"
+            "지금 닫으면 손절이 걸리지 않고 장 마감 강제청산(15:20)도 실행되지 않아\n"
+            "포지션이 다음 영업일로 넘어갑니다.\n\n"
+            "그래도 종료할까요?"
+        )
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        box.setStyleSheet(f"""
+            QLabel {{ color: {COLOR_TEXT}; }}
+            QPushButton {{
+                background: {COLOR_SURFACE}; color: {COLOR_TEXT};
+                border: 1px solid {COLOR_BORDER}; padding: 6px 18px; min-width: 64px;
+            }}
+        """)
+        confirmed = box.exec() == QMessageBox.StandardButton.Yes
+        if not confirmed:
+            self._statusbar.showMessage("종료를 취소했습니다. 청산 후 종료하세요.", 5000)
+        return confirmed
+
     def _set_engine_running(self, running: bool) -> None:
+        self._set_actions_enabled(running)
         if running:
             self._status_dot.setText("●  실행 중")
             self._status_dot.setStyleSheet(f"color: {COLOR_SUCCESS}; font-weight: bold;")
