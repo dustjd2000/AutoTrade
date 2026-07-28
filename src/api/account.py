@@ -10,11 +10,13 @@ from src.core.events import format_stock
 
 logger = logging.getLogger(__name__)
 
-# 키움 API ID / 경로
-# NOTE: api-id는 커뮤니티 래퍼 기준으로 확인했고, 경로는 /api/dostk/{분류} 규약을 따른다.
-#       응답 필드명은 공식 문서(로그인 필요)로 최종 확인이 필요하다 — PRD 11절 참고.
+# 키움 API ID / 경로 — 실계좌 응답으로 검증했다 (2026-07-28, scripts/check_balance.py).
+#
+# 잔고는 kt00018(계좌평가잔고내역요청)을 쓴다. kt00005(체결잔고요청)도 보유 종목을 돌려주지만
+# 수량 필드가 `cur_qty`, 평단이 `buy_uv`로 이름이 달라 아래 파싱 후보와 맞지 않는다.
+# 그대로 두면 행을 전부 버리고 '보유 없음'으로 읽혀 익절/손절·강제청산이 조용히 멈춘다.
 DEPOSIT_API_ID = "kt00001"   # 예수금상세현황요청
-BALANCE_API_ID = "kt00005"   # 체결잔고요청
+BALANCE_API_ID = "kt00018"   # 계좌평가잔고내역요청
 ACCOUNT_PATH = "/api/dostk/acnt"
 
 
@@ -80,7 +82,7 @@ class AccountClient:
     def get_positions(self) -> Dict[str, Position]:
         """보유 종목 딕셔너리 (종목코드 → Position)."""
         data, _ = self._client.request(
-            ACCOUNT_PATH, BALANCE_API_ID, {"dmst_stex_tp": "KRX"}
+            ACCOUNT_PATH, BALANCE_API_ID, {"qry_tp": "1", "dmst_stex_tp": "KRX"}
         )
 
         rows = None
@@ -99,7 +101,7 @@ class AccountClient:
                 continue
             ticker = str(ticker).strip().lstrip("A")  # 'A005930' 형태 대비
 
-            quantity = to_int(_first_present(row, "rmnd_qty", "hldg_qty", "cntr_qty"))
+            quantity = to_int(_first_present(row, "rmnd_qty", "hldg_qty", "cntr_qty", "cur_qty"))
             if quantity <= 0:
                 continue
 
@@ -109,8 +111,20 @@ class AccountClient:
             positions[ticker] = Position(
                 ticker=ticker,
                 quantity=quantity,
-                avg_price=abs(to_float(_first_present(row, "pur_pric", "pchs_avg_pric", "avg_prc"))),
+                avg_price=abs(
+                    to_float(_first_present(row, "pur_pric", "pchs_avg_pric", "avg_prc", "buy_uv"))
+                ),
                 current_price=abs(to_float(_first_present(row, "cur_prc", "prpr", "now_pric"))),
                 name=str(name).strip() if name else None,
+            )
+
+        # 응답은 왔는데 한 건도 해석하지 못한 상태를 조용히 넘기면 '보유 없음'으로 읽혀
+        # 익절/손절 감시와 강제청산이 아무 일도 하지 않는다 (2026-07-28 실제 발생).
+        if rows and not positions:
+            logger.error(
+                "잔고 %d행을 받았지만 보유 종목을 하나도 해석하지 못했습니다. "
+                "응답 필드명이 바뀌었을 수 있습니다 — scripts/check_balance.py로 확인하세요. 첫 행 키: %s",
+                len(rows),
+                list(rows[0].keys()),
             )
         return positions
