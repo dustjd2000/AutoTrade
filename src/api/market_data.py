@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from config.settings import Settings
 from src.api.auth import AuthClient
@@ -20,6 +20,19 @@ class StockDetail:
     change_rate: float  # 전일 대비 등락률 (%)
     gap_rate: float     # 시가 갭 (%) — 전일 종가 대비 시가(장 전에는 예상체결가)
     is_premarket: bool = False  # 동시호가 예상체결 기준 값인지 여부
+
+
+@dataclass
+class StockMaster:
+    """종목 마스터 최소 정보 — 거래 가능한 종목인지 확인하는 용도.
+
+    OpenAPI+(OCX)의 GetMasterCodeName / GetMasterLastPrice에 해당한다.
+    REST에는 마스터 파일이 없어 ka10001 응답의 종목명·현재가로 대신한다.
+    """
+
+    ticker: str
+    name: Optional[str]
+    price: float
 
 # 키움 API ID / 경로 (경로는 /api/dostk/{분류} 규약)
 STOCK_INFO_API_ID = "ka10001"   # 주식기본정보요청
@@ -56,6 +69,23 @@ class MarketDataClient:
             ticker=ticker,
             price=abs(to_float(price)),
             volume=to_int(_first_present(data, "trde_qty", "acml_vol", "vol")),
+        )
+
+    def get_stock_master(self, ticker: str) -> StockMaster:
+        """종목명과 현재가만 확인하는 최소 조회.
+
+        상장폐지·거래정지 종목은 여기서 KiwoomAPIError('종목 정보가 없습니다')가 나거나
+        종목명·현재가가 빈 값으로 돌아온다. 잔고에는 그대로 실려 오므로 이 조회로만 구분된다.
+        """
+        data, _ = self._client.request(STOCK_INFO_PATH, STOCK_INFO_API_ID, {"stk_cd": ticker})
+
+        name = _first_present(data, "stk_nm", "stk_nm_shrt", "hts_kor_isnm", "prdt_name")
+        # 키움은 등락 방향을 부호로 실어 보내므로 절댓값을 취한다
+        price = abs(to_float(_first_present(data, "cur_prc", "prpr", "now_pric")))
+        return StockMaster(
+            ticker=ticker,
+            name=str(name).strip() if name else None,
+            price=price,
         )
 
     def get_stock_detail(self, ticker: str) -> StockDetail:

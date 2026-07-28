@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Set
 
 from src.api.auth import AuthClient
+from src.api.client import KiwoomAPIError
 from src.api.market_data import MarketDataClient
 from src.api.order import OrderClient
 from src.api.account import AccountClient, Position
@@ -30,6 +31,11 @@ logger = logging.getLogger(__name__)
 # _last_market_data_at은 이미 갱신된 뒤라 시세 끊김 감시에도 걸리지 않는다 —
 # 즉 아무 경고 없이 손절만 멈춘다. TTL 캐시로 호출을 '틱당 1회'에서 'TTL당 1회'로 줄인다.
 POSITION_CACHE_TTL_SECONDS = 5.0
+
+# 상장폐지·거래정지 등으로 키움이 종목 자체를 모르는 상태의 거부 사유.
+# 몇 번을 시도해도 같은 이유로 거부되는데 잔고에는 계속 남아 있어, 걸러내지 않으면
+# 감시 목록과 창 종료 경고, 다음 청산 시도에 매번 다시 올라온다 (2026-07-28 118970/395680).
+UNKNOWN_STOCK_ERROR = "종목 정보가 없"
 
 
 @dataclass(frozen=True)
@@ -105,6 +111,13 @@ class TradingEngine:
         # 청산 주문을 이미 낸 종목. 체결이 잔고에 반영되기 전에 다음 틱이 들어와도
         # 같은 포지션을 두 번 매도하지 않도록 막는다.
         self._exiting: Set[str] = set()
+        # 매도할 수 없다고 판명된 종목 — 보유 목록에서 제외한다 (_screen_positions).
+        # 거래일이 바뀌면 비워서 다시 확인한다(거래정지 해제 대비).
+        self._untradable: Set[str] = set()
+        # 종목 정보 확인을 마친 종목. 같은 종목을 잔고 조회마다 다시 묻지 않기 위한 표시.
+        self._verified: Set[str] = set()
+        # 매도가능수량 0으로 청산을 건너뛴 종목. 틱마다 같은 경고를 반복하지 않기 위한 표시.
+        self._zero_sellable: Set[str] = set()
 
     @property
     def open_tickers(self) -> List[str]:
@@ -141,7 +154,7 @@ class TradingEngine:
             return self._positions
 
         try:
-            self._positions = self.account.get_positions()
+            self._positions = self._screen_positions(self.account.get_positions())
         except Exception:
             if force:
                 raise
@@ -160,6 +173,107 @@ class TradingEngine:
     def _invalidate_positions(self) -> None:
         """다음 조회에서 잔고를 새로 읽도록 캐시를 버린다 (주문 직후 호출)."""
         self._positions_fetched_at = None
+
+    def _screen_positions(self, positions: Dict[str, Position]) -> Dict[str, Position]:
+        """보유 목록을 확정하기 전에 매도할 수 없는 종목을 걸러낸다.
+
+        상장폐지·거래정지 종목은 잔고에 계속 실려 오지만 주문은 '종목 정보가 없습니다'로
+        영구 거부된다. 주문 거부를 기다렸다 빼면 그때까지 감시·창 종료 경고·청산 시도가
+        전부 헛돈다. 종목당 한 번만 확인하고 결과를 기억한다.
+        """
+        for ticker, position in positions.items():
+            if ticker in self._untradable or ticker in self._verified:
+                continue
+            reason = self._untradable_reason(position)
+            self._verified.add(ticker)
+            if reason is not None:
+                self._exclude_untradable(ticker, position.label, reason)
+
+        if not self._untradable:
+            return positions
+        return {t: p for t, p in positions.items() if t not in self._untradable}
+
+    def _untradable_reason(self, position: Position) -> Optional[str]:
+        """종목 정보를 조회해 매도 불가 사유를 돌려준다. 정상이면 None.
+
+        일시적인 조회 실패(유량 제한 등)로 보유 종목을 지우면 청산이 조용히 멈추므로,
+        판단이 서지 않으면 정상으로 취급한다 — 그 경우는 주문 거부(_note_untradable)로 걸린다.
+        """
+        if self.market_data is None:
+            return None
+
+        try:
+            master = self.market_data.get_stock_master(position.ticker)
+        except KiwoomAPIError as e:
+            if UNKNOWN_STOCK_ERROR in str(e):
+                return "종목 정보가 조회되지 않습니다"
+            logger.warning("종목 정보 조회 실패 — 보유 목록에 그대로 둡니다: %s (%s)", position.label, e)
+            return None
+        except Exception as e:
+            logger.warning("종목 정보 조회 실패 — 보유 목록에 그대로 둡니다: %s (%s)", position.label, e)
+            return None
+
+        if not master.name:
+            return "종목명이 조회되지 않습니다"
+        # 마스터 현재가만 0인 경우는 장 전 시간대일 수 있어, 잔고 현재가까지 0일 때만 제외한다.
+        # 정상 종목을 잘못 빼면 청산이 통째로 멈추는 쪽이 더 위험하다.
+        if master.price <= 0 and position.current_price <= 0:
+            return "현재가가 조회되지 않습니다"
+        return None
+
+    def _exclude_untradable(self, ticker: str, label: str, reason: str) -> None:
+        """매도할 수 없는 종목을 보유 목록·감시 대상에서 뺀다."""
+        self._untradable.add(ticker)
+        self._open_tickers.discard(ticker)
+        # 제자리에서 지우지 않고 새 딕셔너리로 갈아끼운다 (position_snapshot 참고)
+        self._positions = {t: p for t, p in self._positions.items() if t != ticker}
+        logger.warning(
+            "보유 목록에서 제외합니다 — %s (상장폐지·거래정지 추정): %s", reason, label
+        )
+        self.notify(f"[제외] {label} — {reason}. 매도할 수 없어 보유 목록에서 뺍니다.")
+
+    def _note_untradable(self, result: OrderResult) -> bool:
+        """매도가 '종목 정보 없음'으로 거부됐으면 보유 목록에서 제외한다.
+
+        사전 확인(_screen_positions)이 통과시킨 종목이라도 장중에 거래정지될 수 있다.
+        재시도해도 결과가 같으므로 목록에 남겨두면 청산할 때마다 무의미한 주문이 나간다.
+        """
+        if result.side != OrderSide.SELL:
+            return False
+        if UNKNOWN_STOCK_ERROR not in (result.error_message or ""):
+            return False
+
+        self._exclude_untradable(result.ticker, result.label, "주문이 종목 정보 없음으로 거부되었습니다")
+        return True
+
+    def _closable_or_skip(self, position: Position, context: str) -> int:
+        """청산 주문에 실을 수량. 0이면 경고를 남기고 건너뛰라는 뜻이다.
+
+        매도가능수량 0은 보통 미체결 매도 주문이 걸려 있다는 뜻이라 잠시 뒤 풀린다.
+        실시간 틱마다 같은 경고가 쌓이지 않도록 종목당 한 번만 남긴다.
+        """
+        quantity = position.closable_quantity
+        if quantity <= 0:
+            if position.ticker not in self._zero_sellable:
+                self._zero_sellable.add(position.ticker)
+                logger.warning(
+                    "청산 건너뜀 (%s): %s — 매도가능수량이 0입니다 (미체결 매도 주문 확인 필요).",
+                    context,
+                    position.label,
+                )
+                self.notify(f"청산 불가 ({context}): {position.label} — 매도가능수량 0")
+            return 0
+
+        self._zero_sellable.discard(position.ticker)
+        if quantity < position.quantity:
+            logger.warning(
+                "매도가능수량 기준으로 청산합니다 (%s): %s 보유 %d주 중 %d주.",
+                context,
+                position.label,
+                position.quantity,
+                quantity,
+            )
+        return quantity
 
     def position_snapshot(self) -> List[PositionView]:
         """보유 종목 사본 (UI 스레드에서 호출 — API를 호출하지 않고 캐시만 읽는다).
@@ -192,6 +306,9 @@ class TradingEngine:
         snapshot = self.account.get_balance_snapshot()
         self.risk_manager.initialize(snapshot)
         self._invalidate_positions()
+        # 거래정지가 풀렸을 수 있으므로 매도 불가 판정을 지우고 오늘 다시 확인한다
+        self._untradable.clear()
+        self._verified.clear()
         logger.info("새 거래일 준비 — 일일 손실 한도와 매매 중지 상태를 초기화했습니다.")
 
     def start(self) -> None:
@@ -199,9 +316,9 @@ class TradingEngine:
         self.auth.ensure_token()
         snapshot = self.account.get_balance_snapshot()
         self.risk_manager.initialize(snapshot)
-        self._positions = snapshot.positions
+        self._positions = self._screen_positions(snapshot.positions)
         self._positions_fetched_at = datetime.now()
-        self._open_tickers = {t for t, p in snapshot.positions.items() if p.quantity > 0}
+        self._open_tickers = {t for t, p in self._positions.items() if p.quantity > 0}
         if self._open_tickers:
             logger.warning(
                 "시작 시점에 이미 보유 중인 종목이 있습니다 (전일 이월 가능): %s",
@@ -242,11 +359,15 @@ class TradingEngine:
         logger.info("강제청산 시작 (%s) — 대상 %d종목", reason, len(holdings))
         for position in holdings:
             summary = _position_summary(position)
+            quantity = self._closable_or_skip(position, reason)
+            if quantity <= 0:
+                continue
+
             order_request = OrderRequest(
                 ticker=position.ticker,
                 side=OrderSide.SELL,
                 order_type=OrderType.MARKET,
-                quantity=position.quantity,
+                quantity=quantity,
                 name=position.name,
             )
             result = self.order_client.send_order(order_request)
@@ -258,6 +379,7 @@ class TradingEngine:
                     "강제청산 거부됨 (%s): %s — %s", reason, summary, result.error_message
                 )
                 self.notify(f"[실패] 강제청산 거부: {position.label} — {result.error_message}")
+                self._note_untradable(result)
                 continue
 
             self._mark_exited(position.ticker)
@@ -315,6 +437,7 @@ class TradingEngine:
                 result.error_message,
             )
             self.notify(f"[실패] 주문 거부: {result.label} — {result.error_message}")
+            self._note_untradable(result)
             return
 
         # 잔고가 바뀌었으므로 다음 틱에서 다시 읽는다
@@ -332,13 +455,17 @@ class TradingEngine:
     def _execute_exit(self, position: Position, reason: ExitReason) -> None:
         """익절/손절 라인 도달 시 전략 신호와 무관하게 즉시 청산한다."""
         summary = _position_summary(position)
+        quantity = self._closable_or_skip(position, reason.value)
+        if quantity <= 0:
+            return
+
         logger.info("청산 조건 도달 (%s): %s", reason.value, summary)
 
         order_request = OrderRequest(
             ticker=position.ticker,
             side=OrderSide.SELL,
             order_type=OrderType.MARKET,
-            quantity=position.quantity,
+            quantity=quantity,
             name=position.name,
         )
         result = self.order_client.send_order(order_request)
@@ -352,6 +479,7 @@ class TradingEngine:
             self.notify(
                 f"[실패] {reason.value} 청산 거부: {position.label} — {result.error_message}"
             )
+            self._note_untradable(result)
             return
 
         self._mark_exited(position.ticker)

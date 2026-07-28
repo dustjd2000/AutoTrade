@@ -87,8 +87,12 @@ class RiskManager:
         return int(max_amount // price)
 
     def get_holding_quantity(self, ticker: str, positions: Dict[str, Position]) -> int:
+        """매도 주문에 실을 수량 — 매도가능수량 기준.
+
+        미결제·미체결 매도 주문이 걸려 있으면 보유수량 전량은 주문이 거부된다.
+        """
         position = positions.get(ticker)
-        return position.quantity if position else 0
+        return position.closable_quantity if position else 0
 
     def _is_daily_loss_exceeded(self) -> bool:
         limit = self._initial_asset * self.max_daily_loss_ratio

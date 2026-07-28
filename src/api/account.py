@@ -27,6 +27,9 @@ class Position:
     avg_price: float
     current_price: float = 0.0
     name: Optional[str] = None
+    # 매도가능수량. 미결제·미체결 매도 주문이 걸려 있으면 보유수량보다 적다.
+    # None은 '응답에서 읽지 못했다'는 뜻이며, 0(정말로 팔 수 없음)과 구분해야 한다.
+    sellable_quantity: Optional[int] = None
 
     @property
     def unrealized_pnl(self) -> float:
@@ -36,6 +39,22 @@ class Position:
     def label(self) -> str:
         """로그·알림 표기 — `(종목코드)종목명`."""
         return format_stock(self.ticker, self.name)
+
+    @property
+    def closable_quantity(self) -> int:
+        """청산 주문에 실을 수량.
+
+        매도가능수량을 읽지 못했으면 보유수량으로 시도한다 — 필드를 못 읽었다는 이유로
+        매도를 포기하면 포지션이 조용히 이월된다. 거부되더라도 시도하는 편이 낫다.
+        """
+        if self.sellable_quantity is None:
+            return self.quantity
+        return min(self.sellable_quantity, self.quantity)
+
+    @property
+    def has_cost_basis(self) -> bool:
+        """매입 이력이 있는 포지션인지 (평단 0이면 이 프로그램이 매수한 것이 아니다)."""
+        return self.avg_price > 0
 
 
 @dataclass
@@ -108,6 +127,11 @@ class AccountClient:
             # 키움은 가격에 등락 방향 부호를 붙여 보낸다(하락 시 '-'). 절댓값을 취하지 않으면
             # 하락 종목의 현재가가 음수가 되어 손절/익절 판정이 완전히 어긋난다.
             name = _first_present(row, "stk_nm", "prdt_name", "stk_nm_shrt", "hts_kor_isnm")
+            # 매도가능수량도 TR마다 이름이 다르다. 못 찾으면 None으로 두어야
+            # closable_quantity가 보유수량으로 폴백한다 (0으로 읽으면 매도가 아예 막힌다).
+            sellable = _first_present(
+                row, "trde_able_qty", "ord_psbl_qty", "sll_able_qty", "sell_able_qty"
+            )
             positions[ticker] = Position(
                 ticker=ticker,
                 quantity=quantity,
@@ -116,6 +140,7 @@ class AccountClient:
                 ),
                 current_price=abs(to_float(_first_present(row, "cur_prc", "prpr", "now_pric"))),
                 name=str(name).strip() if name else None,
+                sellable_quantity=to_int(sellable) if sellable is not None else None,
             )
 
         # 응답은 왔는데 한 건도 해석하지 못한 상태를 조용히 넘기면 '보유 없음'으로 읽혀

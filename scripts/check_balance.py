@@ -20,6 +20,8 @@ from src.api.client import KiwoomClient
 load_dotenv(Path(__file__).parent.parent / ".env", override=True)
 
 ACCOUNT_PATH = "/api/dostk/acnt"
+STOCK_INFO_PATH = "/api/dostk/stkinfo"
+STOCK_INFO_API_ID = "ka10001"  # 주식기본정보요청
 
 # 잔고 계열 TR 후보 — 어느 쪽이 보유 종목을 돌려주는지 확인한다
 CANDIDATES = [
@@ -64,6 +66,39 @@ def describe(api_id: str, label: str, body: dict, client: KiwoomClient) -> None:
         print(f"    첫 행 원문: {json.dumps(row, ensure_ascii=False)[:400]}")
 
 
+def check_tradable(client: KiwoomClient) -> None:
+    """보유 종목마다 ka10001이 응답하는지 확인한다 — 매도 가능 여부 판정의 근거다.
+
+    상장폐지·거래정지 종목은 잔고에는 그대로 실려 오지만 여기서 오류가 나거나
+    종목명·현재가가 비어 돌아온다 (TradingEngine._untradable_reason이 쓰는 조건).
+    """
+    print(f"\n{'=' * 70}\n보유 종목 매도 가능 여부 (ka10001 주식기본정보요청)\n{'=' * 70}")
+
+    data, _ = client.request(
+        ACCOUNT_PATH, "kt00018", {"qry_tp": "1", "dmst_stex_tp": "KRX"}
+    )
+    rows = next((data[k] for k in ROW_LIST_KEYS if isinstance(data.get(k), list)), [])
+    tickers = []
+    for row in rows:
+        code = next((row[k] for k in TICKER_KEYS if k in row), None)
+        if code:
+            tickers.append(str(code).strip().lstrip("A"))
+    if not tickers:
+        print("  보유 종목이 없습니다.")
+        return
+
+    for ticker in tickers:
+        try:
+            info, _ = client.request(STOCK_INFO_PATH, STOCK_INFO_API_ID, {"stk_cd": ticker})
+        except Exception as e:
+            print(f"  {ticker}: [조회 실패] {type(e).__name__}: {e}  ← 매도 불가로 제외 대상")
+            continue
+        name = next((info[k] for k in ("stk_nm", "stk_nm_shrt") if k in info), "")
+        price = info.get("cur_prc", "")
+        verdict = "제외 대상" if not str(name).strip() else "정상"
+        print(f"  {ticker}: 종목명='{name}' 현재가='{price}'  ← {verdict}")
+
+
 def main() -> None:
     settings = Settings()
     settings.validate()
@@ -72,6 +107,7 @@ def main() -> None:
     client = KiwoomClient(settings, AuthClient(settings))
     for api_id, label, body in CANDIDATES:
         describe(api_id, label, body, client)
+    check_tradable(client)
 
 
 if __name__ == "__main__":

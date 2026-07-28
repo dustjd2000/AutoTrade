@@ -99,6 +99,39 @@ def test_get_positions_reads_alternate_quantity_and_price_names():
     assert positions["032640"].avg_price == 14758.0
 
 
+def test_get_positions_reads_the_sellable_quantity():
+    """미체결 매도가 걸려 있으면 매도가능수량이 보유수량보다 적다 — 청산은 이 값으로 나간다."""
+    client = make_client(
+        {
+            "acnt_evlt_remn_indv_tot": [
+                {
+                    "stk_cd": "A032640",
+                    "rmnd_qty": "000000000000022",
+                    "trde_able_qty": "000000000000018",
+                    "pur_pric": "000000000014758",
+                }
+            ]
+        }
+    )
+
+    held = client.get_positions()["032640"]
+
+    assert held.sellable_quantity == 18
+    assert held.closable_quantity == 18
+
+
+def test_sellable_quantity_is_none_when_the_field_is_absent():
+    """0으로 읽으면 매도가 아예 막힌다 — 못 읽은 것과 정말 0인 것은 달라야 한다."""
+    client = make_client(
+        {"stk_cntr_remn": [{"stk_cd": "005930", "rmnd_qty": "10", "pur_pric": "70000"}]}
+    )
+
+    held = client.get_positions()["005930"]
+
+    assert held.sellable_quantity is None
+    assert held.closable_quantity == 10
+
+
 def test_unparsable_rows_are_logged_as_an_error(caplog):
     """행은 왔는데 하나도 해석하지 못하면 '보유 없음'으로 읽혀 청산이 조용히 멈춘다."""
     client = make_client({"acnt_evlt_remn_indv_tot": [{"미지의필드": "1", "값": "2"}]})
