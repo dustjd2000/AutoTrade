@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QDoubleValidator, QFont, QIcon, QPalette
 from PyQt6.QtWidgets import (
     QApplication,
@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -24,6 +25,8 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStatusBar,
+    QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -50,6 +53,13 @@ COLOR_DANGER = "#ff5555"
 COLOR_WARNING = "#ffb86c"
 COLOR_TEXT = "#cdd6f4"
 COLOR_TEXT_DIM = "#6c7086"
+# 국내 관행에 맞춰 수익은 빨강, 손실은 파랑으로 표기한다
+COLOR_PROFIT = "#ff5555"
+COLOR_LOSS = "#6ba3ff"
+
+# 보유 종목 표 갱신 주기 — 캐시값만 읽으므로 API 호출이 발생하지 않는다
+HOLDINGS_REFRESH_MS = 2000
+HOLDINGS_COLUMNS = ("종목", "수량", "평단", "현재가", "손익")
 
 
 def _radio_style(color: str, checked: bool) -> str:
@@ -101,8 +111,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AutoTrade")
-        self.setMinimumSize(560, 640)
-        self.resize(600, 900)
+        # 로그와 보유 종목을 좌우로 나누므로 기본 폭을 넓게 잡는다
+        self.setMinimumSize(880, 640)
+        self.resize(1020, 900)
         self._engine_thread: Optional[EngineThread] = None
         self._setup_style()
         self._build_ui()
@@ -328,14 +339,20 @@ class MainWindow(QMainWindow):
         run_layout.addWidget(btn_full)
         root.addWidget(run_box)
 
-        # 로그 뷰
+        # 하단 — 실행 로그(좌)와 보유 종목(우)을 반반으로 나눈다
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(10)
+
         log_box = QGroupBox("실행 로그")
         log_layout = QVBoxLayout(log_box)
         self._log_view = QTextEdit()
         self._log_view.setReadOnly(True)
         self._log_view.setMinimumHeight(140)
         log_layout.addWidget(self._log_view)
-        root.addWidget(log_box)
+        bottom_row.addWidget(log_box, 1)
+
+        bottom_row.addWidget(self._build_holdings_box(), 1)
+        root.addLayout(bottom_row)
 
         scroll = QScrollArea()
         scroll.setWidget(content)
@@ -366,6 +383,87 @@ class MainWindow(QMainWindow):
         self._log_view.verticalScrollBar().setValue(
             self._log_view.verticalScrollBar().maximum()
         )
+
+    # ── 보유 종목 ────────────────────────────────────────────
+    def _build_holdings_box(self) -> QGroupBox:
+        box = QGroupBox("보유 종목")
+        layout = QVBoxLayout(box)
+        layout.setSpacing(6)
+
+        self._holdings_hint = QLabel()
+        self._holdings_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
+        layout.addWidget(self._holdings_hint)
+
+        table = QTableWidget(0, len(HOLDINGS_COLUMNS))
+        table.setHorizontalHeaderLabels(HOLDINGS_COLUMNS)
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        table.setMinimumHeight(140)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for col in range(1, len(HOLDINGS_COLUMNS)):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        table.setStyleSheet(f"""
+            QTableWidget {{
+                background: {COLOR_BG}; color: {COLOR_TEXT};
+                border: 1px solid {COLOR_BORDER}; gridline-color: {COLOR_BORDER};
+            }}
+            QHeaderView::section {{
+                background: {COLOR_SURFACE}; color: {COLOR_TEXT_DIM};
+                border: none; border-bottom: 1px solid {COLOR_BORDER}; padding: 4px;
+            }}
+        """)
+        self._holdings_view = table
+        layout.addWidget(table)
+
+        # 표 갱신은 엔진 캐시만 읽으므로 API 호출이 발생하지 않는다 (engine.position_snapshot)
+        self._holdings_timer = QTimer(self)
+        self._holdings_timer.setInterval(HOLDINGS_REFRESH_MS)
+        self._holdings_timer.timeout.connect(self._refresh_holdings)
+
+        self._refresh_holdings()
+        return box
+
+    def _refresh_holdings(self) -> None:
+        """매수된 종목만 표에 남긴다 — 매도된 건은 엔진 잔고에서 빠지며 함께 사라진다."""
+        thread = self._engine_thread
+        rows = sorted(thread.position_snapshot(), key=lambda p: p.ticker) if thread else []
+
+        table = self._holdings_view
+        table.setRowCount(len(rows))
+        for row, held in enumerate(rows):
+            color = COLOR_PROFIT if held.pnl > 0 else COLOR_LOSS if held.pnl < 0 else COLOR_TEXT
+            cells = (
+                (held.label, Qt.AlignmentFlag.AlignLeft, COLOR_TEXT),
+                (f"{held.quantity:,}", Qt.AlignmentFlag.AlignRight, COLOR_TEXT),
+                (f"{held.avg_price:,.0f}", Qt.AlignmentFlag.AlignRight, COLOR_TEXT),
+                (f"{held.current_price:,.0f}", Qt.AlignmentFlag.AlignRight, COLOR_TEXT),
+                (
+                    f"{held.pnl:+,.0f} ({held.pnl_percent:+.2f}%)",
+                    Qt.AlignmentFlag.AlignRight,
+                    color,
+                ),
+            )
+            for col, (text, align, cell_color) in enumerate(cells):
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
+                item.setForeground(QColor(cell_color))
+                table.setItem(row, col, item)
+
+        self._holdings_hint.setText(self._holdings_summary(rows))
+
+    def _holdings_summary(self, rows: list) -> str:
+        if self._engine_thread is None:
+            return "엔진을 시작하면 매수된 종목이 표시됩니다."
+        if not rows:
+            return "보유 종목이 없습니다."
+
+        total_pnl = sum(held.pnl for held in rows)
+        cost = sum(held.avg_price * held.quantity for held in rows)
+        percent = f" ({total_pnl / cost * 100:+.2f}%)" if cost > 0 else ""
+        return f"{len(rows)}종목 · 평가손익 {total_pnl:+,.0f}원{percent}"
 
     # ── 설정 저장/불러오기 ───────────────────────────────────
     def _load_settings(self) -> None:
@@ -612,6 +710,13 @@ class MainWindow(QMainWindow):
 
     def _set_engine_running(self, running: bool) -> None:
         self._set_actions_enabled(running)
+        # 정지 상태에서는 읽을 잔고가 없으므로 표 갱신도 멈춘다
+        if running:
+            self._holdings_timer.start()
+        else:
+            self._holdings_timer.stop()
+        self._refresh_holdings()
+
         if running:
             self._status_dot.setText("●  실행 중")
             self._status_dot.setStyleSheet(f"color: {COLOR_SUCCESS}; font-weight: bold;")

@@ -1,4 +1,5 @@
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Set
 
@@ -9,6 +10,7 @@ from src.api.account import AccountClient, Position
 from src.strategy.base import BaseStrategy
 from src.risk.manager import RiskManager
 from src.core.events import (
+    format_stock,
     MarketData,
     Signal,
     OrderSide,
@@ -28,6 +30,31 @@ logger = logging.getLogger(__name__)
 # _last_market_data_at은 이미 갱신된 뒤라 시세 끊김 감시에도 걸리지 않는다 —
 # 즉 아무 경고 없이 손절만 멈춘다. TTL 캐시로 호출을 '틱당 1회'에서 'TTL당 1회'로 줄인다.
 POSITION_CACHE_TTL_SECONDS = 5.0
+
+
+@dataclass(frozen=True)
+class PositionView:
+    """UI 표시용 보유 종목 사본. 엔진 내부 상태와 분리해 다른 스레드에서 읽는다."""
+
+    ticker: str
+    name: Optional[str]
+    quantity: int
+    avg_price: float
+    current_price: float
+
+    @property
+    def label(self) -> str:
+        return format_stock(self.ticker, self.name)
+
+    @property
+    def pnl(self) -> float:
+        return (self.current_price - self.avg_price) * self.quantity
+
+    @property
+    def pnl_percent(self) -> float:
+        if self.avg_price <= 0:
+            return 0.0
+        return (self.current_price - self.avg_price) / self.avg_price * 100
 
 
 def _position_summary(position: Position) -> str:
@@ -133,6 +160,26 @@ class TradingEngine:
     def _invalidate_positions(self) -> None:
         """다음 조회에서 잔고를 새로 읽도록 캐시를 버린다 (주문 직후 호출)."""
         self._positions_fetched_at = None
+
+    def position_snapshot(self) -> List[PositionView]:
+        """보유 종목 사본 (UI 스레드에서 호출 — API를 호출하지 않고 캐시만 읽는다).
+
+        `_positions`는 통째로 갈아끼우기만 하고 제자리에서 고치지 않으므로, 참조를 한 번
+        집어두면 엔진 루프가 그 사이 잔고를 갱신해도 일관된 사본을 만들 수 있다.
+        매도된 종목은 잔고에서 빠지거나 _mark_exited가 지우므로 여기 나타나지 않는다.
+        """
+        positions = self._positions
+        return [
+            PositionView(
+                ticker=p.ticker,
+                name=p.name,
+                quantity=p.quantity,
+                avg_price=p.avg_price,
+                current_price=p.current_price,
+            )
+            for p in positions.values()
+            if p.quantity > 0
+        ]
 
     def reset_for_new_day(self) -> None:
         """장 시작 전 일일 리스크 카운터를 초기화한다.
@@ -321,7 +368,9 @@ class TradingEngine:
         """
         self._open_tickers.discard(ticker)
         self._exiting.add(ticker)
-        self._positions.pop(ticker, None)
+        # 제자리에서 지우지 않고 새 딕셔너리로 갈아끼운다 — UI 스레드가 사본을 만드는
+        # 도중에 크기가 바뀌면 순회가 깨진다 (position_snapshot 참고).
+        self._positions = {t: p for t, p in self._positions.items() if t != ticker}
         self._invalidate_positions()
 
     def _signal_to_order(

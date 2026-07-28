@@ -136,6 +136,40 @@ def test_force_close_ignores_the_cache():
     assert [o.side for o in orders] == [OrderSide.SELL]
 
 
+def test_snapshot_reflects_the_latest_tick_price():
+    """UI 표는 잔고 조회 없이 캐시만 읽으므로, 틱 가격이 반영되어야 한다."""
+    account = CountingAccount(held(avg_price=70000.0))
+    engine, _ = make_engine(account)
+    engine.start()
+
+    engine.on_market_data(MarketData(ticker="005930", price=71400.0, volume=1))
+    [view] = engine.position_snapshot()
+
+    assert view.current_price == 71400.0
+    assert view.pnl == (71400.0 - 70000.0) * 10
+    assert round(view.pnl_percent, 2) == 2.0
+
+
+def test_snapshot_drops_sold_positions():
+    """매도된 건은 목록에서 즉시 사라져야 한다 (잔고 반영 전이라도)."""
+    account = CountingAccount(held())
+    engine, _ = make_engine(account, exit_reason=ExitReason.STOP_LOSS)
+    engine.start()
+    assert len(engine.position_snapshot()) == 1
+
+    engine.on_market_data(MarketData(ticker="005930", price=68000.0, volume=1))
+
+    assert engine.position_snapshot() == []
+
+
+def test_snapshot_excludes_zero_quantity_rows():
+    account = CountingAccount(held(quantity=0))
+    engine, _ = make_engine(account)
+    engine.start()
+
+    assert engine.position_snapshot() == []
+
+
 def test_force_close_surfaces_balance_failure():
     """청산 대상 목록을 못 읽으면 조용히 넘어가선 안 된다."""
     account = CountingAccount(held(), fail_after=1)

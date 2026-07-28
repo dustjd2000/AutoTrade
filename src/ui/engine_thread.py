@@ -64,6 +64,13 @@ class EngineThread(QThread):
             return []
         return runtime.engine.open_tickers
 
+    def position_snapshot(self) -> list:
+        """보유 종목 상세 (UI 표 갱신용 — API 호출 없이 캐시값만 읽는다)."""
+        runtime = self._runtime
+        if runtime is None:
+            return []
+        return runtime.engine.position_snapshot()
+
     # ── 즉시 실행 ────────────────────────────────────────────
     @property
     def action_busy(self) -> bool:
