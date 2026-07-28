@@ -2,13 +2,21 @@
 title AutoTrade
 
 REM 이 배치 파일이 있는 폴더로 이동한다. 경로를 하드코딩하지 않으므로
-REM 폴더를 옮기거나 다른 PC로 복사해도 그대로 동작한다.
+REM 폴더를 옮기거나 다른 PC에 복사해도 그대로 동작한다.
 pushd "%~dp0"
 
-REM 가상환경이 있으면 그쪽 파이썬을, 없으면 시스템 파이썬을 쓴다
+REM 가상환경이 있으면 그 파이썬을, 없으면 시스템 파이썬을 쓴다.
+REM pythonw.exe 는 콘솔 없이 도는 GUI용 파이썬이라 이 검은 창이 남지 않는다.
 set "PY=python"
-if exist ".venv/Scripts/python.exe" set "PY=.venv/Scripts/python.exe"
-if exist "venv/Scripts/python.exe" set "PY=venv/Scripts/python.exe"
+set "PYW=pythonw"
+if exist ".venv\Scripts\python.exe" (
+    set "PY=.venv\Scripts\python.exe"
+    set "PYW=.venv\Scripts\pythonw.exe"
+)
+if exist "venv\Scripts\python.exe" (
+    set "PY=venv\Scripts\python.exe"
+    set "PYW=venv\Scripts\pythonw.exe"
+)
 
 "%PY%" --version > nul 2>&1
 if errorlevel 1 (
@@ -18,24 +26,19 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM pythonw.exe 가 없는 드문 설치에서는 콘솔용 파이썬으로 대신 실행한다
+if not "%PYW%"=="pythonw" if not exist "%PYW%" set "PYW=%PY%"
+
 if not exist ".env" (
-    echo [경고] .env 파일이 없습니다. .env.example 을 복사해 값을 채워주세요.
+    echo [경고] .env 파일이 없습니다. .env.example 을 참고해 값을 채워주세요.
     echo.
-)
-
-echo AutoTrade 를 시작합니다...
-echo.
-
-REM -X utf8 : 한글 로그가 깨지지 않도록 강제
-"%PY%" -X utf8 scripts/run_ui.py
-set "EXITCODE=%ERRORLEVEL%"
-
-popd
-
-REM 비정상 종료 시 원인을 읽을 수 있도록 창을 닫지 않는다
-if not "%EXITCODE%"=="0" (
-    echo.
-    echo [오류] 프로그램이 비정상 종료되었습니다. 종료 코드: %EXITCODE%
     pause
 )
-exit /b %EXITCODE%
+
+REM -X utf8 : 한글 로그가 깨지지 않도록 지정
+REM 별도 프로세스로 띄우고 배치를 끝내므로 이 창은 바로 닫힌다.
+REM 창이 뜨기 전에 죽는 경우는 대화상자와 logs/error/ 로 알린다 (scripts/run_ui.py).
+start "" /D "%~dp0" "%PYW%" -X utf8 scripts\run_ui.py
+
+popd
+exit /b 0

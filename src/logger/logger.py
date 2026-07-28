@@ -7,6 +7,7 @@
 """
 import logging
 import os
+import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -98,9 +99,13 @@ def setup_logging(
     root.setLevel(level)
     fmt = logging.Formatter(fmt=LOG_FORMAT, datefmt=DATE_FORMAT)
 
-    console = logging.StreamHandler()
-    console.setFormatter(fmt)
-    root.addHandler(console)
+    # pythonw.exe로 띄우면 콘솔이 없어 sys.stderr가 None이다. 그 상태로 StreamHandler를
+    # 붙이면 로그를 남길 때마다 실패하므로, 쓸 스트림이 있을 때만 콘솔 출력을 건다.
+    # 화면 표시는 UI의 '실행 로그' 뷰가 대신한다.
+    if sys.stderr is not None:
+        console = logging.StreamHandler()
+        console.setFormatter(fmt)
+        root.addHandler(console)
 
     base = Path(log_dir)
 
