@@ -1,10 +1,18 @@
 import logging
 import uuid
+from typing import List, Optional
 
 from config.settings import Settings
 from src.api.auth import AuthClient
-from src.api.client import KiwoomClient
-from src.core.events import OrderRequest, OrderResult, OrderSide, OrderStatus, OrderType
+from src.api.client import KiwoomClient, to_float, to_int
+from src.core.events import (
+    FillRecord,
+    OrderRequest,
+    OrderResult,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +24,13 @@ SELL_API_ID = "kt10001"    # 주식 매도주문
 CANCEL_API_ID = "kt10003"  # 주식 취소주문
 MODIFY_API_ID = "kt10002"  # 주식 정정주문
 ORDER_PATH = "/api/dostk/ordr"
+
+# 당일 체결내역 조회 — 2026-07-29 실계좌 응답으로 확정 (scripts/check_fills.py)
+FILLS_API_ID = "ka10076"   # 실시간체결요청
+FILLS_PATH = "/api/dostk/acnt"
+FILLS_ROWS_KEY = "cntr"
+# 하루 주문량을 크게 넘는 값 — 연속조회가 끝나지 않을 때 무한 루프를 막는 한도
+MAX_FILL_PAGES = 20
 
 # 매매구분: "0" 보통(지정가), "3" 시장가
 TRADE_TYPE_LIMIT = "0"
@@ -63,6 +78,58 @@ class OrderClient:
                         error_message=str(e),
                         name=request.name,
                     )
+
+    def get_today_fills(self) -> List[FillRecord]:
+        """당일 주문의 체결 결과를 주문번호 단위로 조회한다.
+
+        주문 접수(send_order)는 주문번호만 받고 체결 여부를 모르기 때문에, 이 조회가
+        없으면 매매 기록이 영영 pending으로 남아 일일 리포트가 0건으로 집계된다.
+        체결 통보(WebSocket) 대신 조회를 쓰는 이유는, 프로그램이 꺼져 있던 사이의
+        체결도 나중에 그대로 채울 수 있어야 하기 때문이다.
+        """
+        body = {"stk_cd": "", "qry_tp": "0", "sell_tp": "0", "ord_no": "", "stex_tp": "0"}
+        fills: List[FillRecord] = []
+        cont_yn, next_key = "N", ""
+
+        for _ in range(MAX_FILL_PAGES):
+            data, headers = self._client.request(
+                FILLS_PATH, FILLS_API_ID, body, cont_yn=cont_yn, next_key=next_key
+            )
+            for row in data.get(FILLS_ROWS_KEY) or []:
+                record = self._parse_fill(row)
+                if record is not None:
+                    fills.append(record)
+
+            if headers.get("cont-yn") != "Y":
+                break
+            cont_yn, next_key = "Y", headers.get("next-key", "")
+        else:
+            logger.warning("체결내역 연속조회가 %d페이지를 넘었습니다. 이후 분은 누락됩니다.", MAX_FILL_PAGES)
+
+        logger.info("당일 체결내역 %d건을 조회했습니다.", len(fills))
+        return fills
+
+    @staticmethod
+    def _parse_fill(row: dict) -> Optional[FillRecord]:
+        order_id = str(row.get("ord_no", "")).strip()
+        # ka10076은 종목코드를 접두 없이 주지만, 다른 TR처럼 'A'가 붙어도 깨지지 않게 둔다
+        ticker = str(row.get("stk_cd", "")).strip().lstrip("A")
+        if not order_id or not ticker:
+            return None
+
+        # io_tp_nm은 '+매수' / '-매도' 형태로 온다
+        io_type = str(row.get("io_tp_nm", ""))
+        return FillRecord(
+            order_id=order_id,
+            ticker=ticker,
+            side=OrderSide.SELL if "매도" in io_type else OrderSide.BUY,
+            filled_quantity=to_int(row.get("cntr_qty")),
+            filled_price=to_float(row.get("cntr_pric")),
+            unfilled_quantity=to_int(row.get("oso_qty")),
+            commission=to_float(row.get("tdy_trde_cmsn")),
+            tax=to_float(row.get("tdy_trde_tax")),
+            name=str(row.get("stk_nm", "")).strip() or None,
+        )
 
     def cancel_order(self, order_id: str, ticker: str, quantity: int = 0) -> bool:
         """주문 취소. quantity=0이면 잔량 전부 취소."""
@@ -139,7 +206,7 @@ class OrderClient:
         if not order_no:
             raise ValueError(f"주문 응답에 주문번호가 없습니다: {data}")
 
-        # 접수 성공 = 체결 아님. 실제 체결은 WebSocket 체결 통보로 확정된다.
+        # 접수 성공 = 체결 아님. 실제 체결은 get_today_fills()로 확정한다.
         return OrderResult(
             order_id=str(order_no),
             ticker=request.ticker,

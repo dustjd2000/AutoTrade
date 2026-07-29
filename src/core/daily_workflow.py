@@ -177,13 +177,32 @@ class DailyWorkflow:
     def send_daily_report(self, today: Optional[date] = None) -> None:
         """15:30 — 당일 매매 결과와 월간 누적 실적을 이메일로 발송."""
         today = today or date.today()
+        sync_failed = not self._sync_fills(today)
+
         summary = self.trade_store.daily_summary(today)
-        monthly_pnl = self.trade_store.monthly_realized_pnl(today.year, today.month, up_to=today)
+        monthly = self.trade_store.monthly_summary(today.year, today.month, up_to=today)
 
-        total_asset = self.account.get_balance_snapshot().total_asset
-        base_asset = total_asset - monthly_pnl
-        monthly_return_pct = (monthly_pnl / base_asset * 100) if base_asset else 0.0
+        snapshot = self.account.get_balance_snapshot()
+        # 월초 자산 추정치 = 현재 총자산 - 이번 달 순손익. 수수료·세금도 계좌에서 빠져나간
+        # 금액이므로 실현손익이 아니라 순손익을 되돌려야 월초 시점 자산에 맞는다.
+        monthly.base_asset = snapshot.total_asset - monthly.net_pnl
 
-        subject, body = templates.daily_report_email(summary, monthly_pnl, monthly_return_pct)
-        self.email.send(subject, body)
+        subject, body, html = templates.daily_report_email(
+            summary, monthly, snapshot.cash, sync_failed=sync_failed
+        )
+        self.email.send(subject, body, html)
         logger.info("Daily report email sent for %s", today)
+
+    def _sync_fills(self, today: date) -> bool:
+        """집계 전에 체결 결과를 반영한다. 실패해도 리포트 발송 자체는 막지 않는다.
+
+        주문 접수 기록은 pending으로 남아 있어, 이 동기화를 건너뛰면 당일 매매가
+        한 건도 없는 것처럼 집계된다.
+        """
+        try:
+            fills = self.engine.order_client.get_today_fills()
+            self.trade_store.apply_fills(fills, today)
+            return True
+        except Exception:
+            logger.exception("체결 내역 동기화 실패 — 접수 기준으로 리포트를 발송합니다.")
+            return False
