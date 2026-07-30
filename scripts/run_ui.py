@@ -42,11 +42,18 @@ def main() -> None:
     # 실행 위치와 무관하게 프로젝트 폴더의 logs/ 에 쌓이도록 절대경로를 넘긴다.
     setup_logging(log_dir=str(ROOT / "logs"))
     sys.excepthook = _log_uncaught
-    logger.info("AutoTrade UI 시작 (mode=%s)", os.getenv("TRADE_MODE", "paper"))
+    # --auto-start : 배치파일(예: AutoTrade_AutoStart.bat)로 실행했을 때
+    # 화면의 "▶ 시작" 버튼을 직접 누르지 않아도 엔진이 자동으로 시작되도록 한다.
+    auto_start = "--auto-start" in sys.argv
+    logger.info(
+        "AutoTrade UI 시작 (mode=%s, auto_start=%s)",
+        os.getenv("TRADE_MODE", "paper"),
+        auto_start,
+    )
 
     app = QApplication(sys.argv)
     app.setApplicationName("AutoTrade")
-    window = MainWindow()
+    window = MainWindow(auto_start=auto_start)
     window.show()
     sys.exit(app.exec())
 

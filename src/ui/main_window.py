@@ -125,7 +125,7 @@ class _QtLogHandler(logging.Handler):
 class MainWindow(QMainWindow):
     _log_signal = pyqtSignal(int, str)
 
-    def __init__(self):
+    def __init__(self, auto_start: bool = False):
         super().__init__()
         self.setWindowTitle("AutoTrade")
         # 로그와 보유 종목을 좌우로 나누므로 기본 폭을 넓게 잡는다
@@ -138,6 +138,11 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._setup_logging()
         self._load_settings()
+
+        if auto_start:
+            # 창이 완전히 뜬 뒤 "▶ 시작" 버튼을 누른 것과 동일하게 동작해야 하므로
+            # 생성자 안에서 바로 부르지 않고 이벤트 루프가 돈 다음(0ms 지연)으로 미룬다.
+            QTimer.singleShot(0, self._start_engine)
 
     # ── 스타일 ──────────────────────────────────────────────
     def _setup_style(self) -> None:
