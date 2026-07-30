@@ -260,7 +260,7 @@ def _report_html(
         )
         parts.append(
             f'<tr><td colspan="4" style="{_TD}text-align:left; color:#777777;">수수료·세금</td>'
-            f'<td style="{_TD}color:{COLOR_FLAT};">{_won(-summary.fees)}</td>'
+            f'<td style="{_TD}color:{COLOR_LOSS};">{_won(-summary.fees)}</td>'
             f'<td style="{_TD}"></td></tr>'
         )
         parts.append(
@@ -276,8 +276,8 @@ def _report_html(
             '<ul style="margin:0; padding-left:18px; color:#333333;">',
             f'<li>누적 실현손익: <span style="color:{_color(monthly.realized_pnl)};">'
             f'{_won(monthly.realized_pnl)} ({_percent(monthly.return_pct)})</span></li>',
-            f'<li>누적 수수료·세금: <span style="color:{COLOR_FLAT};">{_won(-monthly.fees)}</span></li>',
-            f'<li><strong>누적 순손익: <span style="color:{_color(monthly.net_pnl)};">'
+            f'<li>누적 수수료·세금: <span style="color:{COLOR_LOSS};">{_won(-monthly.fees)}</span></li>',
+            f'<li style="font-size:16px;"><strong>누적 순손익: <span style="color:{_color(monthly.net_pnl)};">'
             f'{_won(monthly.net_pnl)} ({_percent(monthly.net_return_pct)})</span></strong></li>',
             f"<li>현재 예수금: {_balance(cash)}</li>",
             "</ul>",
