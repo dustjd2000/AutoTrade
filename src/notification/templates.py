@@ -3,7 +3,7 @@ from datetime import date
 from html import escape
 from typing import List, Optional
 
-from src.core.events import format_stock
+from src.core.events import BuyExecution, BuyOutcome, BuyRecord, format_stock
 from src.llm.recommender import StockRecommendation
 from src.logger.trade_store import DailySummary, MonthlySummary, TradeRow
 
@@ -11,6 +11,8 @@ from src.logger.trade_store import DailySummary, MonthlySummary, TradeRow
 COLOR_PROFIT = "#d32f2f"
 COLOR_LOSS = "#1565c0"
 COLOR_FLAT = "#555555"
+# 매수하지 못한 종목(건너뜀·실패) — 손실색(파랑)을 쓰면 손익 표기와 헷갈린다
+COLOR_WARN = "#e65100"
 
 
 def recommendation_email(recommendations: List[StockRecommendation], today: date) -> tuple[str, str]:
@@ -30,6 +32,21 @@ def recommendation_email(recommendations: List[StockRecommendation], today: date
 
     lines.append("※ 이 추천은 사전 유효성 검증(거래정지·상장폐지 등)을 거치지 않았습니다.")
     return subject, "\n".join(lines)
+
+
+def buy_result_email(execution: BuyExecution) -> tuple[str, str, str]:
+    """09:00 매수 실행 직후 결과 이메일 (PRD 5.5-B 5·6단계).
+
+    (제목, 평문, HTML)을 돌려준다 — 일일 리포트와 같은 형식이다.
+    주문 접수 직후라 체결가가 아직 없을 수 있으므로 상태 열로 구분해 표기한다.
+    """
+    ordered = execution.ordered
+    subject = (
+        f"[AutoTrade] {execution.at:%Y-%m-%d} 매수 실행 결과 "
+        f"{len(ordered)}/{len(execution.records)}종목"
+    )
+    notes = _buy_notes(execution)
+    return subject, _buy_text(execution, notes), _buy_html(execution, notes)
 
 
 def daily_report_email(
@@ -223,6 +240,158 @@ def _report_html(
             f'{_won(monthly.net_pnl)} ({_percent(monthly.net_return_pct)})</span></strong></li>',
             f"<li>현재 예수금: {_balance(cash)}</li>",
             "</ul>",
+            '<p style="font-size:12px; color:#777777; margin-top:18px;">'
+            + "<br>".join(escape(n) for n in notes)
+            + "</p>",
+            "</div>",
+        ]
+    )
+    return "".join(parts)
+
+
+# ── 09:00 매수 알림 ─────────────────────────────────────────
+BUY_HEADERS = ("종목", "상태", "수량", "단가", "투입금액", "익절가", "손절가")
+
+BUY_OUTCOME_LABELS = {
+    BuyOutcome.FILLED: "체결",
+    BuyOutcome.PARTIALLY_FILLED: "부분체결",
+    BuyOutcome.ORDERED: "접수",
+    BuyOutcome.SKIPPED: "건너뜀",
+    BuyOutcome.FAILED: "실패",
+}
+
+
+def _buy_notes(execution: BuyExecution) -> List[str]:
+    notes = []
+    if not execution.fills_synced:
+        notes.append("※ 체결 내역 조회에 실패해 접수 기준으로 표기했습니다.")
+    if any(r.outcome == BuyOutcome.ORDERED for r in execution.records):
+        notes.append(
+            "※ '접수'는 주문이 받아들여진 상태로, 체결가는 아직 확정되지 않았습니다 — "
+            "단가는 수량 산정에 쓴 현재가입니다."
+        )
+    notes.extend(
+        [
+            "※ 익절가·손절가는 표의 단가 기준 계산값이며, 실제 판정은 계좌 평단가로 합니다.",
+            "※ 익절/손절 감시는 이 프로그램이 실행 중일 때만 동작합니다 (키움 REST 스탑오더 미지원).",
+            "※ 체결가·수수료·손익은 15:30 리포트에서 확정됩니다.",
+        ]
+    )
+    return notes
+
+
+def _buy_facts(execution: BuyExecution) -> List[tuple[str, str]]:
+    """머리말의 라벨/값 쌍 — 평문과 HTML이 같은 값을 쓰도록 한 곳에서 만든다.
+
+    종목당 배정 비율은 전략 규칙(예수금의 1/6)을 그대로 적지 않고 실제 값에서 계산한다 —
+    규칙이 바뀌어도 메일이 거짓말하지 않는다.
+    """
+    share = (
+        f" (예수금의 {execution.amount_per_stock / execution.cash * 100:.1f}%)"
+        if execution.cash > 0
+        else ""
+    )
+    return [
+        ("예수금", _balance(execution.cash)),
+        ("종목당 배정", f"{_balance(execution.amount_per_stock)}{share}"),
+        ("총 투입금액", _balance(execution.invested)),
+        (
+            "익절 / 손절 라인",
+            f"+{execution.take_profit_percent:.2f}% / -{execution.stop_loss_percent:.2f}%",
+        ),
+    ]
+
+
+def _buy_row_cells(record: BuyRecord, execution: BuyExecution) -> tuple[str, ...]:
+    """표 한 줄의 셀 값 — 매수하지 못한 종목은 금액 칸을 비운다 (사유는 표 아래에 적는다)."""
+    state = BUY_OUTCOME_LABELS[record.outcome]
+    if not record.outcome.is_ordered or record.price <= 0 or record.shares <= 0:
+        return (record.label, state, "-", "-", "-", "-", "-")
+    return (
+        record.label,
+        state,
+        f"{record.shares:,}",
+        f"{record.price:,.0f}",
+        f"{record.amount:,.0f}",
+        f"{record.price * (1 + execution.take_profit_percent / 100):,.0f}",
+        f"{record.price * (1 - execution.stop_loss_percent / 100):,.0f}",
+    )
+
+
+def _buy_text(execution: BuyExecution, notes: List[str]) -> str:
+    lines = [f"{execution.at:%Y-%m-%d %H:%M} 매수 실행 결과", ""]
+
+    facts = _buy_facts(execution)
+    label_width = max(_display_width(label) for label, _ in facts)
+    lines.extend(f"- {_pad(label, label_width, right=False)}  {value}" for label, value in facts)
+    lines.append("")
+
+    if not execution.records:
+        lines.append("매수를 시도한 종목이 없습니다.")
+    else:
+        cells = [BUY_HEADERS] + [_buy_row_cells(r, execution) for r in execution.records]
+        widths = [max(_display_width(row[i]) for row in cells) for i in range(len(BUY_HEADERS))]
+        divider = "-" * (sum(widths) + 2 * (len(widths) - 1))
+
+        for i, row in enumerate(cells):
+            lines.append(
+                "  ".join(_pad(v, w, right=(c > 0)) for c, (v, w) in enumerate(zip(row, widths)))
+            )
+            if i == 0:
+                lines.append(divider)
+        lines.append(divider)
+
+    if execution.not_bought:
+        lines.extend(["", "매수하지 못한 종목"])
+        lines.extend(
+            f"- {r.label} — {r.note or BUY_OUTCOME_LABELS[r.outcome]}"
+            for r in execution.not_bought
+        )
+
+    lines.extend(["", *notes])
+    return "\n".join(lines)
+
+
+def _buy_html(execution: BuyExecution, notes: List[str]) -> str:
+    parts = [
+        '<div style="font-family:-apple-system,\'Malgun Gothic\',sans-serif; font-size:14px; color:#222222;">',
+        f'<h2 style="font-size:17px; margin:0 0 14px;">{execution.at:%Y-%m-%d %H:%M} 매수 실행 결과</h2>',
+        '<ul style="margin:0 0 16px; padding-left:18px; color:#333333;">',
+    ]
+    parts.extend(f"<li>{label}: {value}</li>" for label, value in _buy_facts(execution))
+    parts.append("</ul>")
+
+    if not execution.records:
+        parts.append('<p style="color:#555555;">매수를 시도한 종목이 없습니다.</p>')
+    else:
+        parts.append('<table style="border-collapse:collapse; font-size:14px;">')
+        header = "".join(
+            f'<th style="{_TH}{"text-align:left;" if i == 0 else ""}">{h}</th>'
+            for i, h in enumerate(BUY_HEADERS)
+        )
+        parts.append(f"<tr>{header}</tr>")
+
+        for record in execution.records:
+            row = _buy_row_cells(record, execution)
+            tone = "" if record.outcome.is_ordered else f"color:{COLOR_WARN};"
+            cells = "".join(
+                f'<td style="{_TD}{"text-align:left;" if i == 0 else ""}{tone}">{escape(v)}</td>'
+                for i, v in enumerate(row)
+            )
+            parts.append(f"<tr>{cells}</tr>")
+        parts.append("</table>")
+
+    if execution.not_bought:
+        parts.append('<h3 style="font-size:15px; margin:20px 0 8px;">매수하지 못한 종목</h3>')
+        parts.append(f'<ul style="margin:0; padding-left:18px; color:{COLOR_WARN};">')
+        parts.extend(
+            f"<li>{escape(r.label)} — {escape(r.note or BUY_OUTCOME_LABELS[r.outcome])}</li>"
+            for r in execution.not_bought
+        )
+        parts.append("</ul>")
+
+    parts.extend(
+        [
             '<p style="font-size:12px; color:#777777; margin-top:18px;">'
             + "<br>".join(escape(n) for n in notes)
             + "</p>",

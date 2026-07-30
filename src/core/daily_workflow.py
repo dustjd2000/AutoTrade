@@ -1,10 +1,19 @@
 import logging
-from datetime import date
-from typing import Optional
+from datetime import date, datetime
+from typing import List, Optional
 
 from src.api.account import AccountClient
 from src.core.engine import TradingEngine
-from src.core.events import OrderRequest, OrderSide, OrderStatus, OrderType, format_stock
+from src.core.events import (
+    BuyExecution,
+    BuyOutcome,
+    BuyRecord,
+    OrderRequest,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    format_stock,
+)
 from src.data.collector import DataCollector
 from src.llm.recommender import LLMRecommender
 from src.logger.trade_store import TradeStore
@@ -78,6 +87,7 @@ class DailyWorkflow:
 
         positions = self.account.get_positions()
         ordered, skipped, failed = [], [], []
+        records: List[BuyRecord] = []
         for plan in plans:
             label = format_stock(plan.ticker, plan.name)
             try:
@@ -90,8 +100,18 @@ class DailyWorkflow:
                         f"{price:,.0f}",
                         f"{plan.amount:,.0f}",
                     )
-                    self.engine.notify(f"매수 건너뜀: {label} — 1주 가격이 배정액을 초과")
+                    # 별도 알림 메일은 보내지 않는다 — 매수 실행 결과 메일의
+                    # '매수하지 못한 종목'에 사유까지 그대로 실린다
                     skipped.append(plan.ticker)
+                    records.append(
+                        BuyRecord(
+                            ticker=plan.ticker,
+                            name=plan.name,
+                            outcome=BuyOutcome.SKIPPED,
+                            reference_price=price,
+                            note=f"1주 {price:,.0f}원이 배정액 {plan.amount:,.0f}원을 초과",
+                        )
+                    )
                     continue
 
                 logger.info(
@@ -114,6 +134,16 @@ class DailyWorkflow:
                     logger.warning("매수 거부 (리스크 관리): %s x%d주", label, quantity)
                     self.engine.notify(f"매수 거부 (리스크 관리): {label}")
                     failed.append(plan.ticker)
+                    records.append(
+                        BuyRecord(
+                            ticker=plan.ticker,
+                            name=plan.name,
+                            outcome=BuyOutcome.FAILED,
+                            quantity=quantity,
+                            reference_price=price,
+                            note="리스크 관리 규칙에 걸려 주문하지 않았습니다",
+                        )
+                    )
                     continue
 
                 result = self.engine.order_client.send_order(request)
@@ -127,9 +157,30 @@ class DailyWorkflow:
                     )
                     self.engine.notify(f"[실패] 매수 거부: {label} x{quantity}주 — {result.error_message}")
                     failed.append(plan.ticker)
+                    records.append(
+                        BuyRecord(
+                            ticker=plan.ticker,
+                            name=plan.name,
+                            outcome=BuyOutcome.FAILED,
+                            quantity=quantity,
+                            reference_price=price,
+                            order_id=result.order_id,
+                            note=f"주문 거부: {result.error_message}",
+                        )
+                    )
                     continue
 
                 ordered.append(plan.ticker)
+                records.append(
+                    BuyRecord(
+                        ticker=plan.ticker,
+                        name=plan.name,
+                        outcome=BuyOutcome.ORDERED,
+                        quantity=quantity,
+                        reference_price=price,
+                        order_id=result.order_id,
+                    )
+                )
                 # 체결 통보를 기다리지 않고 감시 대상으로 표시한다 (창 종료 경고의 근거)
                 self.engine.note_open_position(plan.ticker)
                 logger.info(
@@ -143,6 +194,14 @@ class DailyWorkflow:
                 logger.exception("매수 처리 중 오류: %s", label)
                 self.engine.notify(f"[오류] 매수 실패: {label}")
                 failed.append(plan.ticker)
+                records.append(
+                    BuyRecord(
+                        ticker=plan.ticker,
+                        name=plan.name,
+                        outcome=BuyOutcome.FAILED,
+                        note="매수 처리 중 오류가 발생했습니다 (로그 확인 필요)",
+                    )
+                )
 
         logger.info(
             "매수 종료 — 접수 %d종목%s, 건너뜀 %d종목%s, 실패 %d종목%s",
@@ -173,6 +232,68 @@ class DailyWorkflow:
                     "[경고] 실시간 시세 미연결 — 재접속까지 익절/손절 감시가 멈춥니다. "
                     f"대상: {ordered}"
                 )
+
+        # 구독을 먼저 걸고 나서 알린다 — SMTP는 몇 초가 걸리는데, 그동안 익절/손절 감시가
+        # 시작되지 않으면 매수 직후 급락 구간을 놓친다.
+        self._notify_buy_result(cash, plans[0].amount, records)
+
+    def _notify_buy_result(
+        self, cash: float, amount_per_stock: float, records: List[BuyRecord]
+    ) -> None:
+        """09:00 매수 실행 결과를 이메일로 알린다 (PRD 5.5-B 5·6단계).
+
+        렌더링·발송 실패가 매수 흐름을 되돌릴 수는 없으므로 예외를 밖으로 올리지 않는다.
+        """
+        # records를 제자리에서 채우므로 execution을 만들기 전에 먼저 조회한다
+        fills_synced = self._fill_buy_prices(records)
+        execution = BuyExecution(
+            at=datetime.now(),
+            cash=cash,
+            amount_per_stock=amount_per_stock,
+            records=records,
+            take_profit_percent=self.engine.risk_manager.take_profit_ratio * 100,
+            stop_loss_percent=self.engine.risk_manager.stop_loss_ratio * 100,
+            fills_synced=fills_synced,
+        )
+        try:
+            subject, body, html = templates.buy_result_email(execution)
+            self.email.send(subject, body, html)
+            logger.info(
+                "매수 결과 메일 발송 — 접수/체결 %d종목, 투입 %s원",
+                len(execution.ordered),
+                f"{execution.invested:,.0f}",
+            )
+        except Exception:
+            logger.exception("매수 결과 메일 발송 실패")
+
+    def _fill_buy_prices(self, records: List[BuyRecord]) -> bool:
+        """접수된 주문의 체결가를 조회해 기록에 채운다. 조회에 실패하면 False.
+
+        주문 접수 직후라 아직 체결이 잡히지 않는 종목은 '접수' 상태로 남는다 —
+        그 경우 단가는 수량 산정에 쓴 현재가이고, 확정은 15:30 리포트가 한다.
+        """
+        # 거부된 주문도 주문번호를 갖고 있으므로 접수된 건만 조회 대상에 넣는다
+        pending = {r.order_id: r for r in records if r.order_id and r.outcome.is_ordered}
+        if not pending:
+            return True
+
+        try:
+            fills = self.engine.order_client.get_today_fills()
+        except Exception:
+            logger.warning("매수 직후 체결 조회 실패 — 접수 기준으로 알립니다.", exc_info=True)
+            return False
+
+        for fill in fills:
+            record = pending.get(fill.order_id)
+            if record is None or fill.side != OrderSide.BUY or fill.filled_quantity <= 0:
+                continue
+            record.filled_quantity = fill.filled_quantity
+            record.filled_price = fill.filled_price
+            record.name = record.name or fill.name
+            record.outcome = (
+                BuyOutcome.PARTIALLY_FILLED if fill.unfilled_quantity > 0 else BuyOutcome.FILLED
+            )
+        return True
 
     def send_daily_report(self, today: Optional[date] = None) -> None:
         """15:30 — 당일 매매 결과와 월간 누적 실적을 이메일로 발송."""

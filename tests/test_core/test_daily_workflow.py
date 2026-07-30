@@ -20,6 +20,7 @@ class FakeEmail:
 class FakeOrderClient:
     def __init__(self):
         self.orders = []
+        self.fills = []
 
     def send_order(self, request):
         self.orders.append(request)
@@ -32,6 +33,9 @@ class FakeOrderClient:
             filled_quantity=request.quantity,
             filled_price=1000.0,
         )
+
+    def get_today_fills(self):
+        return self.fills
 
 
 def make_workflow(recommendations=None, collected=True, cash=12_000_000):
@@ -54,7 +58,10 @@ def make_workflow(recommendations=None, collected=True, cash=12_000_000):
         risk_manager=SimpleNamespace(
             approve=lambda *a, **kw: True,
             record_order=lambda *a, **kw: None,
+            take_profit_ratio=0.02,
+            stop_loss_ratio=0.02,
         ),
+        note_open_position=lambda ticker: None,
         notify=notifications.append,
     )
 
@@ -244,10 +251,135 @@ def test_rejected_buy_is_not_treated_as_ordered():
     assert any("한 건도 접수되지 않았습니다" in n for n in notifications)
 
 
+def test_note_open_position_is_called_for_ordered_stock():
+    """감시 대상 표시가 빠지면 매수 직후 창을 닫아도 경고가 뜨지 않는다."""
+    recs = [StockRecommendation(ticker="005930", name="삼성전자", reason="a")]
+    workflow, _, _, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    noted = []
+    workflow.engine.note_open_position = noted.append
+
+    workflow.execute_buys()
+
+    assert noted == ["005930"]
+
+
+# ── 09:00 매수 결과 메일 ────────────────────────────────────
+def run_buys(recommendations, cash=12_000_000, fills=None, fill_error=None):
+    workflow, email, order_client, notifications, strategy = make_workflow(
+        recommendations=recommendations, cash=cash
+    )
+    strategy.set_recommendations(recommendations)
+    order_client.fills = fills or []
+    if fill_error:
+        order_client.get_today_fills = lambda: (_ for _ in ()).throw(fill_error)
+
+    workflow.execute_buys()
+    return email, order_client, notifications
+
+
+def test_buy_result_email_lists_ordered_stocks():
+    recs = [
+        StockRecommendation(ticker="005930", name="삼성전자", reason="a"),
+        StockRecommendation(ticker="000660", name="SK하이닉스", reason="b"),
+    ]
+    email, _, _ = run_buys(recs)
+
+    assert len(email.sent) == 1
+    subject, body, html = email.sent[0]
+    assert "매수 실행 결과 2/2종목" in subject
+    assert "(005930)삼성전자" in body and "(000660)SK하이닉스" in body
+    assert "2,000" in body                    # 수량 2000주
+    assert "총 투입금액" in body
+    assert "4,000,000원" in body               # 2종목 × 200만
+    assert "1,020" in body and "980" in body  # ±2% 익절/손절 라인
+    assert "<table" in html
+
+
+def test_buy_result_email_shows_filled_price_when_fill_is_already_known():
+    """시장가 매수는 곧바로 체결되므로, 조회로 잡히면 접수가 아니라 체결가로 알린다."""
+    recs = [StockRecommendation(ticker="005930", name="삼성전자", reason="a")]
+    fills = [
+        FillRecord(
+            order_id="1",
+            ticker="005930",
+            side=OrderSide.BUY,
+            filled_quantity=2000,
+            filled_price=1005.0,
+        )
+    ]
+    email, _, _ = run_buys(recs, fills=fills)
+
+    _, body, _ = email.sent[0]
+    assert "체결" in body
+    assert "1,005" in body
+    assert "접수'는 주문이" not in body  # 접수 상태가 없으면 그 주의 문구도 붙지 않는다
+
+
+def test_buy_result_email_marks_partial_fill():
+    recs = [StockRecommendation(ticker="005930", name="삼성전자", reason="a")]
+    fills = [
+        FillRecord(
+            order_id="1",
+            ticker="005930",
+            side=OrderSide.BUY,
+            filled_quantity=1500,
+            filled_price=1005.0,
+            unfilled_quantity=500,
+        )
+    ]
+    email, _, _ = run_buys(recs, fills=fills)
+
+    _, body, _ = email.sent[0]
+    assert "부분체결" in body
+    assert "1,500" in body
+
+
+def test_buy_result_email_is_sent_even_when_fill_query_fails():
+    recs = [StockRecommendation(ticker="005930", name="삼성전자", reason="a")]
+    email, _, _ = run_buys(recs, fill_error=RuntimeError("조회 실패"))
+
+    _, body, _ = email.sent[0]
+    assert "체결 내역 조회에 실패" in body
+    assert "접수" in body
+    assert "1,000" in body  # 체결가를 모르면 산정 기준가로 표기
+
+
+def test_buy_result_email_lists_stocks_that_were_not_bought():
+    recs = [StockRecommendation(ticker="005930", name="삼성전자", reason="a")]
+    workflow, email, order_client, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    order_client.send_order = lambda request: OrderResult(
+        order_id="1",
+        ticker=request.ticker,
+        side=request.side,
+        status=OrderStatus.REJECTED,
+        quantity=request.quantity,
+        error_message="CB 발동중입니다. 취소주문만 가능합니다.",
+    )
+
+    workflow.execute_buys()
+
+    subject, body, html = email.sent[0]
+    assert "매수 실행 결과 0/1종목" in subject
+    assert "매수하지 못한 종목" in body
+    assert "CB 발동중" in body and "CB 발동중" in html
+
+
+def test_buy_result_email_not_sent_without_buy_plans():
+    """추천이 없어 매수 자체를 시도하지 않았으면 08:45 스킵 알림으로 충분하다."""
+    email, _, _ = run_buys([])
+
+    assert email.sent == []
+
+
 def test_buy_skipped_when_one_share_exceeds_allocation():
-    """삼성바이오로직스처럼 1주 가격이 종목당 배정액을 넘으면 건너뛰고 알린다."""
+    """삼성바이오로직스처럼 1주 가격이 종목당 배정액을 넘으면 주문하지 않는다.
+
+    건너뜀은 별도 알림 메일을 보내지 않고 매수 실행 결과 메일에만 싣는다.
+    """
     recs = [StockRecommendation(ticker="207940", name="삼성바이오로직스", reason="a")]
-    workflow, _, order_client, notifications, strategy = make_workflow(
+    workflow, email, order_client, notifications, strategy = make_workflow(
         recommendations=recs, cash=2_000_000
     )
     strategy.set_recommendations(recs)
@@ -259,4 +391,8 @@ def test_buy_skipped_when_one_share_exceeds_allocation():
     workflow.execute_buys()
 
     assert order_client.orders == []
-    assert any("배정액을 초과" in n for n in notifications)
+    assert not any("건너뜀" in n for n in notifications)
+
+    _, body, _ = email.sent[0]
+    assert "매수하지 못한 종목" in body
+    assert "1주 1,000,000원이 배정액 333,333원을 초과" in body

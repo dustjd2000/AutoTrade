@@ -1,7 +1,7 @@
 from enum import Enum, auto
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 
 class Signal(Enum):
@@ -83,6 +83,81 @@ class OrderResult:
     @property
     def label(self) -> str:
         return format_stock(self.ticker, self.name)
+
+
+class BuyOutcome(Enum):
+    """09:00 매수 한 종목의 결과.
+
+    접수·부분체결·체결은 주문이 살아 있는 상태, 건너뜀·실패는 매수하지 못한 상태다.
+    """
+    ORDERED = "ordered"                     # 접수됨 — 체결 여부는 아직 확인되지 않았다
+    PARTIALLY_FILLED = "partially_filled"
+    FILLED = "filled"
+    SKIPPED = "skipped"                     # 1주 가격이 종목당 배정액을 초과
+    FAILED = "failed"                       # 리스크 관리 거부 / 주문 거부 / 처리 중 오류
+
+    @property
+    def is_ordered(self) -> bool:
+        return self in (BuyOutcome.ORDERED, BuyOutcome.PARTIALLY_FILLED, BuyOutcome.FILLED)
+
+
+@dataclass
+class BuyRecord:
+    """09:00 매수 실행 결과 한 종목 — 매수 알림 메일의 표 한 줄."""
+    ticker: str
+    name: Optional[str] = None
+    outcome: BuyOutcome = BuyOutcome.ORDERED
+    quantity: int = 0                 # 주문 수량
+    reference_price: float = 0.0      # 수량 산정에 쓴 현재가 — 체결가를 모를 때의 표기 기준
+    filled_quantity: int = 0
+    filled_price: Optional[float] = None
+    order_id: Optional[str] = None
+    note: Optional[str] = None        # 건너뜀·실패 사유
+
+    @property
+    def label(self) -> str:
+        return format_stock(self.ticker, self.name)
+
+    @property
+    def price(self) -> float:
+        """표기 단가 — 체결가를 알면 체결가, 아니면 산정 기준가."""
+        return self.filled_price or self.reference_price
+
+    @property
+    def shares(self) -> int:
+        return self.filled_quantity or self.quantity
+
+    @property
+    def amount(self) -> float:
+        return self.price * self.shares
+
+
+@dataclass
+class BuyExecution:
+    """09:00 매수 실행 전체 결과 — 매수 알림 메일의 원본 데이터.
+
+    주문 접수 직후에 만들어지므로 체결가가 비어 있을 수 있다(접수 상태). 체결가·수수료·
+    손익의 최종 확정은 15:30 리포트가 담당한다.
+    """
+    at: datetime
+    cash: float                       # 매수 산정에 쓴 예수금
+    amount_per_stock: float           # 종목당 배정액
+    records: List[BuyRecord] = field(default_factory=list)
+    take_profit_percent: float = 0.0
+    stop_loss_percent: float = 0.0
+    fills_synced: bool = True         # False면 체결 조회에 실패해 접수 기준으로 집계했다
+
+    @property
+    def ordered(self) -> List[BuyRecord]:
+        return [r for r in self.records if r.outcome.is_ordered]
+
+    @property
+    def not_bought(self) -> List[BuyRecord]:
+        return [r for r in self.records if not r.outcome.is_ordered]
+
+    @property
+    def invested(self) -> float:
+        return sum(r.amount for r in self.ordered)
 
 
 @dataclass
