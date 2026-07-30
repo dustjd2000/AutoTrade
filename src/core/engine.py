@@ -20,6 +20,7 @@ from src.core.events import (
     OrderResult,
     OrderStatus,
     ExitReason,
+    UnsellableView,
 )
 from src.logger.trade_store import TradeStore
 from src.notification.alert import AlertNotifier
@@ -118,6 +119,11 @@ class TradingEngine:
         self._verified: Set[str] = set()
         # 매도가능수량 0으로 청산을 건너뛴 종목. 틱마다 같은 경고를 반복하지 않기 위한 표시.
         self._zero_sellable: Set[str] = set()
+        # 오늘 매도하지 못한 종목과 사유 (UI 표시용) — `UnsellableView` 참고
+        self._unsellable: Dict[str, UnsellableView] = {}
+        # 보유 목록이 매도로 비워진 시각. 15:30을 기다리지 않고 결과 리포트를 보내는
+        # 근거가 된다 (runtime.closeout_report_due).
+        self._closed_out_at: Optional[datetime] = None
 
     @property
     def open_tickers(self) -> List[str]:
@@ -128,6 +134,18 @@ class TradingEngine:
     def last_market_data_at(self) -> Optional[datetime]:
         return self._last_market_data_at
 
+    @property
+    def closed_out_at(self) -> Optional[datetime]:
+        """보유 목록이 매도로 비워진 시각. 아직 비지 않았거나 다시 매수했으면 None."""
+        return self._closed_out_at
+
+    def unsellable_snapshot(self) -> List[UnsellableView]:
+        """오늘 매도하지 못한 종목 사본 (UI 스레드에서 호출 — API를 호출하지 않는다).
+
+        `_unsellable`은 통째로 갈아끼우기만 하므로 참조를 한 번 집어두면 일관된 사본이 된다.
+        """
+        return sorted(self._unsellable.values(), key=lambda u: u.ticker)
+
     def note_open_position(self, ticker: str) -> None:
         """매수 주문이 접수되면 즉시 감시 대상으로 표시한다.
 
@@ -135,6 +153,8 @@ class TradingEngine:
         상황에서 경고를 띄울 수 있다.
         """
         self._open_tickers.add(ticker)
+        # 다시 보유가 생겼으므로 '전량 매도 완료'가 아니다 — 리포트 발송 근거를 되돌린다
+        self._closed_out_at = None
         # 새 포지션의 평단가는 잔고를 다시 읽어야 알 수 있다 — 익절/손절 판정의 기준값이다
         self._invalidate_positions()
 
@@ -221,12 +241,32 @@ class TradingEngine:
             return "현재가가 조회되지 않습니다"
         return None
 
+    def _note_unsellable(
+        self, ticker: str, label: str, reason: str, excluded: bool = False
+    ) -> None:
+        """매도하지 못한 사유를 기록한다 (UI '매도 불가' 표시용).
+
+        제자리에서 고치지 않고 새 딕셔너리로 갈아끼운다 — UI 스레드가 사본을 만드는
+        도중에 크기가 바뀌면 순회가 깨진다 (unsellable_snapshot 참고).
+        """
+        entry = UnsellableView(
+            ticker=ticker, label=label, reason=reason, at=datetime.now(), excluded=excluded
+        )
+        self._unsellable = {**self._unsellable, ticker: entry}
+
+    def _clear_unsellable(self, ticker: str) -> None:
+        """매도에 성공했거나 사유가 풀린 종목을 매도 불가 목록에서 뺀다."""
+        if ticker in self._unsellable:
+            self._unsellable = {t: e for t, e in self._unsellable.items() if t != ticker}
+
     def _exclude_untradable(self, ticker: str, label: str, reason: str) -> None:
         """매도할 수 없는 종목을 보유 목록·감시 대상에서 뺀다."""
         self._untradable.add(ticker)
         self._open_tickers.discard(ticker)
         # 제자리에서 지우지 않고 새 딕셔너리로 갈아끼운다 (position_snapshot 참고)
         self._positions = {t: p for t, p in self._positions.items() if t != ticker}
+        # 보유 목록에서는 빠지지만 계좌에는 남아 있다 — UI가 사유와 함께 보여준다
+        self._note_unsellable(ticker, label, reason, excluded=True)
         # 종목정보를 못 찾은 건은 메일로 알리지 않는다 — 로그로만 남긴다
         logger.warning(
             "보유 목록에서 제외합니다 — %s (상장폐지·거래정지 추정): %s", reason, label
@@ -264,9 +304,16 @@ class TradingEngine:
                     position.label,
                 )
                 self.notify(f"청산 불가 ({context}): {position.label} — 매도가능수량 0")
+                self._note_unsellable(
+                    position.ticker,
+                    position.label,
+                    "매도가능수량이 0입니다 (미체결 매도 주문 확인 필요)",
+                )
             return 0
 
         self._zero_sellable.discard(position.ticker)
+        # 수량이 다시 잡혔으므로 직전 사유는 지운다 — 주문이 또 거부되면 다시 기록된다
+        self._clear_unsellable(position.ticker)
         if quantity < position.quantity:
             logger.warning(
                 "매도가능수량 기준으로 청산합니다 (%s): %s 보유 %d주 중 %d주.",
@@ -311,6 +358,11 @@ class TradingEngine:
         # 거래정지가 풀렸을 수 있으므로 매도 불가 판정을 지우고 오늘 다시 확인한다
         self._untradable.clear()
         self._verified.clear()
+        # 매도 불가 목록은 '오늘' 기준이므로 함께 비운다. 경고 억제 표시(_zero_sellable)까지
+        # 지워야 같은 종목이 오늘 다시 걸렸을 때 목록에 올라온다.
+        self._unsellable = {}
+        self._zero_sellable.clear()
+        self._closed_out_at = None
         logger.info("새 거래일 준비 — 일일 손실 한도와 매매 중지 상태를 초기화했습니다.")
 
     def start(self) -> None:
@@ -380,8 +432,13 @@ class TradingEngine:
                 logger.error(
                     "강제청산 거부됨 (%s): %s — %s", reason, summary, result.error_message
                 )
-                # 종목정보 없음으로 제외한 건은 로그로 충분하다
+                # 종목정보 없음으로 제외한 건은 로그로 충분하다 (_exclude_untradable이 사유를 기록한다)
                 if not self._note_untradable(result):
+                    self._note_unsellable(
+                        position.ticker,
+                        position.label,
+                        f"매도 주문 거부: {result.error_message}",
+                    )
                     self.notify(
                         f"[실패] 강제청산 거부: {position.label} — {result.error_message}"
                     )
@@ -482,8 +539,13 @@ class TradingEngine:
             logger.error(
                 "청산 주문 거부됨 (%s): %s — %s", reason.value, summary, result.error_message
             )
-            # 종목정보 없음으로 제외한 건은 로그로 충분하다
+            # 종목정보 없음으로 제외한 건은 로그로 충분하다 (_exclude_untradable이 사유를 기록한다)
             if not self._note_untradable(result):
+                self._note_unsellable(
+                    position.ticker,
+                    position.label,
+                    f"매도 주문 거부: {result.error_message}",
+                )
                 self.notify(
                     f"[실패] {reason.value} 청산 거부: {position.label} — {result.error_message}"
                 )
@@ -507,6 +569,12 @@ class TradingEngine:
         # 도중에 크기가 바뀌면 순회가 깨진다 (position_snapshot 참고).
         self._positions = {t: p for t, p in self._positions.items() if t != ticker}
         self._invalidate_positions()
+        self._clear_unsellable(ticker)
+        # 마지막 보유 종목까지 팔렸으면 그 시각을 남긴다 — 15:30을 기다리지 않고 결과
+        # 리포트를 보내는 근거다 (runtime.watch_closeout_report). 매도할 수 없어 제외된
+        # 종목(_exclude_untradable)은 보유 목록에 없으므로 판단에 끼어들지 않는다.
+        if not self._open_tickers:
+            self._closed_out_at = datetime.now()
 
     def _signal_to_order(
         self, signal: Signal, data: MarketData, positions: Dict[str, Position]

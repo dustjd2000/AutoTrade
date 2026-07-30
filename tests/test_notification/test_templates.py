@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from src.core.events import BuyExecution, BuyOutcome, BuyRecord
+from src.core.events import BuyExecution, BuyOutcome, BuyRecord, UnsellableView
 from src.logger.trade_store import DailySummary, MonthlySummary, TradeRow
 from src.notification import templates
 
@@ -33,12 +33,21 @@ def make_monthly(**overrides):
     return MonthlySummary(**defaults)
 
 
-def render(summary=None, monthly=None, cash=1220735.0, sync_failed=False):
+def render(
+    summary=None,
+    monthly=None,
+    cash=1220735.0,
+    sync_failed=False,
+    closed_out=False,
+    unsellable=None,
+):
     return templates.daily_report_email(
         summary or make_summary(),
         monthly or make_monthly(),
         cash,
         sync_failed=sync_failed,
+        closed_out=closed_out,
+        unsellable=unsellable,
     )
 
 
@@ -143,6 +152,66 @@ def test_sync_failure_and_rejections_are_flagged():
     for body in (text, html):
         assert "체결 내역 조회에 실패" in body
         assert "주문 실패 2건" in body
+
+
+def test_closeout_report_replaces_the_market_close_note():
+    """전량 매도 직후 보낸 리포트에 '마감 직전 집계'라고 적으면 틀린 설명이 된다."""
+    _, text, html = render(closed_out=True)
+
+    for body in (text, html):
+        assert "전부 매도한 직후 집계" in body
+        assert "정규장 마감(15:30) 직전 집계" not in body
+
+
+# ── 매도하지 못한 종목 ──────────────────────────────────────
+UNSELLABLE_AT = datetime(2026, 7, 29, 15, 20, 3)
+
+
+def make_unsellable():
+    """제외된 건(거래정지 추정)과 재시도 여지가 있는 거부 건을 함께 담는다."""
+    return [
+        UnsellableView(
+            ticker="118970",
+            label="(118970)토비스",
+            reason="종목 정보가 조회되지 않습니다",
+            at=UNSELLABLE_AT,
+            excluded=True,
+        ),
+        UnsellableView(
+            ticker="034220",
+            label="(034220)LG디스플레이",
+            reason="매도 주문 거부: CB 발동중입니다. 취소주문만 가능합니다.",
+            at=UNSELLABLE_AT,
+        ),
+    ]
+
+
+def test_unsellable_stocks_are_listed_with_reasons():
+    _, text, html = render(unsellable=make_unsellable())
+
+    for body in (text, html):
+        assert "매도하지 못한 종목" in body
+        assert "(118970)토비스" in body
+        assert "종목 정보가 조회되지 않습니다" in body
+        assert "(034220)LG디스플레이" in body
+        assert "CB 발동중" in body
+
+
+def test_excluded_stock_warns_that_it_is_not_closed_automatically():
+    """제외된 건은 계좌에 남는데 자동 청산되지 않으므로 그 사실까지 적어야 한다."""
+    _, text, html = render(unsellable=make_unsellable())
+
+    for body in (text, html):
+        assert "보유 목록에서 제외되어 자동 청산되지 않습니다" in body
+    # 재시도 여지가 있는 거부 건에는 붙지 않는다
+    assert text.count("자동 청산되지 않습니다") == 1
+
+
+def test_no_unsellable_section_when_everything_was_sold():
+    _, text, html = render()
+
+    assert "매도하지 못한 종목" not in text
+    assert "매도하지 못한 종목" not in html
 
 
 # ── 09:00 매수 결과 ─────────────────────────────────────────

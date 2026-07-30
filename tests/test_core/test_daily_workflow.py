@@ -63,6 +63,7 @@ def make_workflow(recommendations=None, collected=True, cash=12_000_000):
         ),
         note_open_position=lambda ticker: None,
         notify=notifications.append,
+        unsellable_snapshot=lambda: [],
     )
 
     workflow = DailyWorkflow(
@@ -249,6 +250,38 @@ def test_rejected_buy_is_not_treated_as_ordered():
     assert subscribed == []  # 거부된 종목은 실시간 구독하지 않는다
     assert any("매수 거부" in n and "CB 발동중" in n for n in notifications)
     assert any("한 건도 접수되지 않았습니다" in n for n in notifications)
+
+
+def test_buy_resets_final_report_flag():
+    """매수로 보유가 다시 생기면 앞서 보낸 최종 리포트는 더 이상 최종이 아니다."""
+    recs = [StockRecommendation(ticker="005930", name="삼성전자", reason="a")]
+    workflow, _, _, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow._final_report_on = REPORT_DAY
+
+    workflow.execute_buys()
+
+    assert workflow._final_report_on is None
+
+
+def test_rejected_buy_keeps_final_report_flag():
+    """매수가 전부 거부돼 보유가 생기지 않았다면 앞서 보낸 리포트가 여전히 최종이다."""
+    recs = [StockRecommendation(ticker="005930", name="삼성전자", reason="a")]
+    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow._final_report_on = REPORT_DAY
+    order_client.send_order = lambda request: OrderResult(
+        order_id="1",
+        ticker=request.ticker,
+        side=request.side,
+        status=OrderStatus.REJECTED,
+        quantity=request.quantity,
+        error_message="CB 발동중입니다. 취소주문만 가능합니다.",
+    )
+
+    workflow.execute_buys()
+
+    assert workflow._final_report_on == REPORT_DAY
 
 
 def test_note_open_position_is_called_for_ordered_stock():

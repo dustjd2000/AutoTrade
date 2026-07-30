@@ -71,6 +71,13 @@ class EngineThread(QThread):
             return []
         return runtime.engine.position_snapshot()
 
+    def unsellable_snapshot(self) -> list:
+        """오늘 매도하지 못한 종목과 사유 (UI 표 갱신용 — API 호출 없이 캐시값만 읽는다)."""
+        runtime = self._runtime
+        if runtime is None:
+            return []
+        return runtime.engine.unsellable_snapshot()
+
     # ── 즉시 실행 ────────────────────────────────────────────
     @property
     def action_busy(self) -> bool:

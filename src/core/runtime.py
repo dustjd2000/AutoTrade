@@ -44,6 +44,12 @@ MARKET_CLOSE_TIME = dt_time(15, 30)
 QUOTE_CHECK_INTERVAL_SECONDS = 60
 QUOTE_STALE_AFTER_SECONDS = 300
 
+# 전량 매도 완료 감시 — 보유 종목이 다 팔렸으면 15:30을 기다리지 않고 결과 리포트를 보낸다.
+CLOSEOUT_CHECK_INTERVAL_SECONDS = 30
+# 매도 체결이 잔고·체결내역에 반영될 시간. 주문 접수 직후에 집계하면 방금 팔린 종목이
+# '보유중'으로 실린다 (DailyWorkflow._fill_buy_prices의 같은 시차 참고).
+CLOSEOUT_SETTLE_SECONDS = 60
+
 
 def _off_loop(func: Callable[[], None]):
     """오래 걸리는 동기 작업을 별도 스레드로 넘기는 스케줄러 작업으로 감싼다.
@@ -155,7 +161,7 @@ def build_runtime(settings: Settings) -> Runtime:
             lambda: engine.force_close_all_positions(reason="day_end"),
             "force_close_all_positions",
         ),
-        (REPORT_TIME, _off_loop(workflow.send_daily_report), "daily_report"),
+        (REPORT_TIME, _off_loop(workflow.send_final_report), "daily_report"),
     ):
         scheduler.add_job(trigger_time, _trading_days_only(job, name), name=name)
 
@@ -295,6 +301,62 @@ async def watch_quote_stall(
             warned = False
 
 
+def closeout_report_due(
+    runtime: Runtime,
+    now: Optional[datetime] = None,
+    settle_seconds: float = CLOSEOUT_SETTLE_SECONDS,
+) -> bool:
+    """보유 종목 전량 매도가 끝나 결과 리포트를 보낼 때인지.
+
+    청산 주문 접수만으로는 판단하지 않는다 — 체결이 잔고에 반영되기까지 시차가 있어 그
+    사이에 집계하면 방금 판 종목이 '보유중'으로 실린다. 잔고 기준 보유 목록이 비어 있고
+    (engine.open_tickers는 시세 틱마다 잔고로 갱신된다) settle_seconds가 지난 뒤에 True가 된다.
+    """
+    now = now or datetime.now()
+    closed_at = runtime.engine.closed_out_at
+    if closed_at is None:
+        return False
+    # 자정을 넘겨 앱이 켜져 있는 경우 — 어제 청산으로 오늘 리포트를 보내지 않는다
+    if closed_at.date() != now.date():
+        return False
+    # 체결이 아직 잔고에 반영되지 않았거나, 청산 후 다시 매수됐다
+    if runtime.engine.open_tickers:
+        return False
+    return (now - closed_at).total_seconds() >= settle_seconds
+
+
+async def watch_closeout_report(
+    runtime: Runtime,
+    interval_seconds: float = CLOSEOUT_CHECK_INTERVAL_SECONDS,
+) -> None:
+    """보유 종목이 전부 매도되면 15:30을 기다리지 않고 결과 리포트를 보낸다.
+
+    청산 건당 한 번만 시도한다 — 발송에 실패하면 표시가 서지 않으므로 15:30 스케줄이
+    대신 보낸다 (DailyWorkflow.send_final_report). 매수로 보유가 다시 생기면 엔진이
+    청산 시각을 지우므로, 그 보유분을 또 전량 매도하면 새 시각으로 다시 발송한다.
+    """
+    reported_at: Optional[datetime] = None
+    while True:
+        await asyncio.sleep(interval_seconds)
+
+        closed_at = runtime.engine.closed_out_at
+        if closed_at == reported_at or not closeout_report_due(runtime):
+            continue
+
+        reported_at = closed_at
+        logger.info(
+            "보유 종목 전량 매도 완료 (%s) — 15:30을 기다리지 않고 결과 리포트를 발송합니다.",
+            closed_at.strftime("%H:%M:%S"),
+        )
+        try:
+            # SMTP·체결조회가 몇 초 걸리므로 이벤트 루프를 막지 않는다 (_off_loop 참고)
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: runtime.workflow.send_final_report(closed_out=True)
+            )
+        except Exception:
+            logger.exception("전량 매도 결과 리포트 발송 실패 — 15:30 리포트에 맡깁니다.")
+
+
 def adopt_carried_over_positions(runtime: Runtime) -> List[str]:
     """시작 시점에 남아 있는 보유 종목을 오늘의 매도 대상으로 편입한다.
 
@@ -331,12 +393,14 @@ async def run(runtime: Runtime) -> None:
     # 구독은 연결 전에 걸어도 된다 — WebSocketClient.connect가 접속 직후 복구해 보낸다
     adopt_carried_over_positions(runtime)
     watchdog = asyncio.create_task(watch_quote_stall(runtime))
+    closeout_watch = asyncio.create_task(watch_closeout_report(runtime))
     try:
         await asyncio.gather(runtime.ws_client.connect(), runtime.scheduler.run())
     except asyncio.CancelledError:
         pass
     finally:
         watchdog.cancel()
+        closeout_watch.cancel()
         request_stop(runtime)
         await runtime.ws_client.disconnect()
         logger.info("매매 런타임이 종료되었습니다.")

@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 class DailyWorkflow:
     """1호 전략의 하루 흐름을 스케줄러 트리거에 연결한다 (PRD 5.5-B, 5.11).
 
-    08:45 recommend_and_notify → 09:00 execute_buys → 15:30 send_daily_report
+    08:45 recommend_and_notify → 09:00 execute_buys → 15:30 send_final_report
+    (보유 종목이 그 전에 전량 매도되면 15:30을 기다리지 않고 최종 리포트를 보낸다)
     """
 
     def __init__(
@@ -49,6 +50,9 @@ class DailyWorkflow:
         self.trade_store = trade_store
         self.email = email
         self.ws_client = ws_client
+        # 최종 리포트를 보낸 날짜 — 전량 매도 완료와 15:30 스케줄이 중복 발송하지 않도록
+        # 공유하는 표시다 (send_final_report). 매수로 보유가 다시 생기면 초기화된다.
+        self._final_report_on: Optional[date] = None
 
     def recommend_and_notify(self, today: Optional[date] = None) -> None:
         """08:45 — 당일 데이터 수집 → LLM 추천 → 결과를 이메일로 발송."""
@@ -214,6 +218,10 @@ class DailyWorkflow:
         )
         if not ordered:
             self.engine.notify("[경고] 매수가 한 건도 접수되지 않았습니다. 로그를 확인하세요.")
+        else:
+            # 보유가 다시 생겼으므로 앞서 보낸 최종 리포트는 더 이상 최종이 아니다.
+            # 이 보유분이 전량 매도되면 리포트를 다시 보내고, 남으면 15:30이 보낸다.
+            self._final_report_on = None
 
         # 접수된 종목만 실시간 시세를 구독한다 — 익절/손절 감시(RiskManager.check_exit)의 전제.
         # 거부된 종목까지 구독하면 보유하지도 않은 종목의 시세를 받는다.
@@ -295,8 +303,28 @@ class DailyWorkflow:
             )
         return True
 
-    def send_daily_report(self, today: Optional[date] = None) -> None:
-        """15:30 — 당일 매매 결과와 월간 누적 실적을 이메일로 발송."""
+    def send_final_report(self, today: Optional[date] = None, closed_out: bool = False) -> None:
+        """하루의 마지막 결과 리포트 — 어느 트리거가 먼저 오든 한 번만 보낸다.
+
+        15:30 스케줄과 '보유 종목 전량 매도 완료'(runtime.watch_closeout_report)가 이 함수를
+        공유한다. 먼저 온 쪽이 보내고 나머지는 건너뛰므로, 15:30 직전에 청산이 끝나도
+        같은 리포트가 두 번 나가지 않는다.
+
+        발송에 실패하면 표시를 세우지 않는다 — 뒤에 오는 트리거가 다시 시도한다.
+        ④ 즉시 실행 버튼은 사용자가 직접 누른 것이므로 이 표시와 무관하게 항상 발송한다.
+        """
+        today = today or date.today()
+        trigger = "전량 매도 완료" if closed_out else "15:30 스케줄"
+        if self._final_report_on == today:
+            logger.info("최종 리포트를 이미 발송했습니다 — %s 발송을 건너뜁니다.", trigger)
+            return
+
+        logger.info("최종 리포트 발송 (%s)", trigger)
+        self.send_daily_report(today, closed_out=closed_out)
+        self._final_report_on = today
+
+    def send_daily_report(self, today: Optional[date] = None, closed_out: bool = False) -> None:
+        """당일 매매 결과와 월간 누적 실적을 이메일로 발송 (15:30 또는 전량 매도 직후)."""
         today = today or date.today()
         sync_failed = not self._sync_fills(today)
 
@@ -309,7 +337,13 @@ class DailyWorkflow:
         monthly.base_asset = snapshot.total_asset - monthly.net_pnl
 
         subject, body, html = templates.daily_report_email(
-            summary, monthly, snapshot.cash, sync_failed=sync_failed
+            summary,
+            monthly,
+            snapshot.cash,
+            sync_failed=sync_failed,
+            closed_out=closed_out,
+            # 메일만 보는 상황에서도 매도되지 않고 남은 종목을 알 수 있어야 한다
+            unsellable=self.engine.unsellable_snapshot(),
         )
         self.email.send(subject, body, html)
         logger.info("Daily report email sent for %s", today)

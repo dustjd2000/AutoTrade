@@ -160,6 +160,22 @@ class BuyExecution:
         return sum(r.amount for r in self.ordered)
 
 
+@dataclass(frozen=True)
+class UnsellableView:
+    """매도하지 못한 종목과 그 사유 — UI '매도 불가' 표와 리포트 메일이 함께 쓴다.
+
+    사유를 로그로만 남기면 보유 목록에서 제외된 종목(TradingEngine._exclude_untradable)이
+    보유 종목 표에서도 사라져 계좌에 남아 있다는 사실이 아무 데도 보이지 않는다.
+    """
+
+    ticker: str
+    label: str
+    reason: str
+    at: datetime
+    # True면 보유 목록에서 제외된 건 (상장폐지·거래정지 추정) — 자동 청산되지 않는다
+    excluded: bool = False
+
+
 @dataclass
 class FillRecord:
     """당일 체결내역 조회(ka10076) 한 건.

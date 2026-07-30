@@ -60,6 +60,23 @@ COLOR_LOSS = "#6ba3ff"
 # 보유 종목 표 갱신 주기 — 캐시값만 읽으므로 API 호출이 발생하지 않는다
 HOLDINGS_REFRESH_MS = 2000
 HOLDINGS_COLUMNS = ("종목", "수량", "평단", "현재가", "손익")
+# 매도하지 못한 종목 — 보유 목록에서 제외된 건은 보유 종목 표에 나타나지 않으므로
+# 사유와 함께 따로 보여준다 (engine.UnsellableView)
+UNSELLABLE_COLUMNS = ("종목", "사유", "시각")
+
+
+def _table_style() -> str:
+    """보유 종목·매도 불가 표가 같은 모양을 갖도록 스타일을 한 곳에서 만든다."""
+    return f"""
+        QTableWidget {{
+            background: {COLOR_BG}; color: {COLOR_TEXT};
+            border: 1px solid {COLOR_BORDER}; gridline-color: {COLOR_BORDER};
+        }}
+        QHeaderView::section {{
+            background: {COLOR_SURFACE}; color: {COLOR_TEXT_DIM};
+            border: none; border-bottom: 1px solid {COLOR_BORDER}; padding: 4px;
+        }}
+    """
 
 
 def _radio_style(color: str, checked: bool) -> str:
@@ -115,6 +132,8 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(880, 640)
         self.resize(1020, 900)
         self._engine_thread: Optional[EngineThread] = None
+        # 보유 종목 표를 만드는 도중에도 갱신이 한 번 돌기 때문에, 아직 없을 수 있음을 표시해 둔다
+        self._unsellable_box: Optional[QGroupBox] = None
         self._setup_style()
         self._build_ui()
         self._setup_logging()
@@ -354,6 +373,9 @@ class MainWindow(QMainWindow):
         bottom_row.addWidget(self._build_holdings_box(), 1)
         root.addLayout(bottom_row)
 
+        # 사유가 길어 좌우로 나누지 않고 전체 폭을 쓴다 (매도 불가 건이 있을 때만 보인다)
+        root.addWidget(self._build_unsellable_box())
+
         scroll = QScrollArea()
         scroll.setWidget(content)
         scroll.setWidgetResizable(True)
@@ -405,16 +427,7 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for col in range(1, len(HOLDINGS_COLUMNS)):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
-        table.setStyleSheet(f"""
-            QTableWidget {{
-                background: {COLOR_BG}; color: {COLOR_TEXT};
-                border: 1px solid {COLOR_BORDER}; gridline-color: {COLOR_BORDER};
-            }}
-            QHeaderView::section {{
-                background: {COLOR_SURFACE}; color: {COLOR_TEXT_DIM};
-                border: none; border-bottom: 1px solid {COLOR_BORDER}; padding: 4px;
-            }}
-        """)
+        table.setStyleSheet(_table_style())
         self._holdings_view = table
         layout.addWidget(table)
 
@@ -453,6 +466,9 @@ class MainWindow(QMainWindow):
                 table.setItem(row, col, item)
 
         self._holdings_hint.setText(self._holdings_summary(rows))
+        # 표를 만드는 도중에 불리는 첫 호출에서는 매도 불가 표가 아직 없다
+        if self._unsellable_box is not None:
+            self._refresh_unsellable()
 
     def _holdings_summary(self, rows: list) -> str:
         if self._engine_thread is None:
@@ -464,6 +480,75 @@ class MainWindow(QMainWindow):
         cost = sum(held.avg_price * held.quantity for held in rows)
         percent = f" ({total_pnl / cost * 100:+.2f}%)" if cost > 0 else ""
         return f"{len(rows)}종목 · 평가손익 {total_pnl:+,.0f}원{percent}"
+
+    # ── 매도 불가 ────────────────────────────────────────────
+    def _build_unsellable_box(self) -> QGroupBox:
+        """오늘 매도하지 못한 종목과 사유. 해당 건이 없으면 박스 자체를 숨긴다."""
+        box = QGroupBox("매도 불가")
+        layout = QVBoxLayout(box)
+        layout.setSpacing(6)
+
+        self._unsellable_hint = QLabel()
+        self._unsellable_hint.setStyleSheet(f"color: {COLOR_WARNING}; font-size: 11px;")
+        self._unsellable_hint.setWordWrap(True)
+        layout.addWidget(self._unsellable_hint)
+
+        table = QTableWidget(0, len(UNSELLABLE_COLUMNS))
+        table.setHorizontalHeaderLabels(UNSELLABLE_COLUMNS)
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        table.setMinimumHeight(90)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)  # 사유가 가장 길다
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        table.setStyleSheet(_table_style())
+        self._unsellable_view = table
+        layout.addWidget(table)
+
+        # 갱신은 _refresh_holdings가 이어서 호출한다 (같은 타이머·같은 캐시)
+        self._unsellable_box = box
+        self._refresh_unsellable()
+        return box
+
+    def _refresh_unsellable(self) -> None:
+        """매도하지 못한 종목을 사유와 함께 표에 채운다 (engine.unsellable_snapshot)."""
+        thread = self._engine_thread
+        rows = thread.unsellable_snapshot() if thread else []
+
+        # 평소에는 숨겨두고 매도 불가 건이 생겼을 때만 드러낸다
+        self._unsellable_box.setVisible(bool(rows))
+        if not rows:
+            return
+
+        table = self._unsellable_view
+        table.setRowCount(len(rows))
+        for row, item in enumerate(rows):
+            # 제외된 건은 계좌에 남는데 보유 종목 표에서는 사라지므로 더 강한 색으로 표기한다
+            reason_color = COLOR_DANGER if item.excluded else COLOR_WARNING
+            cells = (
+                (item.label, Qt.AlignmentFlag.AlignLeft, COLOR_TEXT),
+                (item.reason, Qt.AlignmentFlag.AlignLeft, reason_color),
+                (f"{item.at:%H:%M:%S}", Qt.AlignmentFlag.AlignRight, COLOR_TEXT_DIM),
+            )
+            for col, (text, align, cell_color) in enumerate(cells):
+                cell = QTableWidgetItem(text)
+                cell.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
+                cell.setForeground(QColor(cell_color))
+                table.setItem(row, col, cell)
+
+        self._unsellable_hint.setText(self._unsellable_summary(rows))
+
+    def _unsellable_summary(self, rows: list) -> str:
+        excluded = sum(1 for item in rows if item.excluded)
+        if not excluded:
+            return f"오늘 매도하지 못한 종목 {len(rows)}건 — 다음 청산 시각에 다시 시도합니다."
+        return (
+            f"오늘 매도하지 못한 종목 {len(rows)}건 (보유 목록 제외 {excluded}건) — "
+            "제외된 종목은 계좌에 남아 있으며 자동 청산되지 않습니다. 직접 확인하세요."
+        )
 
     # ── 설정 저장/불러오기 ───────────────────────────────────
     def _load_settings(self) -> None:

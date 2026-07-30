@@ -3,7 +3,13 @@ from datetime import date
 from html import escape
 from typing import List, Optional
 
-from src.core.events import BuyExecution, BuyOutcome, BuyRecord, format_stock
+from src.core.events import (
+    BuyExecution,
+    BuyOutcome,
+    BuyRecord,
+    UnsellableView,
+    format_stock,
+)
 from src.llm.recommender import StockRecommendation
 from src.logger.trade_store import DailySummary, MonthlySummary, TradeRow
 
@@ -54,23 +60,37 @@ def daily_report_email(
     monthly: MonthlySummary,
     cash: float,
     sync_failed: bool = False,
+    closed_out: bool = False,
+    unsellable: Optional[List[UnsellableView]] = None,
 ) -> tuple[str, str, str]:
     """15:30 일일/월간 성과 리포트 이메일 (PRD 5.11).
 
     (제목, 평문, HTML)을 돌려준다 — 표는 HTML로 보이고, 평문만 읽는 클라이언트에서도
     같은 내용이 등폭 정렬로 남는다.
+
+    closed_out=True는 보유 종목을 전부 매도해 15:30보다 앞서 보내는 최종 리포트다.
+    unsellable은 오늘 매도하지 못한 종목 — 메일만 보는 상황에서도 잔여 포지션을 알 수 있어야 한다.
     """
     subject = f"[AutoTrade] {summary.day:%Y-%m-%d} 매매 결과 리포트"
-    notes = _report_notes(summary, sync_failed)
+    notes = _report_notes(summary, sync_failed, closed_out)
+    unsellable = unsellable or []
     return (
         subject,
-        _report_text(summary, monthly, cash, notes),
-        _report_html(summary, monthly, cash, notes),
+        _report_text(summary, monthly, cash, notes, unsellable),
+        _report_html(summary, monthly, cash, notes, unsellable),
     )
 
 
-def _report_notes(summary: DailySummary, sync_failed: bool) -> List[str]:
-    notes = ["※ 정규장 마감(15:30) 직전 집계이므로 마감 체결분이 반영되지 않았을 수 있습니다."]
+def _report_notes(
+    summary: DailySummary, sync_failed: bool, closed_out: bool = False
+) -> List[str]:
+    if closed_out:
+        notes = [
+            "※ 보유 종목을 전부 매도한 직후 집계입니다 "
+            "(추가 매수가 없으면 15:30 정기 리포트는 생략됩니다)."
+        ]
+    else:
+        notes = ["※ 정규장 마감(15:30) 직전 집계이므로 마감 체결분이 반영되지 않았을 수 있습니다."]
     if sync_failed:
         notes.insert(
             0,
@@ -117,6 +137,15 @@ def _row_cells(trade: TradeRow) -> tuple[str, str, str, str, str, str]:
 
 HEADERS = ("종목", "매수가", "매도가", "수량", "손익", "수익률")
 
+UNSELLABLE_HEADING = "매도하지 못한 종목"
+
+
+def _unsellable_reason(item: UnsellableView) -> str:
+    """표기할 사유 — 제외된 건은 자동 청산되지 않는다는 사실을 함께 적는다."""
+    if item.excluded:
+        return f"{item.reason} · 보유 목록에서 제외되어 자동 청산되지 않습니다"
+    return item.reason
+
 
 # ── 평문 ────────────────────────────────────────────────────
 def _display_width(text: str) -> int:
@@ -130,7 +159,11 @@ def _pad(text: str, width: int, right: bool = True) -> str:
 
 
 def _report_text(
-    summary: DailySummary, monthly: MonthlySummary, cash: float, notes: List[str]
+    summary: DailySummary,
+    monthly: MonthlySummary,
+    cash: float,
+    notes: List[str],
+    unsellable: List[UnsellableView],
 ) -> str:
     lines = [f"{summary.day:%Y-%m-%d} 매매 결과", ""]
 
@@ -167,10 +200,14 @@ def _report_text(
             f"- 누적 수수료·세금: {_won(-monthly.fees)}",
             f"- 누적 순손익: {_won(monthly.net_pnl)} ({_percent(monthly.net_return_pct)})",
             f"- 현재 예수금: {_balance(cash)}",
-            "",
-            *notes,
         ]
     )
+
+    if unsellable:
+        lines.extend(["", f"{UNSELLABLE_HEADING} ({len(unsellable)}건)"])
+        lines.extend(f"- {item.label} — {_unsellable_reason(item)}" for item in unsellable)
+
+    lines.extend(["", *notes])
     return "\n".join(lines)
 
 
@@ -180,7 +217,11 @@ _TD = "padding:6px 10px; border-bottom:1px solid #eeeeee; text-align:right;"
 
 
 def _report_html(
-    summary: DailySummary, monthly: MonthlySummary, cash: float, notes: List[str]
+    summary: DailySummary,
+    monthly: MonthlySummary,
+    cash: float,
+    notes: List[str],
+    unsellable: List[UnsellableView],
 ) -> str:
     parts = [
         '<div style="font-family:-apple-system,\'Malgun Gothic\',sans-serif; font-size:14px; color:#222222;">',
@@ -240,6 +281,23 @@ def _report_html(
             f'{_won(monthly.net_pnl)} ({_percent(monthly.net_return_pct)})</span></strong></li>',
             f"<li>현재 예수금: {_balance(cash)}</li>",
             "</ul>",
+        ]
+    )
+
+    if unsellable:
+        parts.append(
+            f'<h3 style="font-size:15px; margin:20px 0 8px;">{UNSELLABLE_HEADING}</h3>'
+        )
+        parts.append('<ul style="margin:0; padding-left:18px; color:#333333;">')
+        parts.extend(
+            f"<li>{escape(item.label)} — "
+            f'<span style="color:{COLOR_WARN};">{escape(_unsellable_reason(item))}</span></li>'
+            for item in unsellable
+        )
+        parts.append("</ul>")
+
+    parts.extend(
+        [
             '<p style="font-size:12px; color:#777777; margin-top:18px;">'
             + "<br>".join(escape(n) for n in notes)
             + "</p>",
