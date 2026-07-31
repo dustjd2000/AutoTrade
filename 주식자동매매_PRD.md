@@ -316,6 +316,7 @@
 | 10 | 주문 정정/취소 | `src/api/order.py:134,152` | `cancel_order` / `modify_order` (현재 전략은 시장가만 사용해 미호출) |
 | 11 | 호가 조회 | `src/api/market_data.py:153` | `get_orderbook` |
 | 12 | UI 엔진 실행/정지 및 즉시 실행 | `src/ui/main_window.py`, `src/ui/engine_thread.py` | 시작/정지, ①~④ 즉시 실행 버튼, 보유 종목·매도 불가 표까지 구현 완료 (5.10·5.11절) |
+| 13 | LLM 추천 프롬프트 v2 (2026-07-31) | `src/llm/recommender.py` `SYSTEM_PROMPT` | 판단 기준 우선순위·근거 작성 지침·3개 미만 허용을 명시. `temperature`는 프로젝트 모델(`claude-sonnet-5`)이 비기본값을 거부(400)해 넣지 않음 — 필요하면 `output_config.effort`로 별도 검토 |
 
 ### 11.3 모의투자 지원 현황 (2026-07-27 "미지원" 판단 철회, 그 뒤 복원됨)
 
