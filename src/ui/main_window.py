@@ -295,7 +295,7 @@ class MainWindow(QMainWindow):
             f"background: {COLOR_SURFACE}; color: {COLOR_TEXT}; border: 1px solid {COLOR_BORDER};"
         )
         self._btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_save.clicked.connect(self._save_settings)
+        self._btn_save.clicked.connect(lambda: self._save_settings(show_popup=True))
         root.addWidget(self._btn_save)
 
         root.addWidget(_separator())
@@ -573,7 +573,7 @@ class MainWindow(QMainWindow):
         self._update_mode_hint()
         logger.info("설정 불러오기 완료 (mode=%s)", mode)
 
-    def _save_settings(self) -> None:
+    def _save_settings(self, show_popup: bool = False) -> None:
         mode = "live" if self._radio_live.isChecked() else "paper"
         values = {
             "TRADE_MODE": mode,
@@ -596,6 +596,8 @@ class MainWindow(QMainWindow):
         save_env(ENV_PATH, values)
         logger.info("설정 저장 완료 (mode=%s)", mode)
         self._statusbar.showMessage("설정이 저장되었습니다.", 3000)
+        if show_popup:
+            QMessageBox.information(self, "설정 저장", "설정이 저장되었습니다.")
 
     def _update_mode_hint(self) -> None:
         is_live = self._radio_live.isChecked()
