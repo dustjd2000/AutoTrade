@@ -12,6 +12,7 @@ from src.core.events import (
 )
 from src.llm.recommender import StockRecommendation
 from src.logger.trade_store import DailySummary, MonthlySummary, TradeRow
+from src.risk.manager import exit_trigger_price
 
 # 이익은 빨강, 손실은 파랑 (국내 증권 관례)
 COLOR_PROFIT = "#d32f2f"
@@ -330,7 +331,8 @@ def _buy_notes(execution: BuyExecution) -> List[str]:
         )
     notes.extend(
         [
-            "※ 익절가·손절가는 표의 단가 기준 계산값이며, 실제 판정은 계좌 평단가로 합니다.",
+            "※ 익절가·손절가는 표의 단가 기준으로 수수료·세금·슬리피지까지 반영한 계산값이며, "
+            "실제 판정은 계좌 평단가로 합니다.",
             "※ 익절/손절 감시는 이 프로그램이 실행 중일 때만 동작합니다 (키움 REST 스탑오더 미지원).",
             "※ 체결가·수수료·손익은 15:30 리포트에서 확정됩니다.",
         ]
@@ -365,14 +367,23 @@ def _buy_row_cells(record: BuyRecord, execution: BuyExecution) -> tuple[str, ...
     state = BUY_OUTCOME_LABELS[record.outcome]
     if not record.outcome.is_ordered or record.price <= 0 or record.shares <= 0:
         return (record.label, state, "-", "-", "-", "-", "-")
+    commission_rate = execution.commission_percent / 100
+    tax_rate = execution.tax_percent / 100
+    slippage_rate = execution.slippage_percent / 100
+    take_profit_price = exit_trigger_price(
+        record.price, execution.take_profit_percent / 100, commission_rate, tax_rate, slippage_rate
+    )
+    stop_loss_price = exit_trigger_price(
+        record.price, -execution.stop_loss_percent / 100, commission_rate, tax_rate, slippage_rate
+    )
     return (
         record.label,
         state,
         f"{record.shares:,}",
         f"{record.price:,.0f}",
         f"{record.amount:,.0f}",
-        f"{record.price * (1 + execution.take_profit_percent / 100):,.0f}",
-        f"{record.price * (1 - execution.stop_loss_percent / 100):,.0f}",
+        f"{take_profit_price:,.0f}",
+        f"{stop_loss_price:,.0f}",
     )
 
 

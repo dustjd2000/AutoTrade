@@ -261,6 +261,9 @@ class DailyWorkflow:
             records=records,
             take_profit_percent=self.engine.risk_manager.take_profit_ratio * 100,
             stop_loss_percent=self.engine.risk_manager.stop_loss_ratio * 100,
+            commission_percent=self.engine.risk_manager.commission_rate * 100,
+            tax_percent=self.engine.risk_manager.tax_rate * 100,
+            slippage_percent=self.engine.risk_manager.slippage_rate * 100,
             fills_synced=fills_synced,
         )
         try:

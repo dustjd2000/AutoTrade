@@ -2,7 +2,7 @@ from datetime import datetime
 
 from src.api.account import BalanceSnapshot, Position
 from src.core.events import ExitReason, OrderRequest, OrderResult, OrderSide, OrderStatus, OrderType
-from src.risk.manager import RiskManager
+from src.risk.manager import RiskManager, exit_trigger_price
 
 
 def make_manager(
@@ -10,11 +10,17 @@ def make_manager(
     stop_loss_ratio=0.02,
     initial_asset=10_000_000,
     max_total_exposure_ratio=0.7,
+    commission_rate=0.0,
+    tax_rate=0.0,
+    slippage_rate=0.0,
 ):
     manager = RiskManager(
         take_profit_ratio=take_profit_ratio,
         stop_loss_ratio=stop_loss_ratio,
         max_total_exposure_ratio=max_total_exposure_ratio,
+        commission_rate=commission_rate,
+        tax_rate=tax_rate,
+        slippage_rate=slippage_rate,
     )
     manager.initialize(BalanceSnapshot(cash=initial_asset, positions={}))
     return manager
@@ -39,6 +45,32 @@ def test_check_exit_returns_none_within_band():
     position = Position(ticker="005930", quantity=10, avg_price=1000.0, current_price=1005.0)
 
     assert manager.check_exit(position) is None
+
+
+def test_check_exit_take_profit_reflects_costs():
+    """수수료·세금·슬리피지가 있으면 원가 대비 +2% 가격 변동만으로는 순손익 +2%에 못 미친다."""
+    manager = make_manager(
+        take_profit_ratio=0.02, commission_rate=0.00015, tax_rate=0.0018, slippage_rate=0.001
+    )
+    just_short = Position(ticker="005930", quantity=10, avg_price=1000.0, current_price=1020.0)
+    assert manager.check_exit(just_short) is None
+
+    trigger_price = exit_trigger_price(1000.0, 0.02, 0.00015, 0.0018, 0.001)
+    at_trigger = Position(ticker="005930", quantity=10, avg_price=1000.0, current_price=trigger_price)
+    assert manager.check_exit(at_trigger) == ExitReason.TAKE_PROFIT
+
+
+def test_check_exit_stop_loss_triggers_earlier_with_costs():
+    """비용이 있으면 원가 대비 -2%보다 얕은 하락(-1.8%)에서 이미 순손실 -2%에 도달한다."""
+    manager = make_manager(
+        stop_loss_ratio=0.02, commission_rate=0.00015, tax_rate=0.0018, slippage_rate=0.001
+    )
+    shallower_drop = Position(ticker="005930", quantity=10, avg_price=1000.0, current_price=982.0)
+    assert manager.check_exit(shallower_drop) == ExitReason.STOP_LOSS
+
+    trigger_price = exit_trigger_price(1000.0, -0.02, 0.00015, 0.0018, 0.001)
+    at_trigger = Position(ticker="005930", quantity=10, avg_price=1000.0, current_price=trigger_price)
+    assert manager.check_exit(at_trigger) == ExitReason.STOP_LOSS
 
 
 def test_check_exit_returns_none_for_empty_position():

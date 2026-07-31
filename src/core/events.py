@@ -145,6 +145,9 @@ class BuyExecution:
     records: List[BuyRecord] = field(default_factory=list)
     take_profit_percent: float = 0.0
     stop_loss_percent: float = 0.0
+    commission_percent: float = 0.0
+    tax_percent: float = 0.0
+    slippage_percent: float = 0.0
     fills_synced: bool = True         # False면 체결 조회에 실패해 접수 기준으로 집계했다
 
     @property

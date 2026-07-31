@@ -118,6 +118,9 @@ def build_runtime(settings: Settings) -> Runtime:
         take_profit_ratio=settings.take_profit_ratio,
         stop_loss_ratio=settings.stop_loss_ratio,
         max_total_exposure_ratio=settings.max_total_exposure_ratio,
+        commission_rate=settings.commission_ratio,
+        tax_rate=settings.tax_ratio,
+        slippage_rate=settings.slippage_ratio,
     )
     trade_store = TradeStore()
     email = EmailNotifier(settings)

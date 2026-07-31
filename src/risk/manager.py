@@ -7,6 +7,36 @@ from src.core.events import ExitReason, OrderRequest, OrderResult, OrderSide, Or
 logger = logging.getLogger(__name__)
 
 
+def net_return(
+    current_price: float,
+    avg_price: float,
+    commission_rate: float,
+    tax_rate: float,
+    slippage_rate: float,
+) -> float:
+    """평단가 대비 순손익률 — 왕복 수수료·매도세금·슬리피지를 뺀 실수령 기준.
+
+    슬리피지는 매도 체결가가 현재가보다 불리하게 밀리는 정도로 가정한다(항상 불리한 방향).
+    """
+    sell_price = current_price * (1 - slippage_rate)
+    return sell_price * (1 - commission_rate - tax_rate) / avg_price - (1 + commission_rate)
+
+
+def exit_trigger_price(
+    avg_price: float,
+    target_ratio: float,
+    commission_rate: float,
+    tax_rate: float,
+    slippage_rate: float,
+) -> float:
+    """순손익률이 target_ratio에 도달하는 현재가 — net_return의 역함수 (표시용)."""
+    return (
+        avg_price
+        * (target_ratio + 1 + commission_rate)
+        / ((1 - slippage_rate) * (1 - commission_rate - tax_rate))
+    )
+
+
 class RiskManager:
     def __init__(
         self,
@@ -15,12 +45,18 @@ class RiskManager:
         take_profit_ratio: float = 0.02,      # 익절 라인 (매수 대비 수익률)
         stop_loss_ratio: float = 0.02,        # 손절 라인 (매수 대비 손실률)
         max_total_exposure_ratio: float = 0.7,  # 전체 계좌 대비 최대 노출 비중
+        commission_rate: float = 0.00015,     # 매매수수료 (매수·매도 동일 적용)
+        tax_rate: float = 0.0018,             # 증권거래세+농특세 (매도 시만)
+        slippage_rate: float = 0.001,         # 시장가 청산 슬리피지 추정치
     ):
         self.max_position_ratio = max_position_ratio
         self.max_daily_loss_ratio = max_daily_loss_ratio
         self.take_profit_ratio = take_profit_ratio
         self.stop_loss_ratio = stop_loss_ratio
         self.max_total_exposure_ratio = max_total_exposure_ratio
+        self.commission_rate = commission_rate
+        self.tax_rate = tax_rate
+        self.slippage_rate = slippage_rate
 
         self._initial_asset: float = 0.0
         self._daily_realized_loss: float = 0.0
@@ -59,11 +95,19 @@ class RiskManager:
         모니터링이 **1차이자 사실상 유일한 청산 수단**이다 (PRD 5.5-B, 2026-07-27 확정).
         즉 익절/손절은 증권사 서버가 아니라 이 프로그램이 떠 있는 동안에만 동작한다 —
         앱이 꺼지거나 WebSocket이 끊기면 감시 공백이 생긴다.
+
+        판정은 가격 변동률이 아니라 왕복 수수료·매도세금·슬리피지를 뺀 순손익률 기준이다.
         """
         if position.avg_price <= 0 or position.quantity <= 0:
             return None
 
-        ret = (position.current_price - position.avg_price) / position.avg_price
+        ret = net_return(
+            position.current_price,
+            position.avg_price,
+            self.commission_rate,
+            self.tax_rate,
+            self.slippage_rate,
+        )
         if ret >= self.take_profit_ratio:
             return ExitReason.TAKE_PROFIT
         if ret <= -self.stop_loss_ratio:

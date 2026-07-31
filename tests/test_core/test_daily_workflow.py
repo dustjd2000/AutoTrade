@@ -6,6 +6,7 @@ from src.core.events import FillRecord, MarketData, OrderResult, OrderSide, Orde
 from src.data.collector import DailyStockData
 from src.llm.recommender import StockRecommendation
 from src.logger.trade_store import DailySummary, MonthlySummary, TradeRow
+from src.risk.manager import exit_trigger_price
 from src.strategy.llm_momentum import LLMMomentumStrategy
 
 
@@ -60,6 +61,9 @@ def make_workflow(recommendations=None, collected=True, cash=12_000_000):
             record_order=lambda *a, **kw: None,
             take_profit_ratio=0.02,
             stop_loss_ratio=0.02,
+            commission_rate=0.00015,
+            tax_rate=0.0018,
+            slippage_rate=0.001,
         ),
         note_open_position=lambda ticker: None,
         notify=notifications.append,
@@ -325,7 +329,9 @@ def test_buy_result_email_lists_ordered_stocks():
     assert "2,000" in body                    # 수량 2000주
     assert "총 투입금액" in body
     assert "4,000,000원" in body               # 2종목 × 200만
-    assert "1,020" in body and "980" in body  # ±2% 익절/손절 라인
+    tp_price = exit_trigger_price(1000.0, 0.02, 0.00015, 0.0018, 0.001)
+    sl_price = exit_trigger_price(1000.0, -0.02, 0.00015, 0.0018, 0.001)
+    assert f"{tp_price:,.0f}" in body and f"{sl_price:,.0f}" in body  # 순손익 반영 익절/손절 라인
     assert "<table" in html
 
 

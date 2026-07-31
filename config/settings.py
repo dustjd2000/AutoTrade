@@ -61,6 +61,23 @@ class Settings:
     def stop_loss_ratio(self) -> float:
         return self.stop_loss_percent / 100
 
+    # 익절/손절 판정에 반영할 비용 — 매매수수료(매수·매도 동일), 세금(매도 시만), 슬리피지(추정)
+    commission_percent: float = field(default_factory=lambda: float(os.getenv("COMMISSION_PERCENT", "0.015")))
+    tax_percent: float = field(default_factory=lambda: float(os.getenv("TAX_PERCENT", "0.18")))
+    slippage_percent: float = field(default_factory=lambda: float(os.getenv("SLIPPAGE_PERCENT", "0.1")))
+
+    @property
+    def commission_ratio(self) -> float:
+        return self.commission_percent / 100
+
+    @property
+    def tax_ratio(self) -> float:
+        return self.tax_percent / 100
+
+    @property
+    def slippage_ratio(self) -> float:
+        return self.slippage_percent / 100
+
     def validate(self) -> None:
         if self.mode not in ("live", "paper"):
             raise ValueError(f"TRADE_MODE must be 'live' or 'paper', got: {self.mode}")
