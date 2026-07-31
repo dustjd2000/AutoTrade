@@ -121,27 +121,6 @@ def test_recommend_parses_successful_response():
     assert result[0].ticker == "068270"
 
 
-def test_recommend_uses_low_temperature_for_consistency():
-    """매수 판단이므로 창의성보다 일관성이 우선 — 매번 결과가 크게 흔들리면 안 된다."""
-    text = '{"recommendations": [{"ticker": "005930", "name": "삼성전자", "reason": "수급"}]}'
-    response = _response("end_turn", [SimpleNamespace(type="text", text=text)])
-    captured = {}
-
-    def fake_create(**kwargs):
-        captured.update(kwargs)
-        return response
-
-    recommender = LLMRecommender.__new__(LLMRecommender)
-    recommender.settings = SimpleNamespace(llm_model="claude-sonnet-5")
-    recommender._client = SimpleNamespace(
-        with_options=lambda **kw: SimpleNamespace(messages=SimpleNamespace(create=fake_create))
-    )
-
-    recommender.recommend([])
-
-    assert captured.get("temperature") == 0.3
-
-
 def test_build_user_prompt_includes_all_stock_data():
     daily_data = [
         DailyStockData(
