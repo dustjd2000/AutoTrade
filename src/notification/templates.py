@@ -32,7 +32,7 @@ def recommendation_email(recommendations: List[StockRecommendation], today: date
     if len(recommendations) < 3:
         lines.append(
             f"※ 추천 종목이 {len(recommendations)}개로 3개 미만입니다. "
-            "종목당 매수금액은 예수금의 1/6로 고정되며, 나머지 몫은 현금으로 유지됩니다."
+            "종목당 매수금액은 주문가능금액의 1/6로 고정되며, 나머지 몫은 현금으로 유지됩니다."
         )
         lines.append("")
 
@@ -199,7 +199,7 @@ def _report_text(
             f"- 누적 실현손익: {_won(monthly.realized_pnl)} ({_percent(monthly.return_pct)})",
             f"- 누적 수수료·세금: {_won(-monthly.fees)}",
             f"- 누적 순손익: {_won(monthly.net_pnl)} ({_percent(monthly.net_return_pct)})",
-            f"- 현재 예수금: {_balance(cash)}",
+            f"- 현재 주문가능금액: {_balance(cash)}",
         ]
     )
 
@@ -279,7 +279,7 @@ def _report_html(
             f'<li>누적 수수료·세금: <span style="color:{COLOR_LOSS};">{_won(-monthly.fees)}</span></li>',
             f'<li style="font-size:16px;"><strong>누적 순손익: <span style="color:{_color(monthly.net_pnl)};">'
             f'{_won(monthly.net_pnl)} ({_percent(monthly.net_return_pct)})</span></strong></li>',
-            f"<li>현재 예수금: {_balance(cash)}</li>",
+            f"<li>현재 주문가능금액: {_balance(cash)}</li>",
             "</ul>",
         ]
     )
@@ -345,12 +345,12 @@ def _buy_facts(execution: BuyExecution) -> List[tuple[str, str]]:
     규칙이 바뀌어도 메일이 거짓말하지 않는다.
     """
     share = (
-        f" (예수금의 {execution.amount_per_stock / execution.cash * 100:.1f}%)"
+        f" (주문가능금액의 {execution.amount_per_stock / execution.cash * 100:.1f}%)"
         if execution.cash > 0
         else ""
     )
     return [
-        ("예수금", _balance(execution.cash)),
+        ("주문가능금액", _balance(execution.cash)),
         ("종목당 배정", f"{_balance(execution.amount_per_stock)}{share}"),
         ("총 투입금액", _balance(execution.invested)),
         (

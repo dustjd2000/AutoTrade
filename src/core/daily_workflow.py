@@ -79,11 +79,11 @@ class DailyWorkflow:
         cash = self.account.get_cash()
         plans = self.strategy.build_buy_plans(cash)
         if not plans:
-            logger.warning("매수 계획이 없습니다 (추천 종목 없음). 예수금 %s원", f"{cash:,.0f}")
+            logger.warning("매수 계획이 없습니다 (추천 종목 없음). 주문가능금액 %s원", f"{cash:,.0f}")
             return
 
         logger.info(
-            "매수 시작 — 예수금 %s원, 대상 %d종목, 종목당 배정 %s원",
+            "매수 시작 — 주문가능금액 %s원, 대상 %d종목, 종목당 배정 %s원",
             f"{cash:,.0f}",
             len(plans),
             f"{plans[0].amount:,.0f}",

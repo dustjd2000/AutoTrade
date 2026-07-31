@@ -134,7 +134,7 @@ def test_monthly_section_shows_cash_without_sign():
     _, text, html = render(cash=1220735.0)
 
     for body in (text, html):
-        assert "현재 예수금: 1,220,735원" in body
+        assert "현재 주문가능금액: 1,220,735원" in body
         assert "+1,220,735원" not in body
 
 
@@ -303,9 +303,9 @@ def test_buy_header_shows_cash_allocation_and_total():
     _, text, html = render_buys()
 
     for body in (text, html):
-        assert "5,000,000원" in body            # 예수금
+        assert "5,000,000원" in body            # 주문가능금액
         assert "833,333원" in body              # 종목당 배정
-        assert "예수금의 16.7%" in body
+        assert "주문가능금액의 16.7%" in body
         assert "1,594,200원" in body            # 총 투입금액
         assert "+2.00% / -2.00%" in body
 
@@ -315,7 +315,7 @@ def test_buy_allocation_share_omitted_without_cash():
     _, text, html = render_buys(make_execution(cash=0.0))
 
     for body in (text, html):
-        assert "예수금의" not in body
+        assert "주문가능금액의" not in body
 
 
 def test_stocks_not_bought_are_listed_with_reason():
