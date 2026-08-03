@@ -10,6 +10,7 @@ from PyQt6.QtGui import QColor, QDoubleValidator, QFont, QIcon, QPalette
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QComboBox,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -177,6 +178,22 @@ class MainWindow(QMainWindow):
             QLineEdit:focus {{
                 border: 1px solid {COLOR_ACCENT};
             }}
+            QComboBox {{
+                background: {COLOR_SURFACE};
+                border: 1px solid {COLOR_BORDER};
+                border-radius: 4px;
+                padding: 6px 8px;
+                color: {COLOR_TEXT};
+            }}
+            QComboBox:focus {{
+                border: 1px solid {COLOR_ACCENT};
+            }}
+            QComboBox QAbstractItemView {{
+                background: {COLOR_SURFACE};
+                color: {COLOR_TEXT};
+                selection-background-color: {COLOR_ACCENT};
+                border: 1px solid {COLOR_BORDER};
+            }}
             QPushButton {{
                 border-radius: 5px;
                 padding: 7px 18px;
@@ -257,7 +274,37 @@ class MainWindow(QMainWindow):
         root.addWidget(self._mode_hint)
         self._update_mode_hint()
 
-        # 리스크 관리 (익절 / 손절)
+        # 자금 배분 (1호 전략) · 리스크 관리 (익절 / 손절) — 한 줄에 나란히 배치
+        fund_risk_row = QHBoxLayout()
+        fund_risk_row.setSpacing(10)
+
+        fund_box = QGroupBox("자금 배분 (1호 전략)")
+        fund_form = QFormLayout(fund_box)
+        fund_form.setSpacing(8)
+        fund_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self._investable_ratio = QComboBox()
+        for percent in range(10, 101, 10):
+            self._investable_ratio.addItem(f"{percent}", percent)
+        self._investable_ratio.setCurrentIndex(self._investable_ratio.findData(50))
+        self._investable_ratio.currentIndexChanged.connect(self._refresh_investable_amount)
+
+        self._target_stock_count = QComboBox()
+        for count in range(1, 11):
+            self._target_stock_count.addItem(f"{count}", count)
+        self._target_stock_count.setCurrentIndex(self._target_stock_count.findData(3))
+
+        fund_form.addRow("예수금 투입 비율 (%)", self._investable_ratio)
+        fund_form.addRow("추천 종목 수 (개)", self._target_stock_count)
+
+        # 실제 예수금 기준 — 엔진이 꺼져 있으면 숨긴다 (계좌를 아직 모른다)
+        self._investable_amount = QLabel()
+        self._investable_amount.setWordWrap(True)
+        self._investable_amount.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
+        self._investable_amount.setVisible(False)
+        fund_form.addRow("총 매수가능 금액", self._investable_amount)
+        fund_risk_row.addWidget(fund_box, 1)
+
         risk_box = QGroupBox("리스크 관리 (익절 / 손절)")
         risk_form = QFormLayout(risk_box)
         risk_form.setSpacing(8)
@@ -272,7 +319,9 @@ class MainWindow(QMainWindow):
 
         risk_form.addRow("익절 (%)", self._take_profit)
         risk_form.addRow("손절 (%)", self._stop_loss)
-        root.addWidget(risk_box)
+        fund_risk_row.addWidget(risk_box, 1)
+
+        root.addLayout(fund_risk_row)
 
         # 이메일 알림 — 발송/수신 주소만 UI에서 관리하고, SMTP 서버·포트·비밀번호는 .env로만 다룬다
         email_box = QGroupBox("이메일 알림")
@@ -474,6 +523,28 @@ class MainWindow(QMainWindow):
         # 표를 만드는 도중에 불리는 첫 호출에서는 매도 불가 표가 아직 없다
         if self._unsellable_box is not None:
             self._refresh_unsellable()
+        self._refresh_investable_amount()
+
+    def _refresh_investable_amount(self) -> None:
+        """예수금 캐시 × 투입 비율로 총 매수가능 금액을 표시한다 (API 호출 없음).
+
+        엔진이 꺼져 있으면 계좌를 아직 모르므로 라벨 자체를 숨긴다.
+        """
+        thread = self._engine_thread
+        self._investable_amount.setVisible(thread is not None)
+        if thread is None:
+            return
+
+        cash = thread.cash_snapshot()
+        if cash is None:
+            self._investable_amount.setText("예수금 조회 전")
+            return
+
+        ratio = self._investable_ratio.currentData() / 100
+        amount = cash * ratio
+        self._investable_amount.setText(
+            f"{amount:,.0f}원 (예수금 {cash:,.0f}원 × {ratio * 100:.0f}%)"
+        )
 
     def _holdings_summary(self, rows: list) -> str:
         if self._engine_thread is None:
@@ -565,6 +636,8 @@ class MainWindow(QMainWindow):
         self._email_to.setText(env.get("EMAIL_TO", ""))
         self._take_profit.setText(env.get("TAKE_PROFIT_PERCENT", "2"))
         self._stop_loss.setText(env.get("STOP_LOSS_PERCENT", "2"))
+        self._select_combo_value(self._investable_ratio, env.get("INVESTABLE_RATIO_PERCENT"), default=50)
+        self._select_combo_value(self._target_stock_count, env.get("TARGET_STOCK_COUNT"), default=3)
         mode = env.get("TRADE_MODE", "paper")
         if mode == "live":
             self._radio_live.setChecked(True)
@@ -572,6 +645,15 @@ class MainWindow(QMainWindow):
             self._radio_paper.setChecked(True)
         self._update_mode_hint()
         logger.info("설정 불러오기 완료 (mode=%s)", mode)
+
+    def _select_combo_value(self, combo: QComboBox, raw_value: Optional[str], default: int) -> None:
+        """.env의 문자열 값을 콤보박스 항목으로 선택한다. 값이 없거나 목록에 없으면 기본값을 쓴다."""
+        try:
+            value = int(raw_value) if raw_value else default
+        except ValueError:
+            value = default
+        index = combo.findData(value)
+        combo.setCurrentIndex(index if index >= 0 else combo.findData(default))
 
     def _save_settings(self, show_popup: bool = False) -> None:
         mode = "live" if self._radio_live.isChecked() else "paper"
@@ -587,6 +669,8 @@ class MainWindow(QMainWindow):
             "EMAIL_TO": self._email_to.text().strip(),
             "TAKE_PROFIT_PERCENT": self._take_profit.text().strip() or "2",
             "STOP_LOSS_PERCENT": self._stop_loss.text().strip() or "2",
+            "INVESTABLE_RATIO_PERCENT": str(self._investable_ratio.currentData()),
+            "TARGET_STOCK_COUNT": str(self._target_stock_count.currentData()),
         }
         if mode == "live":
             values["LIVE_TRADE_CONFIRMED"] = "YES_I_UNDERSTAND"

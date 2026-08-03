@@ -1,6 +1,7 @@
 from datetime import date, datetime
 
 from src.core.events import BuyExecution, BuyOutcome, BuyRecord, UnsellableView
+from src.llm.recommender import StockRecommendation
 from src.logger.trade_store import DailySummary, MonthlySummary, TradeRow
 from src.notification import templates
 
@@ -363,3 +364,26 @@ def test_buy_email_without_any_record():
 
     for body in (text, html):
         assert "매수를 시도한 종목이 없습니다." in body
+
+
+# ── recommendation_email ─────────────────────────────────────
+def test_recommendation_email_notes_shortfall_percentage():
+    recs = [StockRecommendation(ticker="005930", name="삼성전자", reason="근거")]
+    _, body = templates.recommendation_email(
+        recs, DAY, investable_ratio=0.5, target_stock_count=4
+    )
+
+    assert "1개로 4개 미만" in body
+    assert "12.5%" in body
+
+
+def test_recommendation_email_omits_shortfall_note_when_full():
+    recs = [
+        StockRecommendation(ticker="005930", name="삼성전자", reason="근거"),
+        StockRecommendation(ticker="000660", name="SK하이닉스", reason="근거"),
+    ]
+    _, body = templates.recommendation_email(
+        recs, DAY, investable_ratio=0.5, target_stock_count=2
+    )
+
+    assert "미만입니다" not in body

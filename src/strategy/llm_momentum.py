@@ -8,10 +8,6 @@ from src.strategy.base import BaseStrategy
 
 logger = logging.getLogger(__name__)
 
-# 1호 전략 자금 규칙 (PRD 5.5-B 4단계)
-INVESTABLE_RATIO = 0.5  # 매수가능금액 = 예수금 × 1/2 (나머지 1/2은 항상 미투입)
-TARGET_STOCK_COUNT = 3  # 매수가능금액을 3등분 → 종목당 예수금의 1/6
-
 
 @dataclass
 class BuyPlan:
@@ -29,8 +25,10 @@ class LLMMomentumStrategy(BaseStrategy):
     보유 포지션의 청산은 RiskManager.check_exit(익절/손절)와 장 마감 강제청산이 담당한다.
     """
 
-    def __init__(self):
+    def __init__(self, investable_ratio: float = 0.5, target_stock_count: int = 3):
         self._recommendations: List[StockRecommendation] = []
+        self.investable_ratio = investable_ratio
+        self.target_stock_count = target_stock_count
 
     @property
     def name(self) -> str:
@@ -42,20 +40,21 @@ class LLMMomentumStrategy(BaseStrategy):
     def build_buy_plans(self, cash: float) -> List[BuyPlan]:
         """예수금과 추천 목록으로 종목별 매수 계획을 만든다.
 
-        종목당 투입금액은 추천 개수와 무관하게 예수금 × 1/6으로 고정한다.
-        추천이 3개 미만이면 모자란 몫은 매수하지 않고 현금으로 남긴다 (PRD 10절 확정, 2026-07-27).
+        종목당 투입금액은 추천 개수와 무관하게 예수금 × investable_ratio / target_stock_count로
+        고정한다. 추천이 target_stock_count개 미만이면 모자란 몫은 매수하지 않고 현금으로
+        남긴다 (PRD 10절 확정, 2026-07-27).
         """
         if not self._recommendations:
             return []
 
-        amount_per_stock = cash * INVESTABLE_RATIO / TARGET_STOCK_COUNT
+        amount_per_stock = cash * self.investable_ratio / self.target_stock_count
         plans = [
             BuyPlan(ticker=r.ticker, name=r.name, amount=amount_per_stock, reason=r.reason)
-            for r in self._recommendations[:TARGET_STOCK_COUNT]
+            for r in self._recommendations[: self.target_stock_count]
         ]
 
-        if len(plans) < TARGET_STOCK_COUNT:
-            idle = amount_per_stock * (TARGET_STOCK_COUNT - len(plans))
+        if len(plans) < self.target_stock_count:
+            idle = amount_per_stock * (self.target_stock_count - len(plans))
             logger.warning(
                 "Only %d recommendation(s) received. Keeping %.0f KRW idle as cash.",
                 len(plans),

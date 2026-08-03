@@ -22,7 +22,12 @@ COLOR_FLAT = "#555555"
 COLOR_WARN = "#e65100"
 
 
-def recommendation_email(recommendations: List[StockRecommendation], today: date) -> tuple[str, str]:
+def recommendation_email(
+    recommendations: List[StockRecommendation],
+    today: date,
+    investable_ratio: float,
+    target_stock_count: int,
+) -> tuple[str, str]:
     """08:45 LLM 추천 결과 이메일 (PRD 5.5-B 3단계) — 자동 유효성 검증 없이 그대로 전달."""
     subject = f"[AutoTrade] {today:%Y-%m-%d} 급등 예상 대형주 추천 {len(recommendations)}종목"
 
@@ -30,10 +35,12 @@ def recommendation_email(recommendations: List[StockRecommendation], today: date
     for i, r in enumerate(recommendations, start=1):
         lines.extend([f"{i}. {format_stock(r.ticker, r.name)}", f"   추천 근거: {r.reason}", ""])
 
-    if len(recommendations) < 3:
+    if len(recommendations) < target_stock_count:
+        per_stock_ratio = investable_ratio / target_stock_count
         lines.append(
-            f"※ 추천 종목이 {len(recommendations)}개로 3개 미만입니다. "
-            "종목당 매수금액은 주문가능금액의 1/6로 고정되며, 나머지 몫은 현금으로 유지됩니다."
+            f"※ 추천 종목이 {len(recommendations)}개로 {target_stock_count}개 미만입니다. "
+            f"종목당 매수금액은 주문가능금액의 {per_stock_ratio * 100:.1f}%로 고정되며, "
+            "나머지 몫은 현금으로 유지됩니다."
         )
         lines.append("")
 

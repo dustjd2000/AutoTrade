@@ -70,7 +70,9 @@ class DailyWorkflow:
             return
 
         self.strategy.set_recommendations(recommendations)
-        subject, body = templates.recommendation_email(recommendations, today)
+        subject, body = templates.recommendation_email(
+            recommendations, today, self.strategy.investable_ratio, self.strategy.target_stock_count
+        )
         self.email.send(subject, body)
         logger.info("Recommendation email sent for %s", today)
 

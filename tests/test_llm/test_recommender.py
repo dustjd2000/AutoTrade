@@ -5,6 +5,7 @@ import pytest
 from src.data.collector import DailyStockData
 from src.llm.recommender import (
     LLMRecommender,
+    build_system_prompt,
     build_user_prompt,
     parse_recommendations,
 )
@@ -27,9 +28,9 @@ def test_parse_rejects_non_json():
         parse_recommendations("죄송하지만 추천을 드릴 수 없습니다.")
 
 
-def test_parse_rejects_empty_array():
-    with pytest.raises(ValueError):
-        parse_recommendations("[]")
+def test_parse_accepts_empty_array():
+    """확신 종목이 없다는 유효한 결과 — 예외가 아니라 빈 리스트로 온다."""
+    assert parse_recommendations("[]") == []
 
 
 def test_parse_rejects_missing_field():
@@ -78,7 +79,7 @@ def test_parse_rejects_empty_string():
 def _fake_recommender(response) -> LLMRecommender:
     """API 호출만 가짜로 바꾼 recommender."""
     recommender = LLMRecommender.__new__(LLMRecommender)
-    recommender.settings = SimpleNamespace(llm_model="claude-sonnet-5")
+    recommender.settings = SimpleNamespace(llm_model="claude-sonnet-5", target_stock_count=3)
     recommender._client = SimpleNamespace(
         with_options=lambda **kw: SimpleNamespace(
             messages=SimpleNamespace(create=lambda **kwargs: response)
@@ -112,6 +113,13 @@ def test_recommend_returns_none_on_refusal():
     assert _fake_recommender(response).recommend([]) is None
 
 
+def test_recommend_returns_none_on_empty_recommendations():
+    """형식은 정상이지만 LLM이 확신 종목을 하나도 고르지 않은 경우 — 매수는 스킵한다."""
+    text = '{"recommendations": []}'
+    response = _response("end_turn", [SimpleNamespace(type="text", text=text)])
+    assert _fake_recommender(response).recommend([]) is None
+
+
 def test_recommend_parses_successful_response():
     text = '{"recommendations": [{"ticker": "068270", "name": "셀트리온", "reason": "수급"}]}'
     response = _response("end_turn", [SimpleNamespace(type="text", text=text)])
@@ -138,3 +146,26 @@ def test_build_user_prompt_includes_all_stock_data():
     assert "삼성전자" in prompt
     assert "+1.50%" in prompt
     assert "신규 수주 공시" in prompt
+
+
+def test_build_user_prompt_reflects_target_count():
+    daily_data = [
+        DailyStockData(
+            ticker="005930",
+            name="삼성전자",
+            change_rate=1.5,
+            volume=1_000_000,
+            gap_rate=0.8,
+            headlines=[],
+        )
+    ]
+    prompt = build_user_prompt(daily_data, target_count=5)
+
+    assert "최대 5개까지" in prompt
+
+
+def test_build_system_prompt_reflects_target_count():
+    prompt = build_system_prompt(target_count=5)
+
+    assert "최대 5종목" in prompt
+    assert "5개 미만이면" in prompt

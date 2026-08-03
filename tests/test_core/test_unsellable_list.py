@@ -25,7 +25,7 @@ def make_engine(positions, sell_status=OrderStatus.FILLED, error_message="거부
         account=SimpleNamespace(
             get_positions=lambda: positions,
             get_balance_snapshot=lambda: SimpleNamespace(
-                total_asset=1_000_000, positions=positions
+                total_asset=1_000_000, cash=1_000_000, positions=positions
             ),
         ),
         strategy=SimpleNamespace(name="s", generate_signal=lambda d: None),

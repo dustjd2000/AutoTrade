@@ -111,7 +111,10 @@ def build_runtime(settings: Settings) -> Runtime:
     account = AccountClient(settings, auth)
     ws_client = WebSocketClient(settings, auth)
 
-    strategy = LLMMomentumStrategy()
+    strategy = LLMMomentumStrategy(
+        investable_ratio=settings.investable_ratio,
+        target_stock_count=settings.target_stock_count,
+    )
     risk_manager = RiskManager(
         max_position_ratio=settings.max_position_ratio,
         max_daily_loss_ratio=settings.max_daily_loss_ratio,

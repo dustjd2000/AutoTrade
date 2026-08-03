@@ -109,6 +109,8 @@ class TradingEngine:
         # 잔고 스냅샷 캐시 — `POSITION_CACHE_TTL_SECONDS` 참고
         self._positions: Dict[str, Position] = {}
         self._positions_fetched_at: Optional[datetime] = None
+        # 예수금 캐시 — start()/reset_for_new_day()에서만 갱신 (UI "총 매수가능 금액" 표시용)
+        self._cash: Optional[float] = None
         # 청산 주문을 이미 낸 종목. 체결이 잔고에 반영되기 전에 다음 틱이 들어와도
         # 같은 포지션을 두 번 매도하지 않도록 막는다.
         self._exiting: Set[str] = set()
@@ -138,6 +140,13 @@ class TradingEngine:
     def closed_out_at(self) -> Optional[datetime]:
         """보유 목록이 매도로 비워진 시각. 아직 비지 않았거나 다시 매수했으면 None."""
         return self._closed_out_at
+
+    def cash_snapshot(self) -> Optional[float]:
+        """마지막으로 조회한 예수금 (UI 스레드에서 호출 — API를 호출하지 않는다).
+
+        start()와 매일 08:40 reset_for_new_day()에서만 갱신된다. 엔진 시작 전에는 None.
+        """
+        return self._cash
 
     def unsellable_snapshot(self) -> List[UnsellableView]:
         """오늘 매도하지 못한 종목 사본 (UI 스레드에서 호출 — API를 호출하지 않는다).
@@ -354,6 +363,7 @@ class TradingEngine:
         self.auth.ensure_token()
         snapshot = self.account.get_balance_snapshot()
         self.risk_manager.initialize(snapshot)
+        self._cash = snapshot.cash
         self._invalidate_positions()
         # 거래정지가 풀렸을 수 있으므로 매도 불가 판정을 지우고 오늘 다시 확인한다
         self._untradable.clear()
@@ -370,6 +380,7 @@ class TradingEngine:
         self.auth.ensure_token()
         snapshot = self.account.get_balance_snapshot()
         self.risk_manager.initialize(snapshot)
+        self._cash = snapshot.cash
         self._positions = self._screen_positions(snapshot.positions)
         self._positions_fetched_at = datetime.now()
         self._open_tickers = {t for t, p in self._positions.items() if p.quantity > 0}

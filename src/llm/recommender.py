@@ -42,18 +42,19 @@ RECOMMENDATION_SCHEMA = {
     "additionalProperties": False,
 }
 
-SYSTEM_PROMPT = """당신은 한국 주식시장(코스피) 단기 모멘텀을 분석하는 애널리스트입니다.
+def build_system_prompt(target_count: int) -> str:
+    return f"""당신은 한국 주식시장(코스피) 단기 모멘텀을 분석하는 애널리스트입니다.
 
 ## 역할
 사용자가 제공하는 당일 데이터만을 근거로, 오늘 장중 상대적으로 강한 상승 흐름을 보일 가능성이 높은
-코스피 대형주(시가총액 상위 100종목) 최대 3종목을 선별합니다.
+코스피 대형주(시가총액 상위 100종목) 최대 {target_count}종목을 선별합니다.
 
 ## 절대 규칙
 1. 반드시 제공된 데이터에 있는 종목 중에서만 선택하십시오. 목록에 없는 종목을 추천하지 마십시오.
 2. 당신의 학습 데이터에 있는 과거 정보나 기억(종목에 대한 일반적 평판 등)에 의존하지 마십시오. 오직
    사용자 메시지로 제공되는 당일 데이터만 근거로 삼으십시오.
 3. 서로 다른 종목만 선택하십시오 (중복 불가).
-4. 근거가 확실한 종목이 3개 미만이면 억지로 채우지 말고, 확신이 서는 종목만 그 수만큼(최소 1개) 추천하십시오.
+4. 근거가 확실한 종목이 {target_count}개 미만이면 억지로 채우지 말고, 확신이 서는 종목만 그 수만큼(최소 1개) 추천하십시오.
 
 ## 판단 기준 (제공된 데이터 범위 내에서, 우선순위 순)
 - 시가 갭·등락률의 방향성과 크기 — 동시호가(장 시작 전) 데이터에서는 두 값이 전일 종가 대비 예상체결가
@@ -74,7 +75,7 @@ class StockRecommendation:
     reason: str
 
 
-def build_user_prompt(daily_data: List[DailyStockData]) -> str:
+def build_user_prompt(daily_data: List[DailyStockData], target_count: int = 3) -> str:
     is_premarket = any(d.is_premarket for d in daily_data)
 
     if is_premarket:
@@ -93,7 +94,7 @@ def build_user_prompt(daily_data: List[DailyStockData]) -> str:
             f"- {d.ticker} {d.name}: 등락률 {d.change_rate:+.2f}%, "
             f"거래량 {d.volume:,}, 시가갭 {d.gap_rate:+.2f}%, 뉴스/공시: {headlines}"
         )
-    lines.append("\n위 데이터를 참고해 급등 예상 종목을 최대 3개까지, 근거가 확실한 만큼만 JSON 배열로 추천하세요.")
+    lines.append(f"\n위 데이터를 참고해 급등 예상 종목을 최대 {target_count}개까지, 근거가 확실한 만큼만 JSON 배열로 추천하세요.")
     return "\n".join(lines)
 
 
@@ -121,14 +122,16 @@ def parse_recommendations(raw_text: str) -> List[StockRecommendation]:
     """LLM 응답을 구조화된 추천 목록으로 파싱한다.
 
     스키마상 최상위는 {"recommendations": [...]} 객체이지만, 배열만 온 경우도 받아들인다.
-    형식을 벗어나면 예외를 던지며, 호출측(LLMRecommender.recommend)에서 이를 잡아
-    "해당일 매수 스킵"으로 처리한다 (PRD 5.5-B — 무리하게 대체 로직으로 매수하지 않음).
+    빈 배열은 "확신 종목 없음"이라는 유효한 결과이므로 예외를 던지지 않고 빈 리스트를
+    반환한다 (PRD 5.5-B — 무리하게 대체 로직으로 매수하지 않음). 리스트가 아닌 형식만
+    예외를 던지며, 호출측(LLMRecommender.recommend)에서 이를 잡아 "해당일 매수 스킵"으로
+    처리한다.
     """
     data = json.loads(_extract_json(raw_text))
     if isinstance(data, dict):
         data = data.get(RECOMMENDATION_KEY, data)
-    if not isinstance(data, list) or not data:
-        raise ValueError("LLM response must be a non-empty JSON array")
+    if not isinstance(data, list):
+        raise ValueError("LLM response must be a JSON array")
 
     # 같은 종목이 두 번 추천되면 한 종목에 두 배로 투입되어 분산이 깨진다.
     # JSON 스키마로는 배열 원소의 유일성을 표현할 수 없으므로 여기서 걸러낸다.
@@ -159,12 +162,13 @@ class LLMRecommender:
         self, daily_data: List[DailyStockData], timeout_seconds: float = 120.0
     ) -> Optional[List[StockRecommendation]]:
         """LLM 호출 및 응답 파싱. 실패/타임아웃/형식 오류 시 None을 반환하고 해당일 매수는 스킵된다."""
+        target_count = self.settings.target_stock_count
         try:
             response = self._client.with_options(timeout=timeout_seconds).messages.create(
                 model=self.settings.llm_model,
                 max_tokens=MAX_TOKENS,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": build_user_prompt(daily_data)}],
+                system=build_system_prompt(target_count),
+                messages=[{"role": "user", "content": build_user_prompt(daily_data, target_count)}],
                 # 응답 형식을 API가 스키마로 강제한다 (설명이 섞이거나 코드펜스가 붙는 것을 방지)
                 output_config={
                     "format": {"type": "json_schema", "schema": RECOMMENDATION_SCHEMA}
@@ -203,6 +207,14 @@ class LLMRecommender:
         except Exception:
             # 원문을 남기지 않으면 형식이 어떻게 어긋났는지 추적할 수 없다
             logger.exception("LLM 응답 파싱 실패. 원문(앞 500자): %s", raw_text[:500])
+            return None
+
+        if not recommendations:
+            # 형식은 정상이지만 확신 가는 종목이 없다는 결과 — 파싱 실패와는 구분해 남긴다
+            logger.warning(
+                "LLM recommended 0 stock(s) (prompt_version=%s) — no confident picks today.",
+                PROMPT_TEMPLATE_VERSION,
+            )
             return None
 
         logger.info(

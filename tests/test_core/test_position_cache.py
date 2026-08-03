@@ -33,7 +33,7 @@ class CountingAccount:
         }
 
     def get_balance_snapshot(self):
-        return SimpleNamespace(total_asset=1_000_000, positions=self.get_positions())
+        return SimpleNamespace(total_asset=1_000_000, cash=1_000_000, positions=self.get_positions())
 
 
 def make_engine(account, exit_reason=None):

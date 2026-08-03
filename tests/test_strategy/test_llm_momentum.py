@@ -43,3 +43,19 @@ def test_more_than_three_recommendations_are_truncated():
     plans = strategy.build_buy_plans(cash=12_000_000)
 
     assert len(plans) == 3
+
+
+def test_custom_ratio_and_count_change_allocation():
+    strategy = LLMMomentumStrategy(investable_ratio=0.8, target_stock_count=4)
+    strategy.set_recommendations(
+        [
+            StockRecommendation(ticker=f"00{i}", name=f"종목{i}", reason="사유")
+            for i in range(4)
+        ]
+    )
+    plans = strategy.build_buy_plans(cash=10_000_000)
+
+    # 매수가능금액 800만원을 4등분 → 종목당 200만원
+    assert len(plans) == 4
+    assert all(p.amount == 2_000_000 for p in plans)
+    assert sum(p.amount for p in plans) == 8_000_000

@@ -78,6 +78,13 @@ class EngineThread(QThread):
             return []
         return runtime.engine.unsellable_snapshot()
 
+    def cash_snapshot(self) -> Optional[float]:
+        """마지막으로 조회한 예수금 (UI 표시용 — API 호출 없이 캐시값만 읽는다)."""
+        runtime = self._runtime
+        if runtime is None:
+            return None
+        return runtime.engine.cash_snapshot()
+
     # ── 즉시 실행 ────────────────────────────────────────────
     @property
     def action_busy(self) -> bool:

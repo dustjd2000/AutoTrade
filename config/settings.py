@@ -45,9 +45,19 @@ class Settings:
     # 리스크 설정
     max_position_ratio: float = 0.1
     max_daily_loss_ratio: float = 0.02
-    # 전체 계좌 대비 최대 노출 비중 — 1호 전략 자체 규칙(1/2)보다 느슨하게 잡아
-    # "전략 버그로 과도하게 매수되는 경우"만 걸러내는 상위 안전장치로 둔다
-    max_total_exposure_ratio: float = 0.7
+    # 전체 계좌 대비 최대 노출 비중 — investable_ratio_percent를 100%까지 열어둔 UI 설정값이
+    # 이 안전장치에 걸려 매수가 거부되지 않도록 상한을 완화했다(기존 0.7, 확정 2026-08-03).
+    # "전략 버그로 과도하게 매수되는 경우"만 걸러내는 상위 안전장치라는 검사 로직 자체는 유지.
+    max_total_exposure_ratio: float = 1.0
+
+    # 1호 전략 자금 배분 — 예수금 중 매매에 투입할 비율(%)과 추천받을 종목 수
+    # UI 콤보박스 선택 범위: 비율 10~100(10 단위), 종목 수 1~10(1 단위) — 확정 2026-08-03
+    investable_ratio_percent: int = field(default_factory=lambda: int(os.getenv("INVESTABLE_RATIO_PERCENT", "50")))
+    target_stock_count: int = field(default_factory=lambda: int(os.getenv("TARGET_STOCK_COUNT", "3")))
+
+    @property
+    def investable_ratio(self) -> float:
+        return self.investable_ratio_percent / 100
 
     # 익절/손절 라인 — UI/환경변수에는 %(예: 2)로 저장, 내부 계산은 비율(0.02)로 환산
     take_profit_percent: float = field(default_factory=lambda: float(os.getenv("TAKE_PROFIT_PERCENT", "2")))
