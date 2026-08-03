@@ -144,9 +144,20 @@ class TradingEngine:
     def cash_snapshot(self) -> Optional[float]:
         """마지막으로 조회한 예수금 (UI 스레드에서 호출 — API를 호출하지 않는다).
 
-        start()와 매일 08:40 reset_for_new_day()에서만 갱신된다. 엔진 시작 전에는 None.
+        start(), 매일 08:40 reset_for_new_day(), 주기적 refresh_cash()에서 갱신된다.
+        엔진 시작 전에는 None.
         """
         return self._cash
+
+    def refresh_cash(self) -> None:
+        """예수금을 다시 조회해 캐시를 갱신한다 (입금 등 장중 잔고 변동 반영, runtime.watch_cash_refresh가 주기적으로 호출).
+
+        실패해도 예외를 올리지 않고 직전 값을 유지한다 — 잔고 캐시(_get_positions)와 같은 원칙.
+        """
+        try:
+            self._cash = self.account.get_cash()
+        except Exception:
+            logger.warning("예수금 갱신 실패 — 직전 값을 유지합니다.", exc_info=True)
 
     def unsellable_snapshot(self) -> List[UnsellableView]:
         """오늘 매도하지 못한 종목 사본 (UI 스레드에서 호출 — API를 호출하지 않는다).

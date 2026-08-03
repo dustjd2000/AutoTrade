@@ -50,6 +50,10 @@ CLOSEOUT_CHECK_INTERVAL_SECONDS = 30
 # '보유중'으로 실린다 (DailyWorkflow._fill_buy_prices의 같은 시차 참고).
 CLOSEOUT_SETTLE_SECONDS = 60
 
+# 예수금 캐시 갱신 — 입금 등 장중 잔고 변동을 "총 매수가능 금액" UI 표시에 반영한다.
+# 시세 틱과 달리 예수금은 자연스러운 갱신 계기가 없어 별도 주기로 돈다.
+CASH_REFRESH_INTERVAL_SECONDS = 60
+
 
 def _off_loop(func: Callable[[], None]):
     """오래 걸리는 동기 작업을 별도 스레드로 넘기는 스케줄러 작업으로 감싼다.
@@ -363,6 +367,20 @@ async def watch_closeout_report(
             logger.exception("전량 매도 결과 리포트 발송 실패 — 15:30 리포트에 맡깁니다.")
 
 
+async def watch_cash_refresh(
+    runtime: Runtime,
+    interval_seconds: float = CASH_REFRESH_INTERVAL_SECONDS,
+) -> None:
+    """예수금 캐시를 주기적으로 다시 읽는다 — 입금 등으로 잔고가 바뀌어도
+
+    "총 매수가능 금액" UI 표시가 최신 상태를 따라가도록 한다 (engine.cash_snapshot).
+    """
+    while True:
+        await asyncio.sleep(interval_seconds)
+        # 네트워크 호출이 이벤트 루프를 막지 않도록 별도 스레드로 넘긴다 (_off_loop 참고)
+        await asyncio.get_running_loop().run_in_executor(None, runtime.engine.refresh_cash)
+
+
 def adopt_carried_over_positions(runtime: Runtime) -> List[str]:
     """시작 시점에 남아 있는 보유 종목을 오늘의 매도 대상으로 편입한다.
 
@@ -400,6 +418,7 @@ async def run(runtime: Runtime) -> None:
     adopt_carried_over_positions(runtime)
     watchdog = asyncio.create_task(watch_quote_stall(runtime))
     closeout_watch = asyncio.create_task(watch_closeout_report(runtime))
+    cash_watch = asyncio.create_task(watch_cash_refresh(runtime))
     try:
         await asyncio.gather(runtime.ws_client.connect(), runtime.scheduler.run())
     except asyncio.CancelledError:
@@ -407,6 +426,7 @@ async def run(runtime: Runtime) -> None:
     finally:
         watchdog.cancel()
         closeout_watch.cancel()
+        cash_watch.cancel()
         request_stop(runtime)
         await runtime.ws_client.disconnect()
         logger.info("매매 런타임이 종료되었습니다.")
