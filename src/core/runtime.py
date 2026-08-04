@@ -8,7 +8,7 @@ import inspect
 import logging
 from dataclasses import dataclass
 from datetime import datetime, time as dt_time
-from typing import Callable, Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional
 
 from config.settings import Settings
 from src.api.account import AccountClient
@@ -32,8 +32,7 @@ logger = logging.getLogger(__name__)
 
 # 1호 전략 하루 흐름 트리거 시각 (PRD 5.5-B, 5.11)
 DAILY_RESET_TIME = dt_time(8, 40)   # 일일 손실 한도·매매중지 초기화 (연속 실행 대비)
-RECOMMEND_TIME = dt_time(8, 45)     # 데이터 수집 → LLM 추천 → 이메일 발송
-BUY_TIME = dt_time(9, 0)            # 자금 산정 → 매수 실행
+BUY_TIME = dt_time(9, 0)            # 데이터 수집 → LLM 추천 → 자금 산정 → 매수 실행 (일괄)
 FORCE_CLOSE_TIME = dt_time(15, 20)  # 당일 매도 원칙에 따른 미청산 포지션 정리
 REPORT_TIME = dt_time(15, 30)       # 일일/월간 성과 리포트 이메일
 
@@ -162,10 +161,17 @@ def build_runtime(settings: Settings) -> Runtime:
     # 오래 걸리는 수집·LLM·리포트는 루프를 막지 않도록 별도 스레드로 넘긴다.
     # 모든 작업은 거래일에만 돌도록 감싼다 (_trading_days_only 참고).
     scheduler = TimeScheduler()
+    runtime = Runtime(
+        settings=settings,
+        engine=engine,
+        scheduler=scheduler,
+        ws_client=ws_client,
+        workflow=workflow,
+    )
     for trigger_time, job, name in (
         (DAILY_RESET_TIME, engine.reset_for_new_day, "daily_reset"),
-        (RECOMMEND_TIME, _off_loop(workflow.recommend_and_notify), "llm_recommend"),
-        (BUY_TIME, workflow.execute_buys, "execute_buys"),
+        # 즉시 실행 ①+② 버튼("full")과 동일한 절차 — 09:00에 추천과 매수를 이어서 수행한다
+        (BUY_TIME, _run_manual_steps(runtime, "full"), "recommend_and_buy"),
         (
             FORCE_CLOSE_TIME,
             lambda: engine.force_close_all_positions(reason="day_end"),
@@ -175,13 +181,7 @@ def build_runtime(settings: Settings) -> Runtime:
     ):
         scheduler.add_job(trigger_time, _trading_days_only(job, name), name=name)
 
-    return Runtime(
-        settings=settings,
-        engine=engine,
-        scheduler=scheduler,
-        ws_client=ws_client,
-        workflow=workflow,
-    )
+    return runtime
 
 
 # ── 즉시 실행(점검) 액션 ────────────────────────────────────
@@ -237,6 +237,26 @@ def manual_steps(runtime: Runtime, action: str) -> List[ManualStep]:
     if action not in steps:
         raise ValueError(f"Unknown manual action: {action}")
     return steps[action]
+
+
+def _run_manual_steps(runtime: Runtime, action: str) -> Callable[[], Awaitable[None]]:
+    """스케줄러가 즉시 실행 액션과 동일한 절차를 그대로 따르게 감싼다.
+
+    touches_orders 단계는 루프 스레드에서 직접 실행해 실시간 익절/손절 감시와 직렬화하고,
+    그 외(수집·LLM·메일)는 별도 스레드로 넘긴다 — engine_thread.EngineThread._run_action과 같은 규칙.
+    """
+
+    async def runner() -> None:
+        loop = asyncio.get_running_loop()
+        for step in manual_steps(runtime, action):
+            if step.touches_orders:
+                result = step.run()
+                if asyncio.iscoroutine(result):
+                    await result
+            else:
+                await loop.run_in_executor(None, step.run)
+
+    return runner
 
 
 def is_trading_day(now: Optional[datetime] = None) -> bool:

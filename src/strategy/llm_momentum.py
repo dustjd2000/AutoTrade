@@ -20,7 +20,7 @@ class BuyPlan:
 class LLMMomentumStrategy(BaseStrategy):
     """1호 전략 — LLM 기반 급등 예상 대형주 매수 (PRD 5.5-B).
 
-    08:45 LLM 추천 → 09:00 매수를 스케줄러가 트리거하는 시간 기반 전략이므로,
+    09:00 LLM 추천 → 매수를 스케줄러가 트리거하는 시간 기반 전략이므로,
     실시간 시세 콜백(generate_signal)에서는 신규 진입 신호를 내지 않는다.
     보유 포지션의 청산은 RiskManager.check_exit(익절/손절)와 장 마감 강제청산이 담당한다.
     """
