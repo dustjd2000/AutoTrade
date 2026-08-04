@@ -43,7 +43,7 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   진입점이고, "▶ 시작" 버튼을 눌러야 `EngineThread`(QThread)가 뜬다. 창을 닫으면 엔진도
   함께 정지한다.
 - `EngineThread`가 자신만의 asyncio 이벤트 루프를 새로 만들어 소유하고, 그 위에서
-  `src/core/runtime.py`의 `TimeScheduler`(시간 기반 08:40/09:00/15:20/15:30)와
+  `src/core/runtime.py`의 `TimeScheduler`(시간 기반 08:40/08:45/09:00/15:20/15:30)와
   `WebSocketClient` 콜백(실시간 시세 기반)이 함께 돈다.
 - 데이터 수집·LLM 호출·메일 발송처럼 오래 걸리는 동기 작업은 `runtime._off_loop`로 별도
   스레드에 넘긴다 — 안 그러면 그 시간 동안 WebSocket PING에 응답하지 못해 서버가 연결을
@@ -57,7 +57,7 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
 - `src/strategy/base.py`의 `BaseStrategy`(`generate_signal(MarketData) -> Signal`)가 실시간
   시세 기반 전략의 공통 인터페이스다.
 - 1호 전략(`src/strategy/llm_momentum.py`의 `LLMMomentumStrategy`)은 시간 기반 전략이라
-  `generate_signal`은 항상 `HOLD`만 반환한다. 실제 진입은 `DailyWorkflow`가 09:00
+  `generate_signal`은 항상 `HOLD`만 반환한다. 실제 진입은 `DailyWorkflow`가 08:45/09:00
   스케줄에서 `set_recommendations` → `build_buy_plans`를 직접 호출해 트리거한다. 청산은
   `RiskManager.check_exit`(실시간 시세 콜백)와 15:20 강제청산이 담당한다.
 - 새 전략을 추가할 때는 `BaseStrategy`를 구현하는 새 모듈만 추가하면 되고, 나머지

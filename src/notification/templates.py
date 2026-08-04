@@ -28,7 +28,7 @@ def recommendation_email(
     investable_ratio: float,
     target_stock_count: int,
 ) -> tuple[str, str]:
-    """09:00 LLM 추천 결과 이메일 (PRD 5.5-B 3단계) — 자동 유효성 검증 없이 그대로 전달."""
+    """08:45 LLM 추천 결과 이메일 (PRD 5.5-B 3단계) — 자동 유효성 검증 없이 그대로 전달."""
     subject = f"[AutoTrade] {today:%Y-%m-%d} 급등 예상 대형주 추천 {len(recommendations)}종목"
 
     lines = [f"{today:%Y-%m-%d} LLM 추천 결과입니다.", ""]

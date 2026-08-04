@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 class DailyWorkflow:
     """1호 전략의 하루 흐름을 스케줄러 트리거에 연결한다 (PRD 5.5-B, 5.11).
 
-    09:00 recommend_and_notify → execute_buys (일괄) → 15:30 send_final_report
+    08:45 recommend_and_notify → 09:00 execute_buys → 15:30 send_final_report
     (보유 종목이 그 전에 전량 매도되면 15:30을 기다리지 않고 최종 리포트를 보낸다)
     """
 
@@ -55,7 +55,7 @@ class DailyWorkflow:
         self._final_report_on: Optional[date] = None
 
     def recommend_and_notify(self, today: Optional[date] = None) -> None:
-        """09:00 (매수 직전) — 당일 데이터 수집 → LLM 추천 → 결과를 이메일로 발송."""
+        """08:45 — 당일 데이터 수집 → LLM 추천 → 결과를 이메일로 발송."""
         today = today or date.today()
         daily_data = self.collector.collect()
         if not daily_data:
