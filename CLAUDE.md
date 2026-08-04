@@ -43,8 +43,9 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   진입점이고, "▶ 시작" 버튼을 눌러야 `EngineThread`(QThread)가 뜬다. 창을 닫으면 엔진도
   함께 정지한다.
 - `EngineThread`가 자신만의 asyncio 이벤트 루프를 새로 만들어 소유하고, 그 위에서
-  `src/core/runtime.py`의 `TimeScheduler`(시간 기반 08:40/08:45/09:00/15:20/15:30)와
-  `WebSocketClient` 콜백(실시간 시세 기반)이 함께 돈다.
+  `src/core/runtime.py`의 `TimeScheduler`(시간 기반 08:40/추천 시각/09:00/15:20/15:30)와
+  `WebSocketClient` 콜백(실시간 시세 기반)이 함께 돈다. 이 중 LLM 추천 시각만 설정값이고
+  (`settings.recommend_time`, UI 콤보박스 08:40~08:55, 기본 08:45) 나머지는 코드 상수다.
 - 데이터 수집·LLM 호출·메일 발송처럼 오래 걸리는 동기 작업은 `runtime._off_loop`로 별도
   스레드에 넘긴다 — 안 그러면 그 시간 동안 WebSocket PING에 응답하지 못해 서버가 연결을
   끊는다.
@@ -57,7 +58,7 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
 - `src/strategy/base.py`의 `BaseStrategy`(`generate_signal(MarketData) -> Signal`)가 실시간
   시세 기반 전략의 공통 인터페이스다.
 - 1호 전략(`src/strategy/llm_momentum.py`의 `LLMMomentumStrategy`)은 시간 기반 전략이라
-  `generate_signal`은 항상 `HOLD`만 반환한다. 실제 진입은 `DailyWorkflow`가 08:45/09:00
+  `generate_signal`은 항상 `HOLD`만 반환한다. 실제 진입은 `DailyWorkflow`가 추천 시각/09:00
   스케줄에서 `set_recommendations` → `build_buy_plans`를 직접 호출해 트리거한다. 청산은
   `RiskManager.check_exit`(실시간 시세 콜백)와 15:20 강제청산이 담당한다.
 - 새 전략을 추가할 때는 `BaseStrategy`를 구현하는 새 모듈만 추가하면 되고, 나머지
@@ -69,9 +70,14 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   담는다. 별도 JSON/YAML 설정 파일은 쓰지 않는다.
 - UI가 다루는 값은 `src/ui/env_store.py`(`load_env`/`save_env`)로 `.env`를 직접 파싱해
   읽고 쓴다 — `python-dotenv`는 파일 쓰기를 지원하지 않아 자체 구현한 것.
+- 엔진은 **시작 시점에 읽은 `Settings`를 그대로 들고 돈다.** 그래서 "설정 저장" 시 값이
+  실제로 바뀌었으면 UI가 엔진을 자동으로 재시작한다(`MainWindow._needs_restart_for_changed_settings`
+  → `_restart_engine`) — 저장 완료 팝업을 먼저 띄우고 그 뒤에 재시작하며, 보유 종목이 있으면
+  감시 공백을 알리고 확인을 받는다.
 - 퍼센트 단위 설정(`TAKE_PROFIT_PERCENT` 등)은 `_percent` 필드(원값, `.env`에 저장)와
   `_ratio` 프로퍼티(0~1 환산, 계산에 사용) 쌍으로 두는 패턴을 따른다 — 새 설정을 추가할
-  때도 이 패턴을 따른다.
+  때도 이 패턴을 따른다. 시각 설정(`RECOMMEND_TIME`)도 같은 꼴로 `recommend_time_hhmm`
+  필드(`"HH:MM"` 원값)와 `recommend_time` 프로퍼티(`datetime.time` 환산) 쌍이다.
 - `mode`(`paper`/`live`)에 따라 `api_base_url`/`websocket_url`이 자동 분기된다. 실전
   전환은 `.env`에 `LIVE_TRADE_CONFIRMED=YES_I_UNDERSTAND`가 없으면 `Settings.validate()`가
   막는다.

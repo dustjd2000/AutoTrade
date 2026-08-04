@@ -11,7 +11,7 @@ from src.data.collector import DailyStockData
 logger = logging.getLogger(__name__)
 
 # 프롬프트 템플릿 버전 — 추천 근거를 나중에 추적할 수 있도록 코드로 버전 관리한다 (PRD 5.5-B).
-PROMPT_TEMPLATE_VERSION = "v2"
+PROMPT_TEMPLATE_VERSION = "v3"
 
 # 응답 토큰 한도. 사고(thinking) 토큰과 본문이 이 한도를 함께 쓰므로 넉넉히 잡는다.
 # 부족하면 사고에 예산을 다 쓰고 본문이 비거나 잘려 파싱이 실패한다.
@@ -54,7 +54,9 @@ def build_system_prompt(target_count: int) -> str:
 2. 당신의 학습 데이터에 있는 과거 정보나 기억(종목에 대한 일반적 평판 등)에 의존하지 마십시오. 오직
    사용자 메시지로 제공되는 당일 데이터만 근거로 삼으십시오.
 3. 서로 다른 종목만 선택하십시오 (중복 불가).
-4. 근거가 확실한 종목이 {target_count}개 미만이면 억지로 채우지 말고, 확신이 서는 종목만 그 수만큼(최소 1개) 추천하십시오.
+4. 절대적인 확신이 없어도, 제공된 종목 중 상대적으로 가장 강한 신호를 보이는 종목 순으로 반드시
+   {target_count}개를 선정하십시오. 전 종목의 등락률·거래량·시가갭이 전부 0에 가까워 상대 비교
+   자체가 불가능한 경우에만 예외적으로 더 적게 선정할 수 있습니다.
 
 ## 판단 기준 (제공된 데이터 범위 내에서, 우선순위 순)
 - 시가 갭·등락률의 방향성과 크기 — 동시호가(장 시작 전) 데이터에서는 두 값이 전일 종가 대비 예상체결가
@@ -94,7 +96,7 @@ def build_user_prompt(daily_data: List[DailyStockData], target_count: int = 3) -
             f"- {d.ticker} {d.name}: 등락률 {d.change_rate:+.2f}%, "
             f"거래량 {d.volume:,}, 시가갭 {d.gap_rate:+.2f}%, 뉴스/공시: {headlines}"
         )
-    lines.append(f"\n위 데이터를 참고해 급등 예상 종목을 최대 {target_count}개까지, 근거가 확실한 만큼만 JSON 배열로 추천하세요.")
+    lines.append(f"\n위 데이터를 참고해 급등 예상 종목을 상대적으로 가장 강한 순으로 최대 {target_count}개까지 JSON 배열로 추천하세요.")
     return "\n".join(lines)
 
 
@@ -122,10 +124,10 @@ def parse_recommendations(raw_text: str) -> List[StockRecommendation]:
     """LLM 응답을 구조화된 추천 목록으로 파싱한다.
 
     스키마상 최상위는 {"recommendations": [...]} 객체이지만, 배열만 온 경우도 받아들인다.
-    빈 배열은 "확신 종목 없음"이라는 유효한 결과이므로 예외를 던지지 않고 빈 리스트를
-    반환한다 (PRD 5.5-B — 무리하게 대체 로직으로 매수하지 않음). 리스트가 아닌 형식만
-    예외를 던지며, 호출측(LLMRecommender.recommend)에서 이를 잡아 "해당일 매수 스킵"으로
-    처리한다.
+    시스템 프롬프트가 상대 비교로 항상 target_count개를 채우도록 지시하므로 빈 배열은
+    전 종목 데이터가 무의미한 극단적 예외 상황에서만 나와야 정상이다 — 그래도 형식상
+    유효한 응답이므로 예외를 던지지 않고 빈 리스트를 반환하며, 호출측(LLMRecommender.recommend)이
+    이를 "해당일 매수 스킵"으로 처리한다. 리스트가 아닌 형식만 예외를 던진다.
     """
     data = json.loads(_extract_json(raw_text))
     if isinstance(data, dict):

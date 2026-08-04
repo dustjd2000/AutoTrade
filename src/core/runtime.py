@@ -31,8 +31,9 @@ from src.strategy.llm_momentum import LLMMomentumStrategy
 logger = logging.getLogger(__name__)
 
 # 1호 전략 하루 흐름 트리거 시각 (PRD 5.5-B, 5.11)
+# 데이터 수집 → LLM 추천 → 이메일 발송 시각만 설정값이다 (`settings.recommend_time`,
+# UI 콤보박스 08:40~08:55). 나머지는 장 운영 시간에 맞춰 고정한다.
 DAILY_RESET_TIME = dt_time(8, 40)   # 일일 손실 한도·매매중지 초기화 (연속 실행 대비)
-RECOMMEND_TIME = dt_time(8, 45)     # 데이터 수집 → LLM 추천 → 이메일 발송
 BUY_TIME = dt_time(9, 0)            # 자금 산정 → 매수 실행
 FORCE_CLOSE_TIME = dt_time(15, 20)  # 당일 매도 원칙에 따른 미청산 포지션 정리
 REPORT_TIME = dt_time(15, 30)       # 일일/월간 성과 리포트 이메일
@@ -164,7 +165,7 @@ def build_runtime(settings: Settings) -> Runtime:
     scheduler = TimeScheduler()
     for trigger_time, job, name in (
         (DAILY_RESET_TIME, engine.reset_for_new_day, "daily_reset"),
-        (RECOMMEND_TIME, _off_loop(workflow.recommend_and_notify), "llm_recommend"),
+        (settings.recommend_time, _off_loop(workflow.recommend_and_notify), "llm_recommend"),
         (BUY_TIME, workflow.execute_buys, "execute_buys"),
         (
             FORCE_CLOSE_TIME,

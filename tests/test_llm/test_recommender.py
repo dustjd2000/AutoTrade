@@ -168,4 +168,4 @@ def test_build_system_prompt_reflects_target_count():
     prompt = build_system_prompt(target_count=5)
 
     assert "최대 5종목" in prompt
-    assert "5개 미만이면" in prompt
+    assert "반드시" in prompt and "5개를 선정" in prompt

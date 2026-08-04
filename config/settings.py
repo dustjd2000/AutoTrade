@@ -1,5 +1,13 @@
+import logging
 import os
 from dataclasses import dataclass, field
+from datetime import time as dt_time
+
+logger = logging.getLogger(__name__)
+
+# 1호 전략 LLM 추천 시각의 기본값 — UI 콤보박스 선택 범위는 08:40~08:55(5분 단위)다.
+# 09:00 매수보다 반드시 앞서야 하므로 상한을 08:55로 둔다 (확정 2026-08-04).
+DEFAULT_RECOMMEND_TIME_HHMM = "08:45"
 
 
 @dataclass
@@ -58,6 +66,31 @@ class Settings:
     @property
     def investable_ratio(self) -> float:
         return self.investable_ratio_percent / 100
+
+    # 1호 전략 LLM 추천 시각 — .env/UI에는 "HH:MM" 문자열로 저장, 스케줄러가 쓰는
+    # datetime.time은 프로퍼티로 환산한다 (확정 2026-08-04)
+    recommend_time_hhmm: str = field(
+        default_factory=lambda: os.getenv("RECOMMEND_TIME", DEFAULT_RECOMMEND_TIME_HHMM)
+    )
+
+    @property
+    def recommend_time(self) -> dt_time:
+        """스케줄러에 넘길 추천 시각.
+
+        값이 깨져 있으면 엔진 자체를 막지 않고 기본값으로 돌린다 — .env 한 줄 오타로
+        그날 매매가 통째로 중단되는 편보다 낫다. 대신 경고를 남겨 넘어간 사실을 알린다.
+        """
+        try:
+            hour, minute = (int(part) for part in self.recommend_time_hhmm.split(":"))
+            return dt_time(hour, minute)
+        except (AttributeError, ValueError):
+            logger.warning(
+                "RECOMMEND_TIME 값이 올바르지 않아 기본값 %s를 사용합니다: %r",
+                DEFAULT_RECOMMEND_TIME_HHMM,
+                self.recommend_time_hhmm,
+            )
+            hour, minute = (int(part) for part in DEFAULT_RECOMMEND_TIME_HHMM.split(":"))
+            return dt_time(hour, minute)
 
     # 익절/손절 라인 — UI/환경변수에는 %(예: 2)로 저장, 내부 계산은 비율(0.02)로 환산
     take_profit_percent: float = field(default_factory=lambda: float(os.getenv("TAKE_PROFIT_PERCENT", "2")))

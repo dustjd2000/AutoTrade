@@ -35,7 +35,7 @@ from PyQt6.QtWidgets import (
 
 from dotenv import load_dotenv
 
-from config.settings import Settings
+from config.settings import DEFAULT_RECOMMEND_TIME_HHMM, Settings
 from src.core.runtime import MANUAL_ACTIONS, ORDER_ACTIONS
 from src.ui.engine_thread import EngineThread
 from src.ui.env_store import load_env, save_env
@@ -133,6 +133,11 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(880, 640)
         self.resize(1020, 900)
         self._engine_thread: Optional[EngineThread] = None
+        # 실행 중인 엔진이 읽어간 설정값 — 저장 시 실제로 바뀐 게 있는지 비교해,
+        # 값이 그대로면 굳이 재시작하지 않는다 (재시작 사이에는 익절/손절 감시가 멈춘다).
+        self._applied_env: Optional[dict] = None
+        # 정지 완료 신호를 받은 뒤 이어서 다시 시작해야 하는지 (설정 저장에 따른 재시작)
+        self._restart_pending = False
         # 보유 종목 표를 만드는 도중에도 갱신이 한 번 돌기 때문에, 아직 없을 수 있음을 표시해 둔다
         self._unsellable_box: Optional[QGroupBox] = None
         self._setup_style()
@@ -278,10 +283,19 @@ class MainWindow(QMainWindow):
         fund_risk_row = QHBoxLayout()
         fund_risk_row.setSpacing(10)
 
-        fund_box = QGroupBox("자금 배분 (1호 전략)")
+        fund_box = QGroupBox("1호 전략 (추천 · 자금 배분)")
         fund_form = QFormLayout(fund_box)
         fund_form.setSpacing(8)
         fund_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        # 09:00 매수보다 앞서야 하므로 08:40~08:55 안에서만 고를 수 있다
+        self._recommend_time = QComboBox()
+        for minute in range(40, 56, 5):
+            label = f"08:{minute:02d}"
+            self._recommend_time.addItem(label, label)
+        self._recommend_time.setCurrentIndex(
+            self._recommend_time.findData(DEFAULT_RECOMMEND_TIME_HHMM)
+        )
 
         self._investable_ratio = QComboBox()
         for percent in range(10, 101, 10):
@@ -294,6 +308,7 @@ class MainWindow(QMainWindow):
             self._target_stock_count.addItem(f"{count}", count)
         self._target_stock_count.setCurrentIndex(self._target_stock_count.findData(3))
 
+        fund_form.addRow("LLM 추천 시각", self._recommend_time)
         fund_form.addRow("예수금 투입 비율 (%)", self._investable_ratio)
         fund_form.addRow("추천 종목 수 (개)", self._target_stock_count)
 
@@ -390,7 +405,7 @@ class MainWindow(QMainWindow):
         run_layout.setSpacing(8)
 
         run_hint = QLabel(
-            "스케줄(08:45 / 09:00 / 15:20 / 15:30)과 무관하게 지금 바로 실행합니다. "
+            "스케줄(추천 시각 / 09:00 / 15:20 / 15:30)과 무관하게 지금 바로 실행합니다. "
             "엔진이 실행 중일 때만 동작하며, 장 시간 외에는 주문이 거부될 수 있습니다.\n"
             "일괄 수행은 ①② (추천→매수)만 돌립니다. 매수 후에는 설정된 익절/손절 라인이 자동 감시되며, "
             "청산(15:20)·리포트(15:30)는 스케줄에 맡깁니다."
@@ -638,6 +653,9 @@ class MainWindow(QMainWindow):
         self._stop_loss.setText(env.get("STOP_LOSS_PERCENT", "2"))
         self._select_combo_value(self._investable_ratio, env.get("INVESTABLE_RATIO_PERCENT"), default=50)
         self._select_combo_value(self._target_stock_count, env.get("TARGET_STOCK_COUNT"), default=3)
+        self._select_combo_text(
+            self._recommend_time, env.get("RECOMMEND_TIME"), default=DEFAULT_RECOMMEND_TIME_HHMM
+        )
         mode = env.get("TRADE_MODE", "paper")
         if mode == "live":
             self._radio_live.setChecked(True)
@@ -655,7 +673,17 @@ class MainWindow(QMainWindow):
         index = combo.findData(value)
         combo.setCurrentIndex(index if index >= 0 else combo.findData(default))
 
-    def _save_settings(self, show_popup: bool = False) -> None:
+    def _select_combo_text(self, combo: QComboBox, raw_value: Optional[str], default: str) -> None:
+        """문자열 값을 다루는 콤보박스용 — 숫자로 바꾸지 않는다는 점만 위와 다르다."""
+        index = combo.findData(raw_value) if raw_value else -1
+        combo.setCurrentIndex(index if index >= 0 else combo.findData(default))
+
+    def _save_settings(self, show_popup: bool = False) -> dict:
+        """화면 값을 `.env`에 저장하고, 저장한 값을 그대로 돌려준다.
+
+        돌려준 값은 `_start_engine`이 "지금 돌고 있는 엔진이 읽어간 설정"으로 기억해 두었다가
+        나중에 저장된 값과 비교하는 데 쓴다 (`_needs_restart_for_changed_settings`).
+        """
         mode = "live" if self._radio_live.isChecked() else "paper"
         values = {
             "TRADE_MODE": mode,
@@ -671,6 +699,7 @@ class MainWindow(QMainWindow):
             "STOP_LOSS_PERCENT": self._stop_loss.text().strip() or "2",
             "INVESTABLE_RATIO_PERCENT": str(self._investable_ratio.currentData()),
             "TARGET_STOCK_COUNT": str(self._target_stock_count.currentData()),
+            "RECOMMEND_TIME": str(self._recommend_time.currentData()),
         }
         if mode == "live":
             values["LIVE_TRADE_CONFIRMED"] = "YES_I_UNDERSTAND"
@@ -679,9 +708,69 @@ class MainWindow(QMainWindow):
 
         save_env(ENV_PATH, values)
         logger.info("설정 저장 완료 (mode=%s)", mode)
-        self._statusbar.showMessage("설정이 저장되었습니다.", 3000)
+
+        # 저장만으로는 실행 중인 엔진에 반영되지 않는다 — 바뀐 값이 있으면 다시 시작해야 한다
+        restarting = self._needs_restart_for_changed_settings(values)
+        message = "설정이 저장되었습니다. (재시작됨)" if restarting else "설정이 저장되었습니다."
+        self._statusbar.showMessage(message, 3000)
         if show_popup:
-            QMessageBox.information(self, "설정 저장", "설정이 저장되었습니다.")
+            QMessageBox.information(self, "설정 저장", message)
+
+        # 재시작은 저장 완료를 알린 뒤에 한다 — 팝업이 뜨기도 전에 엔진이 멈추면
+        # 무슨 일이 벌어지는지 모른 채 화면만 정지 상태로 바뀐다.
+        if restarting:
+            self._restart_engine()
+        return values
+
+    def _needs_restart_for_changed_settings(self, values: dict) -> bool:
+        """설정이 바뀐 채로 엔진이 돌고 있어 재시작이 필요한지.
+
+        엔진은 시작 시점에 읽은 `Settings`를 그대로 들고 돌기 때문에(스케줄 시각, 익절/손절
+        라인, 계좌 등), `.env`만 고쳐서는 아무것도 바뀌지 않는다.
+        """
+        if self._engine_thread is None or values == self._applied_env:
+            return False
+
+        # 재시작하는 동안에는 WebSocket이 끊겨 익절/손절 감시가 잠시 멈춘다.
+        # 보유 종목이 없으면 잃을 것이 없으므로 묻지 않고 바로 재시작한다.
+        held = self._engine_thread.open_tickers()
+        if held and not self._confirm_restart_with_positions(held):
+            logger.info("설정을 저장했지만 재시작하지 않았습니다 — 다음 시작 때 반영됩니다.")
+            return False
+        return True
+
+    def _restart_engine(self) -> None:
+        """정지가 끝나면 이어서 다시 시작하도록 표시해 두고 엔진을 정지시킨다.
+
+        정지는 스레드 종료를 기다려야 하므로, 실제 재시작은 `_on_engine_finished`가 잇는다.
+        """
+        logger.info("설정이 변경되어 엔진을 재시작합니다.")
+        self._statusbar.showMessage("설정이 변경되어 엔진을 재시작합니다...", 5000)
+        self._restart_pending = True
+        self._stop_engine()
+
+    def _confirm_restart_with_positions(self, held: list) -> bool:
+        logger.warning("보유 종목이 있는 상태에서 설정 변경에 따른 재시작을 시도합니다: %s", held)
+        box = QMessageBox(self)
+        box.setWindowTitle("보유 종목이 있습니다")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(
+            f"설정을 반영하려면 엔진을 다시 시작해야 합니다.\n"
+            f"아직 청산되지 않은 보유 종목이 {len(held)}개 있습니다.\n{', '.join(held)}\n\n"
+            "다시 시작하는 동안에는 익절/손절 감시가 잠시 멈춥니다\n"
+            "(재시작 후 보유 종목은 자동으로 감시 대상에 다시 편입됩니다).\n\n"
+            "지금 재시작할까요?"
+        )
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        box.setStyleSheet(f"""
+            QLabel {{ color: {COLOR_TEXT}; }}
+            QPushButton {{
+                background: {COLOR_SURFACE}; color: {COLOR_TEXT};
+                border: 1px solid {COLOR_BORDER}; padding: 6px 18px; min-width: 64px;
+            }}
+        """)
+        return box.exec() == QMessageBox.StandardButton.Yes
 
     def _update_mode_hint(self) -> None:
         is_live = self._radio_live.isChecked()
@@ -717,7 +806,7 @@ class MainWindow(QMainWindow):
             return
 
         # 화면의 현재 입력값을 그대로 반영해 시작한다
-        self._save_settings()
+        applied = self._save_settings()
         load_dotenv(ENV_PATH, override=True)
 
         try:
@@ -738,6 +827,8 @@ class MainWindow(QMainWindow):
         thread.action_started.connect(self._on_action_started)
         thread.action_finished.connect(self._on_action_finished)
         self._engine_thread = thread
+        # 이 엔진이 어떤 설정으로 떴는지 기억해 둔다 — 이후 저장값과 비교해 재시작 여부를 정한다
+        self._applied_env = applied
         thread.start()
 
     def _stop_engine(self) -> None:
@@ -842,7 +933,17 @@ class MainWindow(QMainWindow):
 
     def _on_engine_finished(self) -> None:
         self._engine_thread = None
+        self._applied_env = None
         self._set_engine_running(False)
+
+        if self._restart_pending:
+            self._restart_pending = False
+            logger.info("엔진 정지 완료 — 변경된 설정으로 다시 시작합니다.")
+            self._statusbar.showMessage("변경된 설정으로 다시 시작합니다...", 3000)
+            # 정지 신호를 처리하는 도중에 새 스레드를 만들지 않도록 한 틱 뒤로 미룬다
+            QTimer.singleShot(0, self._start_engine)
+            return
+
         self._statusbar.showMessage("엔진이 정지되었습니다.", 3000)
 
     def closeEvent(self, event) -> None:
@@ -855,6 +956,8 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
             logger.info("창 종료 — 엔진을 정지합니다.")
+            # 재시작 대기 중에 창을 닫으면 정지 신호가 엔진을 다시 띄우려 한다
+            self._restart_pending = False
             self._engine_thread.stop()
         super().closeEvent(event)
 
