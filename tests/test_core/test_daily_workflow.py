@@ -1,6 +1,9 @@
 from datetime import date
 from types import SimpleNamespace
 
+import pytest
+
+from src.core import daily_workflow
 from src.core.daily_workflow import DailyWorkflow
 from src.core.events import FillRecord, MarketData, OrderResult, OrderSide, OrderStatus
 from src.data.collector import DailyStockData
@@ -8,6 +11,14 @@ from src.llm.recommender import StockRecommendation
 from src.logger.trade_store import DailySummary, MonthlySummary, TradeRow
 from src.risk.manager import exit_trigger_price
 from src.strategy.llm_momentum import LLMMomentumStrategy
+
+
+@pytest.fixture(autouse=True)
+def report_mark(tmp_path, monkeypatch):
+    """최종 리포트 발송 표시를 테스트마다 격리한다 (실제 data/ 를 건드리지 않도록)."""
+    path = tmp_path / "final_report_sent"
+    monkeypatch.setattr(daily_workflow, "DEFAULT_REPORT_MARK_PATH", path)
+    return path
 
 
 class FakeEmail:
@@ -256,24 +267,24 @@ def test_rejected_buy_is_not_treated_as_ordered():
     assert any("한 건도 접수되지 않았습니다" in n for n in notifications)
 
 
-def test_buy_resets_final_report_flag():
+def test_buy_resets_final_report_flag(report_mark):
     """매수로 보유가 다시 생기면 앞서 보낸 최종 리포트는 더 이상 최종이 아니다."""
     recs = [StockRecommendation(ticker="005930", name="삼성전자", reason="a")]
     workflow, _, _, _, strategy = make_workflow(recommendations=recs)
     strategy.set_recommendations(recs)
-    workflow._final_report_on = REPORT_DAY
+    report_mark.write_text(REPORT_DAY.isoformat(), encoding="utf-8")
 
     workflow.execute_buys()
 
-    assert workflow._final_report_on is None
+    assert not report_mark.exists()
 
 
-def test_rejected_buy_keeps_final_report_flag():
+def test_rejected_buy_keeps_final_report_flag(report_mark):
     """매수가 전부 거부돼 보유가 생기지 않았다면 앞서 보낸 리포트가 여전히 최종이다."""
     recs = [StockRecommendation(ticker="005930", name="삼성전자", reason="a")]
     workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
     strategy.set_recommendations(recs)
-    workflow._final_report_on = REPORT_DAY
+    report_mark.write_text(REPORT_DAY.isoformat(), encoding="utf-8")
     order_client.send_order = lambda request: OrderResult(
         order_id="1",
         ticker=request.ticker,
@@ -285,7 +296,7 @@ def test_rejected_buy_keeps_final_report_flag():
 
     workflow.execute_buys()
 
-    assert workflow._final_report_on == REPORT_DAY
+    assert report_mark.read_text(encoding="utf-8") == REPORT_DAY.isoformat()
 
 
 def test_note_open_position_is_called_for_ordered_stock():

@@ -2,12 +2,23 @@
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
+
 from src.api.account import Position
+from src.core import daily_workflow
 from src.core.daily_workflow import DailyWorkflow
 from src.core.engine import TradingEngine
 from src.core.events import OrderResult, OrderStatus
 from src.core.runtime import CLOSEOUT_SETTLE_SECONDS, closeout_report_due
 from src.logger.trade_store import DailySummary, MonthlySummary
+
+
+@pytest.fixture(autouse=True)
+def report_mark(tmp_path, monkeypatch):
+    """최종 리포트 발송 표시를 테스트마다 격리한다 (실제 data/ 를 건드리지 않도록)."""
+    path = tmp_path / "final_report_sent"
+    monkeypatch.setattr(daily_workflow, "DEFAULT_REPORT_MARK_PATH", path)
+    return path
 
 
 def make_engine(positions, sell_status=OrderStatus.FILLED):
@@ -197,6 +208,21 @@ def test_closeout_report_is_skipped_after_scheduled_report():
     assert len(email.sent) == 1
     _, body, _ = email.sent[0]
     assert "정규장 마감(15:30) 직전 집계" in body
+
+
+def test_scheduled_report_is_skipped_after_engine_restart():
+    """설정 저장·앱 재실행으로 워크플로가 새로 만들어져도 이미 보낸 리포트는 다시 보내지 않는다.
+
+    발송 표시가 인메모리 필드였을 때 오전 청산 리포트와 15:30 리포트가 둘 다 나갔다.
+    """
+    workflow, email = make_workflow()
+    workflow.send_final_report(REPORT_DAY, closed_out=True)
+
+    restarted, restarted_email = make_workflow()
+    restarted.send_final_report(REPORT_DAY)  # 15:30 스케줄
+
+    assert len(email.sent) == 1
+    assert restarted_email.sent == []
 
 
 def test_failed_send_leaves_report_pending():
