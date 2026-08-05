@@ -6,12 +6,12 @@ from typing import List, Optional
 import anthropic
 
 from config.settings import Settings
-from src.data.collector import DailyStockData
+from src.data.collector import LARGE_CAP_LABEL, MID_CAP_LABEL, DailyStockData
 
 logger = logging.getLogger(__name__)
 
 # 프롬프트 템플릿 버전 — 추천 근거를 나중에 추적할 수 있도록 코드로 버전 관리한다 (PRD 5.5-B).
-PROMPT_TEMPLATE_VERSION = "v3"
+PROMPT_TEMPLATE_VERSION = "v4"
 
 # 응답 토큰 한도. 사고(thinking) 토큰과 본문이 이 한도를 함께 쓰므로 넉넉히 잡는다.
 # 부족하면 사고에 예산을 다 쓰고 본문이 비거나 잘려 파싱이 실패한다.
@@ -42,32 +42,53 @@ RECOMMENDATION_SCHEMA = {
     "additionalProperties": False,
 }
 
+def cap_quota(target_count: int) -> tuple:
+    """(대형주 수, 중형주 수) — 중형주 1종목을 섞고 나머지는 대형주로 채운다 (확정 2026-08-05).
+
+    한 종목만 뽑는 설정에서는 중형주로 채우지 않는다. 그 한 자리까지 중형주로 가면
+    당일 자금 전부가 상대적으로 얇은 종목 하나에 들어간다.
+    """
+    if target_count <= 1:
+        return target_count, 0
+    return target_count - 1, 1
+
+
 def build_system_prompt(target_count: int) -> str:
+    large_count, mid_count = cap_quota(target_count)
+    quota_rule = (
+        f"대형주에서 {large_count}종목, 중형주에서 {mid_count}종목을 선정하십시오. "
+        "각 종목의 규모 분류는 사용자 데이터에 표시되어 있습니다."
+        if mid_count
+        else f"대형주에서 {large_count}종목을 선정하십시오."
+    )
     return f"""당신은 한국 주식시장(코스피) 단기 모멘텀을 분석하는 애널리스트입니다.
 
 ## 역할
 사용자가 제공하는 당일 데이터만을 근거로, 오늘 장중 상대적으로 강한 상승 흐름을 보일 가능성이 높은
-코스피 대형주(시가총액 상위 100종목) 최대 {target_count}종목을 선별합니다.
+코스피 종목 {target_count}종목을 선별합니다. 사용자가 제공하는 목록은 이미 시가갭 상위로 추려진
+후보군이며, 규모(대형주/중형주)별로 나뉘어 있습니다.
 
 ## 절대 규칙
 1. 반드시 제공된 데이터에 있는 종목 중에서만 선택하십시오. 목록에 없는 종목을 추천하지 마십시오.
 2. 당신의 학습 데이터에 있는 과거 정보나 기억(종목에 대한 일반적 평판 등)에 의존하지 마십시오. 오직
    사용자 메시지로 제공되는 당일 데이터만 근거로 삼으십시오.
 3. 서로 다른 종목만 선택하십시오 (중복 불가).
-4. 절대적인 확신이 없어도, 제공된 종목 중 상대적으로 가장 강한 신호를 보이는 종목 순으로 반드시
-   {target_count}개를 선정하십시오. 전 종목의 등락률·거래량·시가갭이 전부 0에 가까워 상대 비교
-   자체가 불가능한 경우에만 예외적으로 더 적게 선정할 수 있습니다.
+4. **규모별 배분: {quota_rule}**
+5. 절대적인 확신이 없어도, 제공된 종목 중 상대적으로 가장 강한 신호를 보이는 종목 순으로 반드시
+   위 배분대로 선정하십시오. 해당 규모의 후보 자체가 부족한 경우에만 더 적게 선정할 수 있습니다.
 
 ## 판단 기준 (제공된 데이터 범위 내에서, 우선순위 순)
+- 거래량 급증 배수 — 20일 평균 거래량 대비 오늘 거래량의 배수입니다. 평소보다 뚜렷하게 많은 거래가
+  실린 종목(2배 이상)은 그만큼 관심이 몰렸다는 뜻이므로 가장 무겁게 보십시오.
+  '판단불가'로 표시된 종목은 이 기준을 적용하지 말고 나머지 기준으로만 평가하십시오
 - 시가 갭·등락률의 방향성과 크기 — 동시호가(장 시작 전) 데이터에서는 두 값이 전일 종가 대비 예상체결가
   괴리로 같은 계산식이므로 사실상 하나의 신호로 취급하십시오
-- 거래량 — 절대적인 평균 대비 급증 여부는 판단할 수 없으니, 함께 제공된 다른 종목과의 상대적 규모로만
-  참고하십시오
 - 뉴스/공시 헤드라인의 구체성 (실적·수주·계약 등 구체적 재료인지, 단순 언급인지)
 
 ## 근거 작성 지침
 reason은 반드시 제공된 데이터의 구체적 수치를 인용해 작성하십시오.
-("등락률 +2.15%, 거래량 320,450주"처럼 구체적으로. "긍정적 모멘텀", "상승 여력" 같은 모호한 표현은 금지합니다.)"""
+("등락률 +2.15%, 거래량 320,450주(평균 대비 3.4배)"처럼 구체적으로.
+"긍정적 모멘텀", "상승 여력" 같은 모호한 표현은 금지합니다.)"""
 
 
 @dataclass
@@ -82,21 +103,41 @@ def build_user_prompt(daily_data: List[DailyStockData], target_count: int = 3) -
 
     if is_premarket:
         lines = [
-            "장 시작 전(동시호가) 시점의 코스피 대형주 데이터입니다.",
+            "장 시작 전(동시호가) 시점의 코스피 종목 데이터입니다.",
             "아래 수치는 정규장 체결이 아니라 **동시호가 예상체결가·예상체결량** 기준이며,",
             "'등락률'과 '시가갭'은 전일 종가 대비 예상체결가의 괴리를 뜻합니다.",
-            "",
+            "'평균대비'는 20일 평균 거래량 대비 오늘 거래량의 배수입니다.",
         ]
     else:
-        lines = ["오늘의 코스피 대형주 종목별 데이터:"]
+        lines = [
+            "오늘의 코스피 종목별 데이터입니다.",
+            "'평균대비'는 20일 평균 거래량 대비 오늘 거래량의 배수입니다.",
+        ]
 
-    for d in daily_data:
-        headlines = "; ".join(d.headlines) if d.headlines else "없음"
-        lines.append(
-            f"- {d.ticker} {d.name}: 등락률 {d.change_rate:+.2f}%, "
-            f"거래량 {d.volume:,}, 시가갭 {d.gap_rate:+.2f}%, 뉴스/공시: {headlines}"
-        )
-    lines.append(f"\n위 데이터를 참고해 급등 예상 종목을 상대적으로 가장 강한 순으로 최대 {target_count}개까지 JSON 배열로 추천하세요.")
+    # 규모별로 묶어서 보여준다 — 배분 규칙이 규모 기준이라 섞어 놓으면 세기 어렵다
+    for tier in (LARGE_CAP_LABEL, MID_CAP_LABEL):
+        in_tier = [d for d in daily_data if d.cap_tier == tier]
+        if not in_tier:
+            continue
+        lines.append(f"\n## {tier} ({len(in_tier)}종목)")
+        for d in in_tier:
+            headlines = "; ".join(d.headlines) if d.headlines else "없음"
+            surge = f"{d.volume_surge:.2f}배" if d.volume_surge else "판단불가"
+            lines.append(
+                f"- {d.ticker} {d.name}: 등락률 {d.change_rate:+.2f}%, "
+                f"거래량 {d.volume:,}(평균대비 {surge}), 시가갭 {d.gap_rate:+.2f}%, "
+                f"뉴스/공시: {headlines}"
+            )
+
+    large_count, mid_count = cap_quota(target_count)
+    quota = (
+        f"대형주 {large_count}종목 + 중형주 {mid_count}종목"
+        if mid_count
+        else f"대형주 {large_count}종목"
+    )
+    lines.append(
+        f"\n위 데이터를 참고해 급등 예상 종목을 {quota}, 총 {target_count}개를 JSON 배열로 추천하세요."
+    )
     return "\n".join(lines)
 
 
@@ -165,12 +206,20 @@ class LLMRecommender:
     ) -> Optional[List[StockRecommendation]]:
         """LLM 호출 및 응답 파싱. 실패/타임아웃/형식 오류 시 None을 반환하고 해당일 매수는 스킵된다."""
         target_count = self.settings.target_stock_count
+        user_prompt = build_user_prompt(daily_data, target_count)
+        # 어떤 입력으로 그 추천이 나왔는지 남긴다 — 추천이 타당했는지 되짚을 유일한 근거다
+        logger.info(
+            "LLM 요청 (prompt_version=%s, 후보 %d종목):\n%s",
+            PROMPT_TEMPLATE_VERSION,
+            len(daily_data),
+            user_prompt,
+        )
         try:
             response = self._client.with_options(timeout=timeout_seconds).messages.create(
                 model=self.settings.llm_model,
                 max_tokens=MAX_TOKENS,
                 system=build_system_prompt(target_count),
-                messages=[{"role": "user", "content": build_user_prompt(daily_data, target_count)}],
+                messages=[{"role": "user", "content": user_prompt}],
                 # 응답 형식을 API가 스키마로 강제한다 (설명이 섞이거나 코드펜스가 붙는 것을 방지)
                 output_config={
                     "format": {"type": "json_schema", "schema": RECOMMENDATION_SCHEMA}

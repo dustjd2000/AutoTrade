@@ -1,3 +1,4 @@
+from datetime import date
 from types import SimpleNamespace
 
 from src.api.market_data import MarketDataClient
@@ -108,3 +109,57 @@ def test_get_current_price_returns_absolute_price():
 
     assert data.price == 179000.0
     assert data.volume == 1000
+
+
+def capturing_client(response):
+    """요청 파라미터를 확인해야 하는 테스트용 — 마지막 호출 인자를 함께 돌려준다."""
+    calls = []
+
+    def request(path, api_id, params, *a, **kw):
+        calls.append({"path": path, "api_id": api_id, "params": params})
+        return response, {}
+
+    client = MarketDataClient.__new__(MarketDataClient)
+    client.settings = SimpleNamespace()
+    client.auth = SimpleNamespace()
+    client._client = SimpleNamespace(request=request)
+    return client, calls
+
+
+def test_get_ohlcv_sends_required_query_date():
+    """qry_dt는 ka10086의 필수값 — 비워 보내면 API가 return_code=2로 거부한다."""
+    client, calls = capturing_client({"daly_stkpc": [{"trde_qty": "100"}]})
+
+    client.get_ohlcv("005930", base_date=date(2026, 8, 5))
+
+    assert calls[0]["params"]["qry_dt"] == "20260805"
+    assert calls[0]["params"]["stk_cd"] == "005930"
+
+
+def test_get_ohlcv_defaults_query_date_to_today():
+    client, calls = capturing_client({"daly_stkpc": []})
+
+    client.get_ohlcv("005930")
+
+    assert calls[0]["params"]["qry_dt"] == date.today().strftime("%Y%m%d")
+
+
+def test_get_average_volume_averages_daily_volumes():
+    client = make_client(
+        {"daly_stkpc": [{"trde_qty": "300"}, {"trde_qty": "100"}, {"trde_qty": "200"}]}
+    )
+
+    assert client.get_average_volume("005930") == 200.0
+
+
+def test_get_average_volume_ignores_zero_volume_days():
+    """장 전 당일 봉은 거래량이 0으로 들어와 평균을 끌어내린다."""
+    client = make_client({"daly_stkpc": [{"trde_qty": "0"}, {"trde_qty": "100"}, {"trde_qty": "300"}]})
+
+    assert client.get_average_volume("005930") == 200.0
+
+
+def test_get_average_volume_returns_zero_when_no_candles():
+    client = make_client({"daly_stkpc": []})
+
+    assert client.get_average_volume("005930") == 0.0

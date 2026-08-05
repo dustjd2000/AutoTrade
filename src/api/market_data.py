@@ -1,5 +1,6 @@
 import logging
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Dict, List, Optional
 
 from config.settings import Settings
@@ -41,6 +42,9 @@ DAILY_PRICE_API_ID = "ka10086"  # 일별주가요청
 
 STOCK_INFO_PATH = "/api/dostk/stkinfo"
 MARKET_PATH = "/api/dostk/mrkcond"
+
+# 거래량 급증 판정의 기준 기간 — ka10086이 한 번 호출에 20거래일치를 돌려주므로 그대로 쓴다
+AVERAGE_VOLUME_DAYS = 20
 
 
 def _first_present(row: Dict[str, Any], *keys: str):
@@ -135,13 +139,26 @@ class MarketDataClient:
             is_premarket=is_premarket,
         )
 
-    def get_ohlcv(self, ticker: str, period: str = "D", count: int = 100) -> List[dict]:
-        """일봉 데이터 조회. period는 현재 일봉('D')만 지원한다."""
+    def get_ohlcv(
+        self,
+        ticker: str,
+        period: str = "D",
+        count: int = 100,
+        base_date: Optional[date] = None,
+    ) -> List[dict]:
+        """일봉 데이터 조회 (기준일로부터 과거 방향). period는 현재 일봉('D')만 지원한다.
+
+        `qry_dt`는 ka10086의 필수 파라미터다 — 비워서 보내면 API가 거부한다
+        (return_code=2, "필수입력 파라미터=qry_dt"). 기준일을 주지 않으면 오늘로 잡는다.
+        """
         if period != "D":
             raise NotImplementedError("분봉 조회는 별도 TR(ka10080 계열) 연동이 필요합니다.")
 
+        query_date = (base_date or date.today()).strftime("%Y%m%d")
         data, _ = self._client.request(
-            MARKET_PATH, DAILY_PRICE_API_ID, {"stk_cd": ticker, "qry_dt": "", "indc_tp": "0"}
+            MARKET_PATH,
+            DAILY_PRICE_API_ID,
+            {"stk_cd": ticker, "qry_dt": query_date, "indc_tp": "0"},
         )
         for key in ("daly_stkpc", "output", "list"):
             if isinstance(data.get(key), list):
@@ -149,6 +166,24 @@ class MarketDataClient:
 
         logger.error("일별주가 응답에서 목록 필드를 찾지 못했습니다. 응답 키: %s", list(data.keys()))
         return []
+
+    def get_average_volume(self, ticker: str, days: int = AVERAGE_VOLUME_DAYS) -> float:
+        """최근 거래일 평균 거래량 — 당일 거래량이 평소 대비 얼마나 늘었는지 재는 기준값.
+
+        당일 봉은 장 전이면 거래량이 0이라 평균에서 자연히 빠지고, 장중이면 아직 진행 중인
+        값이라 평균을 왜곡한다 — 어느 쪽이든 0인 값을 걸러내는 것으로 함께 처리한다.
+        조회에 실패하거나 쓸 수 있는 봉이 없으면 0.0을 돌려준다(급증률 계산을 건너뛴다는 뜻).
+        """
+        candles = self.get_ohlcv(ticker, period="D", count=days)
+        volumes = [
+            volume
+            for volume in (to_int(_first_present(c, "trde_qty", "acml_vol")) for c in candles)
+            if volume > 0
+        ]
+        if not volumes:
+            logger.warning("평균 거래량을 계산할 일봉이 없습니다: %s", ticker)
+            return 0.0
+        return sum(volumes) / len(volumes)
 
     def get_orderbook(self, ticker: str) -> dict:
         """호가 조회."""

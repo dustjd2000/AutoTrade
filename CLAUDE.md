@@ -57,6 +57,10 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
 ### 전략 프레임워크
 - `src/strategy/base.py`의 `BaseStrategy`(`generate_signal(MarketData) -> Signal`)가 실시간
   시세 기반 전략의 공통 인터페이스다.
+- 데이터 수집은 **2단계**다 (`src/data/collector.py`). 1단계로 대형·중형주 291종목의 기본정보를
+  모으고, 방향성 신호가 없는 종목(등락률·시가갭이 둘 다 0)을 버린 뒤, 규모별 시가갭 상위
+  40종목(대형 25/중형 15)에만 일봉을 붙여 20일 평균 대비 거래량 급증 배수를 계산한다.
+  전 종목에 일봉까지 돌리면 호출이 두 배가 되어 09:00 전에 끝나지 않는다.
 - 1호 전략(`src/strategy/llm_momentum.py`의 `LLMMomentumStrategy`)은 시간 기반 전략이라
   `generate_signal`은 항상 `HOLD`만 반환한다. 실제 진입은 `DailyWorkflow`가 추천 시각/09:00
   스케줄에서 `set_recommendations` → `build_buy_plans`를 직접 호출해 트리거한다. 청산은

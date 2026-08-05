@@ -7,6 +7,7 @@ from src.llm.recommender import (
     LLMRecommender,
     build_system_prompt,
     build_user_prompt,
+    cap_quota,
     parse_recommendations,
 )
 
@@ -161,11 +162,50 @@ def test_build_user_prompt_reflects_target_count():
     ]
     prompt = build_user_prompt(daily_data, target_count=5)
 
-    assert "최대 5개까지" in prompt
+    assert "대형주 4종목 + 중형주 1종목" in prompt
+    assert "총 5개" in prompt
 
 
 def test_build_system_prompt_reflects_target_count():
     prompt = build_system_prompt(target_count=5)
 
-    assert "최대 5종목" in prompt
-    assert "반드시" in prompt and "5개를 선정" in prompt
+    assert "5종목을 선별" in prompt
+    assert "대형주에서 4종목, 중형주에서 1종목" in prompt
+
+
+@pytest.mark.parametrize(
+    "target_count, expected",
+    [(1, (1, 0)), (2, (1, 1)), (3, (2, 1)), (10, (9, 1))],
+)
+def test_cap_quota_reserves_one_slot_for_mid_cap(target_count, expected):
+    """중형주는 항상 1종목. 단 한 종목만 뽑는 설정에서는 자금 전부가 얇은 종목에 들어가므로 제외."""
+    assert cap_quota(target_count) == expected
+
+
+def test_build_user_prompt_groups_by_cap_tier_and_shows_volume_surge():
+    daily_data = [
+        DailyStockData(
+            ticker="005930",
+            name="삼성전자",
+            change_rate=1.5,
+            volume=1_000_000,
+            gap_rate=0.8,
+            cap_tier="대형주",
+            volume_surge=3.42,
+        ),
+        DailyStockData(
+            ticker="006340",
+            name="중형종목",
+            change_rate=2.0,
+            volume=500_000,
+            gap_rate=1.9,
+            cap_tier="중형주",
+        ),
+    ]
+    prompt = build_user_prompt(daily_data, target_count=3)
+
+    assert "## 대형주 (1종목)" in prompt
+    assert "## 중형주 (1종목)" in prompt
+    assert "평균대비 3.42배" in prompt
+    # 급증률을 못 구한 종목은 그 기준을 빼고 보라고 알려야 한다
+    assert "평균대비 판단불가" in prompt
