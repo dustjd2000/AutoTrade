@@ -33,7 +33,8 @@ DEFAULT_REPORT_MARK_PATH = Path("data") / "final_report_sent"
 class DailyWorkflow:
     """1호 전략의 하루 흐름을 스케줄러 트리거에 연결한다 (PRD 5.5-B, 5.11).
 
-    08:45 recommend_and_notify → 09:00 execute_buys → 15:30 send_final_report
+    추천 시각 recommend_and_notify → 09:00 execute_buys → 09:30 cancel_unfilled_buys
+    → 15:30 send_final_report
     (보유 종목이 그 전에 전량 매도되면 15:30을 기다리지 않고 최종 리포트를 보낸다)
     """
 
@@ -63,6 +64,11 @@ class DailyWorkflow:
         self.report_mark_path = Path(
             report_mark_path if report_mark_path is not None else DEFAULT_REPORT_MARK_PATH
         )
+        # 09:00 매수 결과를 09:30 마무리(cancel_unfilled_buys)까지 들고 있는다 — 지정가
+        # 주문은 접수 시점에 체결 여부를 알 수 없어, 결과 메일을 그때 보내야 확정된 값이 실린다.
+        self._buy_records: List[BuyRecord] = []
+        self._buy_cash: float = 0.0
+        self._buy_amount_per_stock: float = 0.0
 
     def recommend_and_notify(self, today: Optional[date] = None) -> None:
         """08:45 — 당일 데이터 수집 → LLM 추천 → 결과를 이메일로 발송."""
@@ -87,7 +93,11 @@ class DailyWorkflow:
         logger.info("Recommendation email sent for %s", today)
 
     def execute_buys(self) -> None:
-        """09:00 — 예수금 기준으로 자금을 배분해 추천 종목을 시장가 매수."""
+        """09:00 — 예수금 기준으로 자금을 배분해 추천 종목을 목표 매수가에 지정가 매수.
+
+        체결 확인과 결과 메일은 여기서 하지 않는다 — 지정가 주문은 접수 직후에 체결 여부를
+        알 수 없어, 09:30 `cancel_unfilled_buys`가 미체결분을 정리한 뒤에 알린다.
+        """
         cash = self.account.get_cash()
         plans = self.strategy.build_buy_plans(cash)
         if not plans:
@@ -107,11 +117,11 @@ class DailyWorkflow:
         for plan in plans:
             label = format_stock(plan.ticker, plan.name)
             try:
-                price = self.engine.market_data.get_current_price(plan.ticker).price
+                price = float(plan.target_price)
                 quantity = int(plan.amount // price)
                 if quantity <= 0:
                     logger.warning(
-                        "매수 건너뜀: %s — 1주 %s원이 종목당 배정액 %s원을 초과합니다.",
+                        "매수 건너뜀: %s — 목표가 1주 %s원이 종목당 배정액 %s원을 초과합니다.",
                         label,
                         f"{price:,.0f}",
                         f"{plan.amount:,.0f}",
@@ -125,13 +135,13 @@ class DailyWorkflow:
                             name=plan.name,
                             outcome=BuyOutcome.SKIPPED,
                             reference_price=price,
-                            note=f"1주 {price:,.0f}원이 배정액 {plan.amount:,.0f}원을 초과",
+                            note=f"목표가 1주 {price:,.0f}원이 배정액 {plan.amount:,.0f}원을 초과",
                         )
                     )
                     continue
 
                 logger.info(
-                    "매수 산정: %s 현재가 %s원 × %d주 = %s원 (배정 %s원)",
+                    "매수 산정: %s 목표가 %s원 × %d주 = %s원 (배정 %s원)",
                     label,
                     f"{price:,.0f}",
                     quantity,
@@ -142,8 +152,9 @@ class DailyWorkflow:
                 request = OrderRequest(
                     ticker=plan.ticker,
                     side=OrderSide.BUY,
-                    order_type=OrderType.MARKET,
+                    order_type=OrderType.LIMIT,
                     quantity=quantity,
+                    price=price,
                     name=plan.name,
                 )
                 if not self.engine.risk_manager.approve(request, positions, reference_price=price):
@@ -200,8 +211,9 @@ class DailyWorkflow:
                 # 체결 통보를 기다리지 않고 감시 대상으로 표시한다 (창 종료 경고의 근거)
                 self.engine.note_open_position(plan.ticker)
                 logger.info(
-                    "매수 주문 접수: %s x%d주 (상태 %s, 주문번호 %s)",
+                    "지정가 매수 접수: %s %s원 x%d주 (상태 %s, 주문번호 %s)",
                     label,
+                    f"{price:,.0f}",
                     quantity,
                     result.status.value,
                     result.order_id,
@@ -253,19 +265,104 @@ class DailyWorkflow:
                     f"대상: {ordered}"
                 )
 
-        # 구독을 먼저 걸고 나서 알린다 — SMTP는 몇 초가 걸리는데, 그동안 익절/손절 감시가
-        # 시작되지 않으면 매수 직후 급락 구간을 놓친다.
-        self._notify_buy_result(cash, plans[0].amount, records)
+        # 결과 메일은 09:30 cancel_unfilled_buys가 보낸다 — 지정가라 지금은 체결 여부를 모른다
+        self._buy_records = records
+        self._buy_cash = cash
+        self._buy_amount_per_stock = plans[0].amount
+
+    def cancel_unfilled_buys(self) -> None:
+        """09:30 — 목표가에 닿지 않은 매수 주문을 취소하고 매수 결과를 알린다 (PRD 5.5-B 6단계).
+
+        취소 대상은 인메모리 주문 목록이 아니라 **당일 체결내역 조회**에서 찾는다. 09:00과
+        09:30 사이에 설정 저장 등으로 엔진이 재시작되면 인메모리 기록이 사라지는데, 그때도
+        미체결 주문이 장 마감까지 방치되면 안 되기 때문이다.
+        """
+        cancelled_ids = self._cancel_unfilled_orders()
+
+        if not self._buy_records:
+            logger.info("이번 엔진 실행에서 접수한 매수 주문이 없어 결과 메일을 보내지 않습니다.")
+            return
+
+        records = self._buy_records
+        self._buy_records = []
+
+        # 체결 반영이 먼저다 — 부분체결분까지 채운 뒤에 남은 '접수' 상태만 취소로 확정한다
+        fills_synced = self._fill_buy_prices(records)
+        for record in records:
+            if record.order_id in cancelled_ids and record.outcome == BuyOutcome.ORDERED:
+                record.outcome = BuyOutcome.CANCELLED
+                record.note = "목표 매수가에 닿지 않아 09:30에 미체결분을 취소했습니다"
+
+        self._notify_buy_result(
+            self._buy_cash, self._buy_amount_per_stock, records, fills_synced
+        )
+
+    def _cancel_unfilled_orders(self) -> set:
+        """미체결 매수 주문을 취소하고, 취소에 성공한 주문번호 집합을 돌려준다."""
+        try:
+            fills = self.engine.order_client.get_today_fills()
+        except Exception:
+            logger.exception("미체결 매수 주문 조회 실패 — 취소를 건너뜁니다.")
+            self.engine.notify("[경고] 미체결 매수 주문을 조회하지 못했습니다. 직접 확인하세요.")
+            return set()
+
+        targets = self._cancel_targets(fills)
+        if not targets:
+            logger.info("취소할 미체결 매수 주문이 없습니다.")
+            return set()
+
+        cancelled = set()
+        for order_id, ticker, name, quantity in targets:
+            label = format_stock(ticker, name)
+            amount = f"{quantity}주" if quantity else "잔량 전부"
+            if self.engine.order_client.cancel_order(order_id, ticker, quantity):
+                cancelled.add(order_id)
+                logger.info("미체결 매수 취소: %s %s (주문번호 %s)", label, amount, order_id)
+            else:
+                logger.error("미체결 매수 취소 실패: %s %s (주문번호 %s)", label, amount, order_id)
+                self.engine.notify(
+                    f"[실패] 미체결 매수 취소 실패: {label} — 주문이 살아 있습니다. 직접 확인하세요."
+                )
+
+        logger.info("미체결 매수 주문 %d건 중 %d건을 취소했습니다.", len(targets), len(cancelled))
+        return cancelled
+
+    def _cancel_targets(self, fills) -> List[tuple]:
+        """취소할 (주문번호, 종목코드, 종목명, 수량) 목록. 수량 0은 '잔량 전부'다.
+
+        1순위는 체결내역 조회가 알려주는 미체결 잔량이다 — 이 경로는 인메모리 기록에
+        의존하지 않아 엔진이 재시작돼도 동작한다.
+        2순위는 **조회 결과에 흔적조차 없는 접수 주문**이다. 체결내역 TR(ka10076)이 아직
+        한 주도 체결되지 않은 대기 주문을 싣는지 확인하지 못했는데, 싣지 않는다면 1순위만으로는
+        그 주문이 장 마감까지 살아남는다. 체결된 주문은 조회 결과에 잡히므로 여기 걸리지 않는다.
+        """
+        targets = [
+            (fill.order_id, fill.ticker, fill.name, fill.unfilled_quantity)
+            for fill in fills
+            if fill.side == OrderSide.BUY and fill.unfilled_quantity > 0
+        ]
+
+        known_ids = {fill.order_id for fill in fills}
+        targets.extend(
+            (record.order_id, record.ticker, record.name, 0)
+            for record in self._buy_records
+            if record.order_id
+            and record.outcome == BuyOutcome.ORDERED
+            and record.order_id not in known_ids
+        )
+        return targets
 
     def _notify_buy_result(
-        self, cash: float, amount_per_stock: float, records: List[BuyRecord]
+        self,
+        cash: float,
+        amount_per_stock: float,
+        records: List[BuyRecord],
+        fills_synced: bool,
     ) -> None:
-        """09:00 매수 실행 결과를 이메일로 알린다 (PRD 5.5-B 5·6단계).
+        """매수 실행 결과를 이메일로 알린다 (PRD 5.5-B 6단계).
 
         렌더링·발송 실패가 매수 흐름을 되돌릴 수는 없으므로 예외를 밖으로 올리지 않는다.
         """
-        # records를 제자리에서 채우므로 execution을 만들기 전에 먼저 조회한다
-        fills_synced = self._fill_buy_prices(records)
         execution = BuyExecution(
             at=datetime.now(),
             cash=cash,
@@ -292,8 +389,8 @@ class DailyWorkflow:
     def _fill_buy_prices(self, records: List[BuyRecord]) -> bool:
         """접수된 주문의 체결가를 조회해 기록에 채운다. 조회에 실패하면 False.
 
-        주문 접수 직후라 아직 체결이 잡히지 않는 종목은 '접수' 상태로 남는다 —
-        그 경우 단가는 수량 산정에 쓴 현재가이고, 확정은 15:30 리포트가 한다.
+        여기서도 체결이 잡히지 않은 종목은 '접수' 상태로 남는다 — 호출측
+        (cancel_unfilled_buys)이 취소된 주문번호와 대조해 '취소'로 확정한다.
         """
         # 거부된 주문도 주문번호를 갖고 있으므로 접수된 건만 조회 대상에 넣는다
         pending = {r.order_id: r for r in records if r.order_id and r.outcome.is_ordered}

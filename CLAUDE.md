@@ -43,7 +43,7 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   진입점이고, "▶ 시작" 버튼을 눌러야 `EngineThread`(QThread)가 뜬다. 창을 닫으면 엔진도
   함께 정지한다.
 - `EngineThread`가 자신만의 asyncio 이벤트 루프를 새로 만들어 소유하고, 그 위에서
-  `src/core/runtime.py`의 `TimeScheduler`(시간 기반 08:40/추천 시각/09:00/15:20/15:30)와
+  `src/core/runtime.py`의 `TimeScheduler`(시간 기반 08:40/추천 시각/09:00/09:30/15:20/15:30)와
   `WebSocketClient` 콜백(실시간 시세 기반)이 함께 돈다. 이 중 LLM 추천 시각만 설정값이고
   (`settings.recommend_time`, UI 콤보박스 08:40~08:55, 기본 08:45) 나머지는 코드 상수다.
 - 데이터 수집·LLM 호출·메일 발송처럼 오래 걸리는 동기 작업은 `runtime._off_loop`로 별도
@@ -57,14 +57,17 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
 ### 전략 프레임워크
 - `src/strategy/base.py`의 `BaseStrategy`(`generate_signal(MarketData) -> Signal`)가 실시간
   시세 기반 전략의 공통 인터페이스다.
-- 데이터 수집은 **2단계**다 (`src/data/collector.py`). 1단계로 대형·중형주 291종목의 기본정보를
-  모으고, 방향성 신호가 없는 종목(등락률·시가갭이 둘 다 0)을 버린 뒤, 규모별 시가갭 상위
-  40종목(대형 25/중형 15)에만 일봉을 붙여 20일 평균 대비 거래량 급증 배수를 계산한다.
-  전 종목에 일봉까지 돌리면 호출이 두 배가 되어 09:00 전에 끝나지 않는다.
+- 데이터 수집은 **전일 일봉 한 번이 전부**다 (`src/data/collector.py`). 대형주 약 98종목에
+  `ka10086`을 한 번씩 돌려 전일 종가·고가·저가·등락률·거래량과 거래량 급증 배수를 뽑고,
+  급증 배수 상위 25종목만 LLM에 넘긴다. **당일 지표(등락률·시가갭)는 쓰지 않는다** —
+  09:00 이전에는 키움이 그 값을 주지 않는 것이 실측으로 확인됐다(PRD 10절 "장 전 당일
+  지표 부재"). 응답에 당일 봉이 섞여 오므로 날짜로 걸러내야 장 전·장중 결과가 같아진다.
 - 1호 전략(`src/strategy/llm_momentum.py`의 `LLMMomentumStrategy`)은 시간 기반 전략이라
   `generate_signal`은 항상 `HOLD`만 반환한다. 실제 진입은 `DailyWorkflow`가 추천 시각/09:00
-  스케줄에서 `set_recommendations` → `build_buy_plans`를 직접 호출해 트리거한다. 청산은
-  `RiskManager.check_exit`(실시간 시세 콜백)와 15:20 강제청산이 담당한다.
+  스케줄에서 `set_recommendations` → `build_buy_plans`를 직접 호출해 트리거한다. 매수는
+  LLM이 함께 제시한 **목표 매수가로 지정가** 주문이고, 09:30에 미체결분을 취소하면서
+  매수 결과 메일을 보낸다(`cancel_unfilled_buys`). 청산은 `RiskManager.check_exit`
+  (실시간 시세 콜백, 순손익 ±설정값 기준 익절/손절)와 15:20 강제청산이 담당한다.
 - 새 전략을 추가할 때는 `BaseStrategy`를 구현하는 새 모듈만 추가하면 되고, 나머지
   (주문 실행/리스크/로깅)는 그대로 재사용된다 — 단, 시간 기반 전략이라면 1호 전략처럼
   `DailyWorkflow`류의 오케스트레이션을 별도로 붙여야 한다.
@@ -78,7 +81,7 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   실제로 바뀌었으면 UI가 엔진을 자동으로 재시작한다(`MainWindow._needs_restart_for_changed_settings`
   → `_restart_engine`) — 저장 완료 팝업을 먼저 띄우고 그 뒤에 재시작하며, 보유 종목이 있으면
   감시 공백을 알리고 확인을 받는다.
-- 퍼센트 단위 설정(`TAKE_PROFIT_PERCENT` 등)은 `_percent` 필드(원값, `.env`에 저장)와
+- 퍼센트 단위 설정(`STOP_LOSS_PERCENT` 등)은 `_percent` 필드(원값, `.env`에 저장)와
   `_ratio` 프로퍼티(0~1 환산, 계산에 사용) 쌍으로 두는 패턴을 따른다 — 새 설정을 추가할
   때도 이 패턴을 따른다. 시각 설정(`RECOMMEND_TIME`)도 같은 꼴로 `recommend_time_hhmm`
   필드(`"HH:MM"` 원값)와 `recommend_time` 프로퍼티(`datetime.time` 환산) 쌍이다.
@@ -97,6 +100,9 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
 - 익절/손절(`check_exit`)은 키움 REST가 스탑오더(조건부 예약주문)를 지원하지 않아, 이
   프로그램이 떠 있는 동안의 실시간 시세 감시가 **1차이자 사실상 유일한 청산 수단**이다
   — 앱이 꺼지거나 WebSocket이 끊기면 그 사이 손절도 멈춘다.
+- 익절/손절 판정은 가격 변동률이 아니라 **순손익률**(수수료·세금·슬리피지를 뺀 값) 기준이다.
+  기본값은 익절 +0.5%(`TAKE_PROFIT_PERCENT`, 2026-08-06에 2%에서 낮춤) / 손절 -2%이며
+  둘 다 UI에서 조정한다.
 
 ### 이메일이 유일한 알림 채널
 텔레그램은 검토 후 제거됐다. 운영 알림(`AlertNotifier`)과 `notification/templates.py`의

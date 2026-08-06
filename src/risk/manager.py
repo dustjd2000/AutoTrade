@@ -42,8 +42,8 @@ class RiskManager:
         self,
         max_position_ratio: float = 0.1,      # 종목당 최대 계좌 비중
         max_daily_loss_ratio: float = 0.02,   # 일일 최대 손실 비중
-        take_profit_ratio: float = 0.02,      # 익절 라인 (매수 대비 수익률)
-        stop_loss_ratio: float = 0.02,        # 손절 라인 (매수 대비 손실률)
+        take_profit_ratio: float = 0.005,     # 익절 라인 (순손익률)
+        stop_loss_ratio: float = 0.02,        # 손절 라인 (순손익률)
         max_total_exposure_ratio: float = 0.7,  # 전체 계좌 대비 최대 노출 비중
         commission_rate: float = 0.00015,     # 매매수수료 (매수·매도 동일 적용)
         tax_rate: float = 0.0018,             # 증권거래세+농특세 (매도 시만)
@@ -97,6 +97,7 @@ class RiskManager:
         앱이 꺼지거나 WebSocket이 끊기면 감시 공백이 생긴다.
 
         판정은 가격 변동률이 아니라 왕복 수수료·매도세금·슬리피지를 뺀 순손익률 기준이다.
+        익절선(기본 0.5%)은 이미 비용을 뺀 값이라, 도달하면 그만큼이 실수령 이익이다.
         """
         if position.avg_price <= 0 or position.quantity <= 0:
             return None

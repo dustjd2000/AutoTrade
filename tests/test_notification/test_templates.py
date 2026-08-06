@@ -253,7 +253,7 @@ def make_execution(**overrides):
         cash=5_000_000.0,
         amount_per_stock=833_333.0,
         records=records,
-        take_profit_percent=2.0,
+        take_profit_percent=0.5,
         stop_loss_percent=2.0,
     )
     defaults.update(overrides)
@@ -294,24 +294,25 @@ def test_buy_states_are_labelled():
 
 
 def test_buy_exit_lines_are_derived_from_shown_price():
+    """비용이 0인 이 표에서는 익절가 = 단가 +0.5%, 손절가 = 단가 -2%가 그대로 나온다."""
     _, text, _ = render_buys()
 
-    assert "58,446" in text and "56,154" in text    # 삼성전자 ±2%
-    assert "201,960" in text and "194,040" in text  # SK하이닉스 ±2%
+    assert "57,586" in text and "56,154" in text    # 삼성전자 +0.5% / -2%
+    assert "198,990" in text and "194,040" in text  # SK하이닉스 +0.5% / -2%
 
 
 def test_buy_exit_lines_reflect_commission_tax_slippage():
-    """수수료·세금·슬리피지가 있으면 익절가는 naive ±2%보다 더 벌어진다."""
+    """수수료·세금·슬리피지가 있으면 익절가는 naive +0.5%보다 더 벌어진다."""
     from src.risk.manager import exit_trigger_price
 
     execution = make_execution(commission_percent=0.015, tax_percent=0.18, slippage_percent=0.1)
     _, text, _ = render_buys(execution)
 
-    expected_tp = exit_trigger_price(57300.0, 0.02, 0.00015, 0.0018, 0.001)
+    expected_tp = exit_trigger_price(57300.0, 0.005, 0.00015, 0.0018, 0.001)
     expected_sl = exit_trigger_price(57300.0, -0.02, 0.00015, 0.0018, 0.001)
     assert f"{expected_tp:,.0f}" in text
     assert f"{expected_sl:,.0f}" in text
-    assert "58,446" not in text  # naive ±2% 값이 아니어야 한다
+    assert "57,586" not in text  # naive +0.5% 값이 아니어야 한다
 
 
 def test_buy_header_shows_cash_allocation_and_total():
@@ -322,7 +323,7 @@ def test_buy_header_shows_cash_allocation_and_total():
         assert "833,333원" in body              # 종목당 배정
         assert "주문가능금액의 16.7%" in body
         assert "1,594,200원" in body            # 총 투입금액
-        assert "+2.00% / -2.00%" in body
+        assert "+0.50% / -2.00%" in body
 
 
 def test_buy_allocation_share_omitted_without_cash():
@@ -368,7 +369,7 @@ def test_buy_email_without_any_record():
 
 # ── recommendation_email ─────────────────────────────────────
 def test_recommendation_email_notes_shortfall_percentage():
-    recs = [StockRecommendation(ticker="005930", name="삼성전자", reason="근거")]
+    recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="근거")]
     _, body = templates.recommendation_email(
         recs, DAY, investable_ratio=0.5, target_stock_count=4
     )
@@ -379,8 +380,8 @@ def test_recommendation_email_notes_shortfall_percentage():
 
 def test_recommendation_email_omits_shortfall_note_when_full():
     recs = [
-        StockRecommendation(ticker="005930", name="삼성전자", reason="근거"),
-        StockRecommendation(ticker="000660", name="SK하이닉스", reason="근거"),
+        StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="근거"),
+        StockRecommendation(ticker="000660", name="SK하이닉스", target_price=1000, reason="근거"),
     ]
     _, body = templates.recommendation_email(
         recs, DAY, investable_ratio=0.5, target_stock_count=2

@@ -93,8 +93,9 @@ class BuyOutcome(Enum):
     ORDERED = "ordered"                     # 접수됨 — 체결 여부는 아직 확인되지 않았다
     PARTIALLY_FILLED = "partially_filled"
     FILLED = "filled"
-    SKIPPED = "skipped"                     # 1주 가격이 종목당 배정액을 초과
+    SKIPPED = "skipped"                     # 목표가 1주 가격이 종목당 배정액을 초과
     FAILED = "failed"                       # 리스크 관리 거부 / 주문 거부 / 처리 중 오류
+    CANCELLED = "cancelled"                 # 목표 매수가에 닿지 않아 09:30에 취소
 
     @property
     def is_ordered(self) -> bool:
@@ -136,8 +137,8 @@ class BuyRecord:
 class BuyExecution:
     """09:00 매수 실행 전체 결과 — 매수 알림 메일의 원본 데이터.
 
-    주문 접수 직후에 만들어지므로 체결가가 비어 있을 수 있다(접수 상태). 체결가·수수료·
-    손익의 최종 확정은 15:30 리포트가 담당한다.
+    09:30 미체결 취소를 마친 뒤에 만들어지지만, 그 시점에도 체결 조회가 실패하면 체결가가
+    비어 있을 수 있다(접수 상태). 체결가·수수료·손익의 최종 확정은 15:30 리포트가 담당한다.
     """
     at: datetime
     cash: float                       # 매수 산정에 쓴 예수금

@@ -6,12 +6,28 @@ from typing import List, Optional
 import anthropic
 
 from config.settings import Settings
-from src.data.collector import LARGE_CAP_LABEL, MID_CAP_LABEL, DailyStockData
+from src.data.collector import DailyStockData
 
 logger = logging.getLogger(__name__)
 
 # 프롬프트 템플릿 버전 — 추천 근거를 나중에 추적할 수 있도록 코드로 버전 관리한다 (PRD 5.5-B).
-PROMPT_TEMPLATE_VERSION = "v4"
+PROMPT_TEMPLATE_VERSION = "v5"
+
+# 목표 매수가가 전일 종가에서 이 비율을 벗어나면 경계로 자른다 (PRD 5.5-B '주문 방식').
+# LLM이 자릿수를 틀리는 것을 막는 가드레일이며, 정상 범위의 판단에는 개입하지 않는다.
+PRICE_GUARDRAIL_RATIO = 0.05
+
+# KRX 호가 단위 (2023-01-25 개편, 코스피 기준). (가격 하한, 단위)를 내림차순으로 둔다.
+# 각 하한은 바로 위 단위의 배수라, 단위로 내림해도 다른 구간으로 넘어가지 않는다.
+TICK_SIZES = (
+    (500_000, 1000),
+    (200_000, 500),
+    (50_000, 100),
+    (20_000, 50),
+    (5_000, 10),
+    (2_000, 5),
+    (0, 1),
+)
 
 # 응답 토큰 한도. 사고(thinking) 토큰과 본문이 이 한도를 함께 쓰므로 넉넉히 잡는다.
 # 부족하면 사고에 예산을 다 쓰고 본문이 비거나 잘려 파싱이 실패한다.
@@ -31,9 +47,13 @@ RECOMMENDATION_SCHEMA = {
                 "properties": {
                     "ticker": {"type": "string", "description": "6자리 종목코드"},
                     "name": {"type": "string", "description": "종목명"},
+                    "target_price": {
+                        "type": "integer",
+                        "description": "오늘 매수할 목표 가격 (원 단위 정수)",
+                    },
                     "reason": {"type": "string", "description": "급등이 예상되는 근거"},
                 },
-                "required": ["ticker", "name", "reason"],
+                "required": ["ticker", "name", "target_price", "reason"],
                 "additionalProperties": False,
             },
         }
@@ -42,52 +62,69 @@ RECOMMENDATION_SCHEMA = {
     "additionalProperties": False,
 }
 
-def cap_quota(target_count: int) -> tuple:
-    """(대형주 수, 중형주 수) — 중형주 1종목을 섞고 나머지는 대형주로 채운다 (확정 2026-08-05).
+def tick_size(price: float) -> int:
+    """해당 가격대의 호가 단위 (원)."""
+    for threshold, tick in TICK_SIZES:
+        if price >= threshold:
+            return tick
+    return 1
 
-    한 종목만 뽑는 설정에서는 중형주로 채우지 않는다. 그 한 자리까지 중형주로 가면
-    당일 자금 전부가 상대적으로 얇은 종목 하나에 들어간다.
+
+def normalize_target_price(target_price: float, prev_close: float) -> int:
+    """LLM이 제시한 목표 매수가를 주문 가능한 값으로 보정한다 (PRD 5.5-B '주문 방식').
+
+    1. 전일 종가 대비 ±5%를 벗어나면 그 경계로 자른다 — 자릿수를 틀린 값만 막는 가드레일이다.
+    2. 호가 단위로 내림한다 — 단위에 맞지 않는 가격은 주문이 거부된다. 내림(더 낮은 가격)으로
+       맞추는 것은 매수에 불리하지 않은 방향이라 택했다.
+
+    전일 종가를 모르면(0 이하) 가드레일 없이 호가 단위만 맞춘다.
     """
-    if target_count <= 1:
-        return target_count, 0
-    return target_count - 1, 1
+    price = target_price
+    if prev_close > 0:
+        price = min(
+            max(price, prev_close * (1 - PRICE_GUARDRAIL_RATIO)),
+            prev_close * (1 + PRICE_GUARDRAIL_RATIO),
+        )
+    tick = tick_size(price)
+    return max(int(price // tick) * tick, tick)
 
 
 def build_system_prompt(target_count: int) -> str:
-    large_count, mid_count = cap_quota(target_count)
-    quota_rule = (
-        f"대형주에서 {large_count}종목, 중형주에서 {mid_count}종목을 선정하십시오. "
-        "각 종목의 규모 분류는 사용자 데이터에 표시되어 있습니다."
-        if mid_count
-        else f"대형주에서 {large_count}종목을 선정하십시오."
-    )
     return f"""당신은 한국 주식시장(코스피) 단기 모멘텀을 분석하는 애널리스트입니다.
 
 ## 역할
-사용자가 제공하는 당일 데이터만을 근거로, 오늘 장중 상대적으로 강한 상승 흐름을 보일 가능성이 높은
-코스피 종목 {target_count}종목을 선별합니다. 사용자가 제공하는 목록은 이미 시가갭 상위로 추려진
-후보군이며, 규모(대형주/중형주)별로 나뉘어 있습니다.
+사용자가 제공하는 **전일(직전 거래일) 마감 데이터만을** 근거로, 오늘 장중 상대적으로 강한 상승
+흐름을 보일 가능성이 높은 코스피 대형주 {target_count}종목을 선별하고, 각 종목을 오늘 매수할
+**목표 매수가**를 제시합니다. 사용자가 제공하는 목록은 이미 전일 거래량 급증 배수 상위로 추려진
+후보군입니다.
 
 ## 절대 규칙
 1. 반드시 제공된 데이터에 있는 종목 중에서만 선택하십시오. 목록에 없는 종목을 추천하지 마십시오.
 2. 당신의 학습 데이터에 있는 과거 정보나 기억(종목에 대한 일반적 평판 등)에 의존하지 마십시오. 오직
-   사용자 메시지로 제공되는 당일 데이터만 근거로 삼으십시오.
+   사용자 메시지로 제공되는 전일 데이터만 근거로 삼으십시오.
 3. 서로 다른 종목만 선택하십시오 (중복 불가).
-4. **규모별 배분: {quota_rule}**
-5. 절대적인 확신이 없어도, 제공된 종목 중 상대적으로 가장 강한 신호를 보이는 종목 순으로 반드시
-   위 배분대로 선정하십시오. 해당 규모의 후보 자체가 부족한 경우에만 더 적게 선정할 수 있습니다.
+4. 절대적인 확신이 없어도, 제공된 종목 중 상대적으로 가장 강한 신호를 보이는 종목 순으로 반드시
+   {target_count}종목을 채우십시오. 후보 자체가 부족한 경우에만 더 적게 선정할 수 있습니다.
+5. target_price는 **원 단위 정수**로, 해당 종목의 전일 종가 대비 ±5% 이내에서 제시하십시오.
 
 ## 판단 기준 (제공된 데이터 범위 내에서, 우선순위 순)
-- 거래량 급증 배수 — 20일 평균 거래량 대비 오늘 거래량의 배수입니다. 평소보다 뚜렷하게 많은 거래가
-  실린 종목(2배 이상)은 그만큼 관심이 몰렸다는 뜻이므로 가장 무겁게 보십시오.
-  '판단불가'로 표시된 종목은 이 기준을 적용하지 말고 나머지 기준으로만 평가하십시오
-- 시가 갭·등락률의 방향성과 크기 — 동시호가(장 시작 전) 데이터에서는 두 값이 전일 종가 대비 예상체결가
-  괴리로 같은 계산식이므로 사실상 하나의 신호로 취급하십시오
+- 전일 거래량 급증 배수 — 그 이전 거래일들의 평균 거래량 대비 전일 거래량의 배수입니다. 평소보다
+  뚜렷하게 많은 거래가 실린 종목(2배 이상)은 재료가 발생해 관심이 몰렸다는 뜻이므로 가장 무겁게
+  보십시오. '판단불가'로 표시된 종목은 이 기준을 적용하지 말고 나머지 기준으로만 평가하십시오
+- 전일 등락률의 방향과 크기 — 거래량이 함께 늘며 오른 종목이 다음 거래일까지 흐름을 잇는 경우가
+  많습니다. 거래량만 터지고 크게 하락한 종목은 악재일 가능성을 함께 고려하십시오
+- 전일 종가가 고가·저가 사이 어디에 위치하는지 — 고가 근처에서 마감했다면 매수세가 장 마감까지
+  유지됐다는 뜻입니다
 - 뉴스/공시 헤드라인의 구체성 (실적·수주·계약 등 구체적 재료인지, 단순 언급인지)
+
+## 목표 매수가 작성 지침
+오늘 09:00에 이 가격으로 지정가 매수 주문을 내고, **09:30까지 체결되지 않으면 그날 그 종목은
+매수하지 않습니다.** 너무 낮게 잡으면 매수 자체가 무산되고, 너무 높게 잡으면 비싸게 사게 됩니다.
+전일 종가와 고가·저가 범위를 근거로 오늘 실제 체결될 만한 가격을 제시하십시오.
 
 ## 근거 작성 지침
 reason은 반드시 제공된 데이터의 구체적 수치를 인용해 작성하십시오.
-("등락률 +2.15%, 거래량 320,450주(평균 대비 3.4배)"처럼 구체적으로.
+("전일 등락률 +2.15%, 전일 거래량 320,450주(평균 대비 3.4배)"처럼 구체적으로.
 "긍정적 모멘텀", "상승 여력" 같은 모호한 표현은 금지합니다.)"""
 
 
@@ -95,48 +132,31 @@ reason은 반드시 제공된 데이터의 구체적 수치를 인용해 작성�
 class StockRecommendation:
     ticker: str
     name: str
+    target_price: int
     reason: str
 
 
 def build_user_prompt(daily_data: List[DailyStockData], target_count: int = 3) -> str:
-    is_premarket = any(d.is_premarket for d in daily_data)
+    lines = [
+        "코스피 대형주의 **전일(직전 거래일) 마감 기준** 데이터입니다.",
+        "장 시작 전에는 당일 지표(등락률·시가갭·거래량)가 아직 존재하지 않으므로 전일 데이터만 제공합니다.",
+        "'평균대비'는 그 이전 거래일 평균 거래량 대비 전일 거래량의 배수입니다.",
+        f"\n## 후보 ({len(daily_data)}종목)",
+    ]
+    for d in daily_data:
+        headlines = "; ".join(d.headlines) if d.headlines else "없음"
+        surge = f"{d.volume_surge:.2f}배" if d.volume_surge else "판단불가"
+        lines.append(
+            f"- {d.ticker} {d.name}: 전일 종가 {d.prev_close:,.0f}원"
+            f"(고가 {d.prev_high:,.0f} / 저가 {d.prev_low:,.0f}), "
+            f"전일 등락률 {d.prev_change_rate:+.2f}%, "
+            f"전일 거래량 {d.prev_volume:,}(평균대비 {surge}), "
+            f"뉴스/공시: {headlines}"
+        )
 
-    if is_premarket:
-        lines = [
-            "장 시작 전(동시호가) 시점의 코스피 종목 데이터입니다.",
-            "아래 수치는 정규장 체결이 아니라 **동시호가 예상체결가·예상체결량** 기준이며,",
-            "'등락률'과 '시가갭'은 전일 종가 대비 예상체결가의 괴리를 뜻합니다.",
-            "'평균대비'는 20일 평균 거래량 대비 오늘 거래량의 배수입니다.",
-        ]
-    else:
-        lines = [
-            "오늘의 코스피 종목별 데이터입니다.",
-            "'평균대비'는 20일 평균 거래량 대비 오늘 거래량의 배수입니다.",
-        ]
-
-    # 규모별로 묶어서 보여준다 — 배분 규칙이 규모 기준이라 섞어 놓으면 세기 어렵다
-    for tier in (LARGE_CAP_LABEL, MID_CAP_LABEL):
-        in_tier = [d for d in daily_data if d.cap_tier == tier]
-        if not in_tier:
-            continue
-        lines.append(f"\n## {tier} ({len(in_tier)}종목)")
-        for d in in_tier:
-            headlines = "; ".join(d.headlines) if d.headlines else "없음"
-            surge = f"{d.volume_surge:.2f}배" if d.volume_surge else "판단불가"
-            lines.append(
-                f"- {d.ticker} {d.name}: 등락률 {d.change_rate:+.2f}%, "
-                f"거래량 {d.volume:,}(평균대비 {surge}), 시가갭 {d.gap_rate:+.2f}%, "
-                f"뉴스/공시: {headlines}"
-            )
-
-    large_count, mid_count = cap_quota(target_count)
-    quota = (
-        f"대형주 {large_count}종목 + 중형주 {mid_count}종목"
-        if mid_count
-        else f"대형주 {large_count}종목"
-    )
     lines.append(
-        f"\n위 데이터를 참고해 급등 예상 종목을 {quota}, 총 {target_count}개를 JSON 배열로 추천하세요."
+        f"\n위 데이터를 참고해 오늘 급등이 예상되는 종목 {target_count}개와 "
+        "각 종목의 목표 매수가를 추천하세요."
     )
     return "\n".join(lines)
 
@@ -189,9 +209,38 @@ def parse_recommendations(raw_text: str) -> List[StockRecommendation]:
             continue
         seen.add(ticker)
         recommendations.append(
-            StockRecommendation(ticker=ticker, name=item["name"], reason=item["reason"])
+            StockRecommendation(
+                ticker=ticker,
+                name=item["name"],
+                # 스키마가 정수를 요구하지만 문자열로 오더라도 받아들인다
+                target_price=int(float(item["target_price"])),
+                reason=item["reason"],
+            )
         )
     return recommendations
+
+
+def apply_price_guardrail(
+    recommendations: List[StockRecommendation], daily_data: List[DailyStockData]
+) -> None:
+    """목표 매수가를 주문 가능한 값으로 보정한다 (제자리 수정, PRD 5.5-B '주문 방식').
+
+    보정으로 값이 바뀌면 로그에 남긴다 — LLM이 낸 값과 실제 주문가가 다르면 나중에 추천을
+    되짚을 때 혼란스럽다.
+    """
+    prev_close = {data.ticker: data.prev_close for data in daily_data}
+    for rec in recommendations:
+        original = rec.target_price
+        rec.target_price = normalize_target_price(original, prev_close.get(rec.ticker, 0.0))
+        if rec.target_price != original:
+            logger.info(
+                "목표 매수가 보정: %s %s — %s원 → %s원 (전일 종가 %s원)",
+                rec.ticker,
+                rec.name,
+                f"{original:,}",
+                f"{rec.target_price:,}",
+                f"{prev_close.get(rec.ticker, 0.0):,.0f}",
+            )
 
 
 class LLMRecommender:
@@ -268,10 +317,11 @@ class LLMRecommender:
             )
             return None
 
+        apply_price_guardrail(recommendations, daily_data)
         logger.info(
             "LLM recommended %d stock(s) (prompt_version=%s): %s",
             len(recommendations),
             PROMPT_TEMPLATE_VERSION,
-            [r.ticker for r in recommendations],
+            [f"{r.ticker}@{r.target_price:,}" for r in recommendations],
         )
         return recommendations

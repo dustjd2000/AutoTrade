@@ -12,15 +12,21 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class StockDetail:
-    """주식기본정보(ka10001)에서 뽑아낸 당일 지표."""
+class PreviousDayMetrics:
+    """전일 일봉(ka10086)에서 뽑아낸 후보 선정 지표 (PRD 5.5-B '전일 데이터 기준 수집').
+
+    09:00 이전에는 당일 지표(등락률·시가갭·거래량)가 아예 존재하지 않아 후보를 고를 근거가
+    되지 못한다 — 2026-08-06 08:55 수집에서 288종목 전부가 0으로 돌아왔다(PRD 10절
+    '장 전 당일 지표 부재'). 그래서 전일 일봉을 쓴다. 장 전에도 장중에도 값이 같다.
+    """
 
     ticker: str
-    price: float        # 현재가 (장 전에는 동시호가 예상체결가)
-    volume: int         # 누적 거래량 (장 전에는 예상체결량)
-    change_rate: float  # 전일 대비 등락률 (%)
-    gap_rate: float     # 시가 갭 (%) — 전일 종가 대비 시가(장 전에는 예상체결가)
-    is_premarket: bool = False  # 동시호가 예상체결 기준 값인지 여부
+    close: float        # 전일 종가
+    high: float         # 전일 고가
+    low: float          # 전일 저가
+    change_rate: float  # 전일 등락률 (%)
+    volume: int         # 전일 거래량
+    volume_surge: float  # 전일 거래량 ÷ 그 이전 거래일 평균 (0이면 산출 불가)
 
 
 @dataclass
@@ -43,8 +49,9 @@ DAILY_PRICE_API_ID = "ka10086"  # 일별주가요청
 STOCK_INFO_PATH = "/api/dostk/stkinfo"
 MARKET_PATH = "/api/dostk/mrkcond"
 
-# 거래량 급증 판정의 기준 기간 — ka10086이 한 번 호출에 20거래일치를 돌려주므로 그대로 쓴다
-AVERAGE_VOLUME_DAYS = 20
+# ka10086이 한 번 호출에 돌려주는 20거래일치를 그대로 쓴다. 여기에 당일 봉이 섞여 오므로
+# 그것을 뺀 나머지(전일 1행 + 그 이전 행들)로 전일 지표와 급증 배수를 계산한다.
+DAILY_CANDLE_COUNT = 20
 
 
 def _first_present(row: Dict[str, Any], *keys: str):
@@ -92,53 +99,6 @@ class MarketDataClient:
             price=price,
         )
 
-    def get_stock_detail(self, ticker: str) -> StockDetail:
-        """등락률·시가갭까지 포함한 당일 지표를 한 번의 호출로 가져온다 (LLM 프롬프트용).
-
-        1호 전략은 장 시작 전(08:45)에 이 값을 쓰는데, 그 시점에는 시가·등락률·거래량이
-        모두 0이다. 따라서 정규장 데이터가 아직 없으면 동시호가(08:30~09:00)의
-        예상체결가·예상체결량으로 대체한다 — 장 전에 얻을 수 있는 유일한 실질 신호다.
-        """
-        data, _ = self._client.request(STOCK_INFO_PATH, STOCK_INFO_API_ID, {"stk_cd": ticker})
-
-        # 키움은 가격에 등락 방향 부호를 붙여 보내므로 절댓값을 취한다
-        price = abs(to_float(_first_present(data, "cur_prc", "prpr")))
-        base_price = abs(to_float(_first_present(data, "base_pric")))   # 전일 종가
-        open_price = abs(to_float(_first_present(data, "open_pric")))   # 당일 시가
-        volume = to_int(_first_present(data, "trde_qty", "acml_vol"))
-
-        expected_price = abs(to_float(_first_present(data, "exp_cntr_pric")))
-        expected_qty = to_int(_first_present(data, "exp_cntr_qty"))
-
-        # 시가가 잡히지 않았고 거래도 없으면 아직 정규장이 시작되지 않은 것이다
-        is_premarket = open_price <= 0 and volume <= 0
-        if is_premarket and expected_price > 0:
-            price = expected_price
-            volume = expected_qty
-            reference_price = expected_price
-        else:
-            reference_price = open_price
-
-        # flu_rt는 키움이 계산해 주는 등락률. 장 전이거나 값이 없으면 직접 계산한다.
-        change_rate = to_float(_first_present(data, "flu_rt"))
-        if change_rate == 0.0 and base_price > 0 and price > 0:
-            change_rate = (price - base_price) / base_price * 100
-
-        gap_rate = (
-            (reference_price - base_price) / base_price * 100
-            if base_price > 0 and reference_price > 0
-            else 0.0
-        )
-
-        return StockDetail(
-            ticker=ticker,
-            price=price,
-            volume=volume,
-            change_rate=change_rate,
-            gap_rate=gap_rate,
-            is_premarket=is_premarket,
-        )
-
     def get_ohlcv(
         self,
         ticker: str,
@@ -167,23 +127,47 @@ class MarketDataClient:
         logger.error("일별주가 응답에서 목록 필드를 찾지 못했습니다. 응답 키: %s", list(data.keys()))
         return []
 
-    def get_average_volume(self, ticker: str, days: int = AVERAGE_VOLUME_DAYS) -> float:
-        """최근 거래일 평균 거래량 — 당일 거래량이 평소 대비 얼마나 늘었는지 재는 기준값.
+    def get_previous_day_metrics(
+        self, ticker: str, today: Optional[date] = None
+    ) -> Optional[PreviousDayMetrics]:
+        """일봉 한 번으로 전일 지표를 모두 산출한다. 쓸 수 있는 봉이 없으면 None.
 
-        당일 봉은 장 전이면 거래량이 0이라 평균에서 자연히 빠지고, 장중이면 아직 진행 중인
-        값이라 평균을 왜곡한다 — 어느 쪽이든 0인 값을 걸러내는 것으로 함께 처리한다.
-        조회에 실패하거나 쓸 수 있는 봉이 없으면 0.0을 돌려준다(급증률 계산을 건너뛴다는 뜻).
+        응답에는 당일 봉도 섞여 온다(장 전이면 거래량 0, 장중이면 아직 진행 중인 값).
+        날짜로 걸러내야 추천을 장 전에 돌리든 장중에 돌리든 같은 결과가 나온다.
+
+        급증 배수의 분모에서는 전일 자신도 뺀다 — 전일을 평균에 넣으면 재려던 급증분이
+        그만큼 희석된다.
         """
-        candles = self.get_ohlcv(ticker, period="D", count=days)
+        candles = self.get_ohlcv(ticker, period="D", count=DAILY_CANDLE_COUNT)
+        today_str = (today or date.today()).strftime("%Y%m%d")
+        past = [
+            candle
+            for candle in candles
+            if str(_first_present(candle, "date", "dt") or "").strip() != today_str
+        ]
+        if not past:
+            logger.warning("전일 일봉을 찾지 못했습니다: %s", ticker)
+            return None
+
+        previous, earlier = past[0], past[1:]
         volumes = [
             volume
-            for volume in (to_int(_first_present(c, "trde_qty", "acml_vol")) for c in candles)
+            for volume in (to_int(_first_present(c, "trde_qty", "acml_vol")) for c in earlier)
             if volume > 0
         ]
-        if not volumes:
-            logger.warning("평균 거래량을 계산할 일봉이 없습니다: %s", ticker)
-            return 0.0
-        return sum(volumes) / len(volumes)
+        average = sum(volumes) / len(volumes) if volumes else 0.0
+        volume = to_int(_first_present(previous, "trde_qty", "acml_vol"))
+
+        # 키움은 가격에 등락 방향 부호를 붙여 보내므로 절댓값을 취한다 (등락률은 부호가 의미다)
+        return PreviousDayMetrics(
+            ticker=ticker,
+            close=abs(to_float(_first_present(previous, "close_pric", "cur_prc"))),
+            high=abs(to_float(_first_present(previous, "high_pric"))),
+            low=abs(to_float(_first_present(previous, "low_pric"))),
+            change_rate=to_float(_first_present(previous, "flu_rt")),
+            volume=volume,
+            volume_surge=volume / average if average > 0 else 0.0,
+        )
 
     def get_orderbook(self, ticker: str) -> dict:
         """호가 조회."""

@@ -325,11 +325,12 @@ class MainWindow(QMainWindow):
         risk_form.setSpacing(8)
         risk_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
+        # 두 값 모두 수수료·세금·슬리피지를 뺀 '순손익률' 기준이다 (PRD 5.5-B)
         self._take_profit = QLineEdit()
-        self._take_profit.setPlaceholderText("예: 2 (매수가 대비 +2%)")
+        self._take_profit.setPlaceholderText("예: 0.5 (순손익 +0.5%)")
         self._take_profit.setValidator(QDoubleValidator(0.0, 100.0, 2))
         self._stop_loss = QLineEdit()
-        self._stop_loss.setPlaceholderText("예: 2 (매수가 대비 -2%)")
+        self._stop_loss.setPlaceholderText("예: 2 (순손익 -2%)")
         self._stop_loss.setValidator(QDoubleValidator(0.0, 100.0, 2))
 
         risk_form.addRow("익절 (%)", self._take_profit)
@@ -405,10 +406,10 @@ class MainWindow(QMainWindow):
         run_layout.setSpacing(8)
 
         run_hint = QLabel(
-            "스케줄(추천 시각 / 09:00 / 15:20 / 15:30)과 무관하게 지금 바로 실행합니다. "
+            "스케줄(추천 시각 / 09:00 / 09:30 / 15:20 / 15:30)과 무관하게 지금 바로 실행합니다. "
             "엔진이 실행 중일 때만 동작하며, 장 시간 외에는 주문이 거부될 수 있습니다.\n"
-            "일괄 수행은 ①② (추천→매수)만 돌립니다. 매수 후에는 설정된 익절/손절 라인이 자동 감시되며, "
-            "청산(15:20)·리포트(15:30)는 스케줄에 맡깁니다."
+            "일괄 수행은 ①② (추천→지정가 매수)만 돌립니다. 매수 후에는 익절/손절이 자동 감시되며, "
+            "미체결 취소·매수 결과 메일(09:30), 청산(15:20), 리포트(15:30)는 스케줄에 맡깁니다."
         )
         run_hint.setWordWrap(True)
         run_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
@@ -649,7 +650,7 @@ class MainWindow(QMainWindow):
         self._account.setText(env.get("KIWOOM_ACCOUNT", ""))
         self._email_from.setText(env.get("EMAIL_FROM", ""))
         self._email_to.setText(env.get("EMAIL_TO", ""))
-        self._take_profit.setText(env.get("TAKE_PROFIT_PERCENT", "2"))
+        self._take_profit.setText(env.get("TAKE_PROFIT_PERCENT", "0.5"))
         self._stop_loss.setText(env.get("STOP_LOSS_PERCENT", "2"))
         self._select_combo_value(self._investable_ratio, env.get("INVESTABLE_RATIO_PERCENT"), default=50)
         self._select_combo_value(self._target_stock_count, env.get("TARGET_STOCK_COUNT"), default=3)
@@ -695,7 +696,7 @@ class MainWindow(QMainWindow):
             "SMTP_USER": self._email_from.text().strip(),  # 로그인 계정 = 발송 주소
             "EMAIL_FROM": self._email_from.text().strip(),
             "EMAIL_TO": self._email_to.text().strip(),
-            "TAKE_PROFIT_PERCENT": self._take_profit.text().strip() or "2",
+            "TAKE_PROFIT_PERCENT": self._take_profit.text().strip() or "0.5",
             "STOP_LOSS_PERCENT": self._stop_loss.text().strip() or "2",
             "INVESTABLE_RATIO_PERCENT": str(self._investable_ratio.currentData()),
             "TARGET_STOCK_COUNT": str(self._target_stock_count.currentData()),
@@ -886,11 +887,11 @@ class MainWindow(QMainWindow):
 
     def _confirm_action(self, action: str) -> bool:
         detail = {
-            "buy": "추천 종목을 시장가로 매수합니다.",
+            "buy": "추천 종목을 목표 매수가에 지정가로 매수합니다.",
             "sell_all": "보유 중인 모든 포지션을 시장가로 청산합니다.",
             "full": (
-                "LLM 추천 + 메일 → 시장가 매수를 순서대로 실행합니다.\n"
-                f"매수 후에는 익절 +{self._take_profit.text().strip() or '2'}% / "
+                "LLM 추천 + 메일 → 목표가 지정가 매수를 순서대로 실행합니다.\n"
+                f"매수 후에는 순손익 기준 익절 +{self._take_profit.text().strip() or '0.5'}% / "
                 f"손절 -{self._stop_loss.text().strip() or '2'}% 라인이 자동 감시됩니다 "
                 "(엔진이 켜져 있는 동안만).\n"
                 "청산(15:20)과 최종 리포트(15:30)는 지금 실행하지 않고 예정 시각에 맡깁니다."

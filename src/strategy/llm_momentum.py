@@ -13,7 +13,8 @@ logger = logging.getLogger(__name__)
 class BuyPlan:
     ticker: str
     name: str
-    amount: float
+    amount: float        # 종목당 배정액
+    target_price: int    # 지정가 매수 가격 (LLM 제시 → 호가 단위·가드레일 보정 완료)
     reason: str
 
 
@@ -49,7 +50,13 @@ class LLMMomentumStrategy(BaseStrategy):
 
         amount_per_stock = cash * self.investable_ratio / self.target_stock_count
         plans = [
-            BuyPlan(ticker=r.ticker, name=r.name, amount=amount_per_stock, reason=r.reason)
+            BuyPlan(
+                ticker=r.ticker,
+                name=r.name,
+                amount=amount_per_stock,
+                target_price=r.target_price,
+                reason=r.reason,
+            )
             for r in self._recommendations[: self.target_stock_count]
         ]
 

@@ -33,7 +33,14 @@ def recommendation_email(
 
     lines = [f"{today:%Y-%m-%d} LLM 추천 결과입니다.", ""]
     for i, r in enumerate(recommendations, start=1):
-        lines.extend([f"{i}. {format_stock(r.ticker, r.name)}", f"   추천 근거: {r.reason}", ""])
+        lines.extend(
+            [
+                f"{i}. {format_stock(r.ticker, r.name)}",
+                f"   목표 매수가: {r.target_price:,}원",
+                f"   추천 근거: {r.reason}",
+                "",
+            ]
+        )
 
     if len(recommendations) < target_stock_count:
         per_stock_ratio = investable_ratio / target_stock_count
@@ -44,7 +51,12 @@ def recommendation_email(
         )
         lines.append("")
 
-    lines.append("※ 이 추천은 사전 유효성 검증(거래정지·상장폐지 등)을 거치지 않았습니다.")
+    lines.extend(
+        [
+            "※ 09:00에 위 목표 매수가로 지정가 주문을 넣고, 09:30까지 체결되지 않으면 취소합니다.",
+            "※ 이 추천은 사전 유효성 검증(거래정지·상장폐지 등)을 거치지 않았습니다.",
+        ]
+    )
     return subject, "\n".join(lines)
 
 
@@ -324,6 +336,7 @@ BUY_OUTCOME_LABELS = {
     BuyOutcome.ORDERED: "접수",
     BuyOutcome.SKIPPED: "건너뜀",
     BuyOutcome.FAILED: "실패",
+    BuyOutcome.CANCELLED: "미체결 취소",
 }
 
 
@@ -334,12 +347,17 @@ def _buy_notes(execution: BuyExecution) -> List[str]:
     if any(r.outcome == BuyOutcome.ORDERED for r in execution.records):
         notes.append(
             "※ '접수'는 주문이 받아들여진 상태로, 체결가는 아직 확정되지 않았습니다 — "
-            "단가는 수량 산정에 쓴 현재가입니다."
+            "단가는 주문에 쓴 목표 매수가입니다."
+        )
+    if any(r.outcome == BuyOutcome.CANCELLED for r in execution.records):
+        notes.append(
+            "※ '미체결 취소'는 09:30까지 목표 매수가에 닿지 않아 주문을 거둔 종목입니다 — "
+            "그날 그 종목은 매수하지 않습니다."
         )
     notes.extend(
         [
-            "※ 익절가·손절가는 표의 단가 기준으로 수수료·세금·슬리피지까지 반영한 계산값이며, "
-            "실제 판정은 계좌 평단가로 합니다.",
+            "※ 익절가·손절가는 표의 단가 기준으로 수수료·세금·슬리피지까지 반영해 순손익 "
+            "설정값에 도달하는 가격이며, 실제 판정은 계좌 평단가로 합니다.",
             "※ 익절/손절 감시는 이 프로그램이 실행 중일 때만 동작합니다 (키움 REST 스탑오더 미지원).",
             "※ 체결가·수수료·손익은 15:30 리포트에서 확정됩니다.",
         ]
@@ -363,7 +381,7 @@ def _buy_facts(execution: BuyExecution) -> List[tuple[str, str]]:
         ("종목당 배정", f"{_balance(execution.amount_per_stock)}{share}"),
         ("총 투입금액", _balance(execution.invested)),
         (
-            "익절 / 손절 라인",
+            "익절 / 손절 라인 (순손익)",
             f"+{execution.take_profit_percent:.2f}% / -{execution.stop_loss_percent:.2f}%",
         ),
     ]

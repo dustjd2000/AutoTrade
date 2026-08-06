@@ -19,7 +19,7 @@ from src.api.order import OrderClient
 from src.api.websocket_client import WebSocketClient
 from src.core.daily_workflow import DailyWorkflow
 from src.core.engine import TradingEngine
-from src.data.collector import DataCollector, LargeMidCapUniverse, NewsClient
+from src.data.collector import DataCollector, LargeCapUniverse, NewsClient
 from src.llm.recommender import LLMRecommender
 from src.logger.trade_store import TradeStore
 from src.notification.alert import AlertNotifier
@@ -34,7 +34,8 @@ logger = logging.getLogger(__name__)
 # 데이터 수집 → LLM 추천 → 이메일 발송 시각만 설정값이다 (`settings.recommend_time`,
 # UI 콤보박스 08:40~08:55). 나머지는 장 운영 시간에 맞춰 고정한다.
 DAILY_RESET_TIME = dt_time(8, 40)   # 일일 손실 한도·매매중지 초기화 (연속 실행 대비)
-BUY_TIME = dt_time(9, 0)            # 자금 산정 → 매수 실행
+BUY_TIME = dt_time(9, 0)            # 자금 산정 → 목표 매수가 지정가 매수
+CANCEL_UNFILLED_TIME = dt_time(9, 30)  # 미체결 매수 취소 → 매수 결과 메일
 FORCE_CLOSE_TIME = dt_time(15, 20)  # 당일 매도 원칙에 따른 미청산 포지션 정리
 REPORT_TIME = dt_time(15, 30)       # 일일/월간 성과 리포트 이메일
 
@@ -148,7 +149,7 @@ def build_runtime(settings: Settings) -> Runtime:
 
     workflow = DailyWorkflow(
         collector=DataCollector(
-            market_data, LargeMidCapUniverse(KiwoomClient(settings, auth)), NewsClient()
+            market_data, LargeCapUniverse(KiwoomClient(settings, auth)), NewsClient()
         ),
         recommender=LLMRecommender(settings),
         strategy=strategy,
@@ -167,6 +168,7 @@ def build_runtime(settings: Settings) -> Runtime:
         (DAILY_RESET_TIME, engine.reset_for_new_day, "daily_reset"),
         (settings.recommend_time, _off_loop(workflow.recommend_and_notify), "llm_recommend"),
         (BUY_TIME, workflow.execute_buys, "execute_buys"),
+        (CANCEL_UNFILLED_TIME, workflow.cancel_unfilled_buys, "cancel_unfilled_buys"),
         (
             FORCE_CLOSE_TIME,
             lambda: engine.force_close_all_positions(reason="day_end"),

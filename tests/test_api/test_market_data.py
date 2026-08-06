@@ -12,96 +12,6 @@ def make_client(response):
     return client
 
 
-def test_get_stock_detail_uses_kiwoom_supplied_change_rate():
-    client = make_client(
-        {"cur_prc": "+254000", "base_pric": "249500", "open_pric": "+257000",
-         "flu_rt": "+1.80", "trde_qty": "23296044"}
-    )
-
-    detail = client.get_stock_detail("005930")
-
-    assert detail.price == 254000.0        # 부호는 등락 방향일 뿐이므로 절댓값
-    assert detail.change_rate == 1.80
-    assert round(detail.gap_rate, 2) == 3.01   # (257000-249500)/249500*100
-    assert detail.volume == 23296044
-
-
-def test_get_stock_detail_handles_declining_stock_without_negative_price():
-    client = make_client(
-        {"cur_prc": "-179000", "base_pric": "180000", "open_pric": "-179500", "flu_rt": "-0.56"}
-    )
-
-    detail = client.get_stock_detail("000660")
-
-    assert detail.price == 179000.0    # 하락 종목도 가격은 양수여야 한다
-    assert detail.change_rate == -0.56
-    assert detail.gap_rate < 0
-
-
-def test_get_stock_detail_computes_change_rate_when_missing():
-    client = make_client({"cur_prc": "11000", "base_pric": "10000", "open_pric": "10000"})
-
-    detail = client.get_stock_detail("005930")
-
-    assert detail.change_rate == 10.0   # flu_rt가 없으면 전일 종가로 직접 계산
-    assert detail.gap_rate == 0.0
-
-
-def test_get_stock_detail_survives_missing_base_price():
-    client = make_client({"cur_prc": "11000"})
-
-    detail = client.get_stock_detail("005930")
-
-    assert detail.price == 11000.0
-    assert detail.gap_rate == 0.0   # 0으로 나누지 않는다
-
-
-def test_premarket_falls_back_to_expected_auction_price():
-    # 장 시작 전: 시가·거래량·등락률이 모두 0이고 동시호가 예상체결만 존재
-    client = make_client(
-        {
-            "base_pric": "100000", "cur_prc": "100000", "open_pric": "0",
-            "flu_rt": "0.00", "trde_qty": "0",
-            "exp_cntr_pric": "+103000", "exp_cntr_qty": "12000",
-        }
-    )
-
-    detail = client.get_stock_detail("005930")
-
-    assert detail.is_premarket is True
-    assert detail.price == 103000.0          # 예상체결가를 현재가로 사용
-    assert detail.volume == 12000            # 예상체결량을 거래량으로 사용
-    assert round(detail.change_rate, 2) == 3.0   # 전일 종가 대비 예상 괴리
-    assert round(detail.gap_rate, 2) == 3.0
-
-
-def test_premarket_without_auction_data_yields_zeros_not_garbage():
-    # 08:30 이전에는 예상체결가도 없다 — 없는 신호를 지어내지 않아야 한다
-    client = make_client(
-        {"base_pric": "100000", "cur_prc": "100000", "open_pric": "0",
-         "flu_rt": "0.00", "trde_qty": "0", "exp_cntr_pric": "-0", "exp_cntr_qty": "0"}
-    )
-
-    detail = client.get_stock_detail("005930")
-
-    assert detail.is_premarket is True
-    assert detail.change_rate == 0.0
-    assert detail.gap_rate == 0.0
-
-
-def test_regular_session_data_is_not_treated_as_premarket():
-    client = make_client(
-        {"base_pric": "249500", "cur_prc": "+254000", "open_pric": "+257000",
-         "flu_rt": "+1.80", "trde_qty": "23296044", "exp_cntr_pric": "0"}
-    )
-
-    detail = client.get_stock_detail("005930")
-
-    assert detail.is_premarket is False
-    assert detail.price == 254000.0
-    assert round(detail.gap_rate, 2) == 3.01   # 실제 시가 기준
-
-
 def test_get_current_price_returns_absolute_price():
     client = make_client({"cur_prc": "-179000", "trde_qty": "1000"})
 
@@ -144,22 +54,88 @@ def test_get_ohlcv_defaults_query_date_to_today():
     assert calls[0]["params"]["qry_dt"] == date.today().strftime("%Y%m%d")
 
 
-def test_get_average_volume_averages_daily_volumes():
+# ── 전일 지표 (ka10086 일봉 1회) ─────────────────────────────
+def candle(day, close="70000", volume="1000", flu_rt="+1.50", high=None, low=None):
+    return {
+        "date": day,
+        "close_pric": close,
+        "high_pric": high or close,
+        "low_pric": low or close,
+        "flu_rt": flu_rt,
+        "trde_qty": volume,
+    }
+
+
+def test_previous_day_metrics_skips_today_candle():
+    """응답 맨 앞에는 당일 봉이 섞여 온다 — 이걸 쓰면 장 전과 장중 결과가 갈린다."""
     client = make_client(
-        {"daly_stkpc": [{"trde_qty": "300"}, {"trde_qty": "100"}, {"trde_qty": "200"}]}
+        {
+            "daly_stkpc": [
+                candle("20260806", close="-71000", volume="0", flu_rt="0.00"),
+                candle("20260805", close="-70000", volume="3000", flu_rt="+2.50"),
+                candle("20260804", close="68000", volume="1000"),
+                candle("20260803", close="67000", volume="1000"),
+            ]
+        }
     )
 
-    assert client.get_average_volume("005930") == 200.0
+    result = client.get_previous_day_metrics("005930", today=date(2026, 8, 6))
+
+    assert result.close == 70000.0            # 부호(-)는 등락 방향 표기라 절댓값을 쓴다
+    assert result.change_rate == 2.5
+    assert result.volume == 3000
+    assert result.volume_surge == 3.0         # 전일 3,000 ÷ 그 이전 평균 1,000
 
 
-def test_get_average_volume_ignores_zero_volume_days():
-    """장 전 당일 봉은 거래량이 0으로 들어와 평균을 끌어내린다."""
-    client = make_client({"daly_stkpc": [{"trde_qty": "0"}, {"trde_qty": "100"}, {"trde_qty": "300"}]})
+def test_previous_day_metrics_excludes_previous_day_from_average():
+    """전일 자신을 평균에 넣으면 재려던 급증분이 희석된다."""
+    client = make_client(
+        {
+            "daly_stkpc": [
+                candle("20260805", volume="400"),
+                candle("20260804", volume="100"),
+                candle("20260803", volume="100"),
+            ]
+        }
+    )
 
-    assert client.get_average_volume("005930") == 200.0
+    result = client.get_previous_day_metrics("005930", today=date(2026, 8, 6))
+
+    assert result.volume_surge == 4.0
 
 
-def test_get_average_volume_returns_zero_when_no_candles():
-    client = make_client({"daly_stkpc": []})
+def test_previous_day_metrics_ignores_zero_volume_days_in_average():
+    client = make_client(
+        {
+            "daly_stkpc": [
+                candle("20260805", volume="600"),
+                candle("20260804", volume="0"),
+                candle("20260803", volume="200"),
+            ]
+        }
+    )
 
-    assert client.get_average_volume("005930") == 0.0
+    assert client.get_previous_day_metrics("005930", today=date(2026, 8, 6)).volume_surge == 3.0
+
+
+def test_previous_day_metrics_leaves_surge_zero_without_earlier_candles():
+    """급증률을 못 구하면 0으로 남겨 프롬프트에 '판단불가'로 나간다."""
+    client = make_client({"daly_stkpc": [candle("20260805", volume="500")]})
+
+    assert client.get_previous_day_metrics("005930", today=date(2026, 8, 6)).volume_surge == 0.0
+
+
+def test_previous_day_metrics_returns_none_without_usable_candles():
+    client = make_client({"daly_stkpc": [candle("20260806")]})
+
+    assert client.get_previous_day_metrics("005930", today=date(2026, 8, 6)) is None
+
+
+def test_previous_day_metrics_keeps_high_and_low():
+    client = make_client(
+        {"daly_stkpc": [candle("20260805", close="70000", high="+72000", low="-69000")]}
+    )
+
+    result = client.get_previous_day_metrics("005930", today=date(2026, 8, 6))
+
+    assert (result.high, result.low) == (72000.0, 69000.0)

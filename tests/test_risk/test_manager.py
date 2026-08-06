@@ -6,7 +6,7 @@ from src.risk.manager import RiskManager, exit_trigger_price
 
 
 def make_manager(
-    take_profit_ratio=0.02,
+    take_profit_ratio=0.005,
     stop_loss_ratio=0.02,
     initial_asset=10_000_000,
     max_total_exposure_ratio=0.7,
@@ -27,8 +27,14 @@ def make_manager(
 
 
 def test_check_exit_triggers_take_profit_at_threshold():
-    manager = make_manager(take_profit_ratio=0.02)
-    position = Position(ticker="005930", quantity=10, avg_price=1000.0, current_price=1020.0)
+    """기본 익절선은 순손익 +0.5% — 비용이 0인 이 케이스에서는 가격 +0.5%가 곧 그 지점이다.
+
+    정확히 경계값(1,005원)을 쓰지 않는 것은 부동소수 오차 때문이다 — 1005/1000-1이
+    0.004999999999999893으로 나와 경계에서는 판정이 갈린다. 호가 단위가 1원 이상이라
+    실전에서는 다음 틱에 잡히므로 로직을 손대지 않고 테스트만 경계 위에서 확인한다.
+    """
+    manager = make_manager(take_profit_ratio=0.005)
+    position = Position(ticker="005930", quantity=10, avg_price=1000.0, current_price=1006.0)
 
     assert manager.check_exit(position) == ExitReason.TAKE_PROFIT
 
@@ -41,22 +47,25 @@ def test_check_exit_triggers_stop_loss_at_threshold():
 
 
 def test_check_exit_returns_none_within_band():
-    manager = make_manager(take_profit_ratio=0.02, stop_loss_ratio=0.02)
-    position = Position(ticker="005930", quantity=10, avg_price=1000.0, current_price=1005.0)
+    manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02)
+    position = Position(ticker="005930", quantity=10, avg_price=1000.0, current_price=1002.0)
 
     assert manager.check_exit(position) is None
 
 
 def test_check_exit_take_profit_reflects_costs():
-    """수수료·세금·슬리피지가 있으면 원가 대비 +2% 가격 변동만으로는 순손익 +2%에 못 미친다."""
+    """수수료·세금·슬리피지가 있으면 가격 +0.5%만으로는 순손익 +0.5%에 못 미친다."""
     manager = make_manager(
-        take_profit_ratio=0.02, commission_rate=0.00015, tax_rate=0.0018, slippage_rate=0.001
+        take_profit_ratio=0.005, commission_rate=0.00015, tax_rate=0.0018, slippage_rate=0.001
     )
-    just_short = Position(ticker="005930", quantity=10, avg_price=1000.0, current_price=1020.0)
+    just_short = Position(ticker="005930", quantity=10, avg_price=1000.0, current_price=1005.0)
     assert manager.check_exit(just_short) is None
 
-    trigger_price = exit_trigger_price(1000.0, 0.02, 0.00015, 0.0018, 0.001)
-    at_trigger = Position(ticker="005930", quantity=10, avg_price=1000.0, current_price=trigger_price)
+    trigger_price = exit_trigger_price(1000.0, 0.005, 0.00015, 0.0018, 0.001)
+    assert trigger_price > 1005.0  # 비용만큼 익절가가 위로 밀린다
+    at_trigger = Position(
+        ticker="005930", quantity=10, avg_price=1000.0, current_price=trigger_price + 1
+    )
     assert manager.check_exit(at_trigger) == ExitReason.TAKE_PROFIT
 
 

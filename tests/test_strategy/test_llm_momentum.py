@@ -6,7 +6,7 @@ def make_strategy(count):
     strategy = LLMMomentumStrategy()
     strategy.set_recommendations(
         [
-            StockRecommendation(ticker=f"00{i}", name=f"종목{i}", reason="사유")
+            StockRecommendation(ticker=f"00{i}", name=f"종목{i}", target_price=1000, reason="사유")
             for i in range(count)
         ]
     )
@@ -49,7 +49,7 @@ def test_custom_ratio_and_count_change_allocation():
     strategy = LLMMomentumStrategy(investable_ratio=0.8, target_stock_count=4)
     strategy.set_recommendations(
         [
-            StockRecommendation(ticker=f"00{i}", name=f"종목{i}", reason="사유")
+            StockRecommendation(ticker=f"00{i}", name=f"종목{i}", target_price=1000, reason="사유")
             for i in range(4)
         ]
     )
