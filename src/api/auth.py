@@ -1,4 +1,5 @@
 import logging
+import threading
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -21,11 +22,31 @@ class AuthClient:
         self.settings = settings
         self._token: Optional[str] = None
         self._token_expires_at: Optional[datetime] = None
+        # 발급을 직렬화한다 — 엔진은 루프 스레드와 _off_loop 스레드에서 동시에 API를 부르는데,
+        # 키움은 앱키당 토큰을 하나만 유지해 동시에 두 번 발급하면 서로를 무효화한다.
+        self._lock = threading.Lock()
 
     def ensure_token(self) -> str:
-        if self._is_token_valid():
-            return self._token
-        return self._issue_token()
+        with self._lock:
+            if self._is_token_valid():
+                return self._token
+            return self._issue_token()
+
+    def refresh_token(self, rejected: Optional[str] = None) -> str:
+        """서버가 현재 토큰을 거부했을 때 강제로 새로 발급받는다 (PRD 10절 '토큰 무효화').
+
+        만료 시각만으로는 판정할 수 없는 경우가 있다 — 다른 프로세스가 같은 앱키로 토큰을
+        발급하면 이쪽 토큰은 만료 전에 죽는다 (2026-08-06에 실제로 겪었다).
+
+        `rejected`에 거부당한 토큰을 넘기면, 그 사이 다른 스레드가 이미 새 토큰을 받아 온
+        경우에는 발급을 건너뛴다 — 중복 발급은 서로의 토큰을 무효화한다.
+        """
+        with self._lock:
+            if rejected is not None and self._token is not None and self._token != rejected:
+                return self._token
+            self._token = None
+            self._token_expires_at = None
+            return self._issue_token()
 
     def _is_token_valid(self) -> bool:
         if not self._token or not self._token_expires_at:

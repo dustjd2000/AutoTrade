@@ -35,6 +35,9 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   `tests/` 아래를 그대로 찾는다.
 - `scripts/check_balance.py`, `scripts/check_fills.py`: 키움 API 응답 구조(잔고 TR, 체결
   내역)를 진단하는 조회 전용 스크립트 — 주문을 내지 않는다.
+- **엔진이 떠 있는 동안에는 이 스크립트들을 돌리지 않는다.** 키움은 앱키당 토큰을 하나만
+  유지해서, 별도 프로세스가 토큰을 발급하면 실행 중인 엔진의 토큰이 즉시 무효화된다.
+  2026-08-06에 이걸로 손절 청산이 22분간 거부됐다 (PRD 10절 "토큰 무효화와 자동 재발급").
 
 ## 아키텍처
 
