@@ -61,6 +61,20 @@ def _first_present(row: Dict[str, Any], *keys: str):
     return None
 
 
+def _change_rate(candle: Dict[str, Any], close: float, earlier_close: float) -> float:
+    """전일 등락률 — 키움이 준 flu_rt를 쓰되, 없으면 직전 종가 대비로 직접 계산한다.
+
+    ka10086 행에 flu_rt가 실리지 않으면 전 종목의 등락률이 0이 된다. 그러면 후보 정렬에서
+    '전일 상승'과 '하락·보합'을 가르는 기준이 통째로 사라지고, 프롬프트에도
+    "전일 등락률 +0.00%"만 나열돼 LLM이 근거로 삼을 신호가 없어진다 — 직전 버전이
+    `has_direction`으로 막던 실패 모드와 같다.
+    """
+    reported = to_float(_first_present(candle, "flu_rt"))
+    if reported != 0.0 or close <= 0 or earlier_close <= 0:
+        return reported
+    return (close - earlier_close) / earlier_close * 100
+
+
 class MarketDataClient:
     def __init__(self, settings: Settings, auth: AuthClient):
         self.settings = settings
@@ -159,12 +173,17 @@ class MarketDataClient:
         volume = to_int(_first_present(previous, "trde_qty", "acml_vol"))
 
         # 키움은 가격에 등락 방향 부호를 붙여 보내므로 절댓값을 취한다 (등락률은 부호가 의미다)
+        close = abs(to_float(_first_present(previous, "close_pric", "cur_prc")))
+        earlier_close = (
+            abs(to_float(_first_present(earlier[0], "close_pric", "cur_prc"))) if earlier else 0.0
+        )
+
         return PreviousDayMetrics(
             ticker=ticker,
-            close=abs(to_float(_first_present(previous, "close_pric", "cur_prc"))),
+            close=close,
             high=abs(to_float(_first_present(previous, "high_pric"))),
             low=abs(to_float(_first_present(previous, "low_pric"))),
-            change_rate=to_float(_first_present(previous, "flu_rt")),
+            change_rate=_change_rate(previous, close, earlier_close),
             volume=volume,
             volume_surge=volume / average if average > 0 else 0.0,
         )

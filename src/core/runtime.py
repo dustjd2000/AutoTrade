@@ -169,11 +169,7 @@ def build_runtime(settings: Settings) -> Runtime:
         (settings.recommend_time, _off_loop(workflow.recommend_and_notify), "llm_recommend"),
         (BUY_TIME, workflow.execute_buys, "execute_buys"),
         (CANCEL_UNFILLED_TIME, workflow.cancel_unfilled_buys, "cancel_unfilled_buys"),
-        (
-            FORCE_CLOSE_TIME,
-            lambda: engine.force_close_all_positions(reason="day_end"),
-            "force_close_all_positions",
-        ),
+        (FORCE_CLOSE_TIME, close_out(workflow, engine), "close_out"),
         (REPORT_TIME, _off_loop(workflow.send_final_report), "daily_report"),
     ):
         scheduler.add_job(trigger_time, _trading_days_only(job, name), name=name)
@@ -187,21 +183,44 @@ def build_runtime(settings: Settings) -> Runtime:
     )
 
 
+def close_out(workflow: DailyWorkflow, engine: TradingEngine) -> Callable[[], None]:
+    """15:20 마감 정리 — 미체결 매수를 먼저 거두고 나서 보유 포지션을 청산한다.
+
+    순서를 뒤집으면 안 된다. 청산 뒤에도 매수 주문이 살아 있으면 그 주문이 장 마감 직전에
+    체결되어 오버나이트 포지션이 남고, 당일 매도 원칙이 깨진다.
+
+    09:30 `cancel_unfilled_buys`가 정상적으로 돌았다면 여기서 거둘 주문은 없다. 이 호출은
+    09:30을 놓친 경우를 위한 그물이다 — 엔진을 09:30 이후에 켜면 `TimeScheduler`가 지난
+    트리거를 소급 실행하지 않아 그날 취소가 통째로 빠진다.
+    """
+
+    def run() -> None:
+        try:
+            workflow.cancel_unfilled_buys()
+        except Exception:
+            # 취소가 실패해도 청산은 반드시 나가야 한다 — 당일 매도의 마지막 방어선이다
+            logger.exception("마감 정리 중 미체결 매수 취소에 실패했습니다. 청산은 계속합니다.")
+        engine.force_close_all_positions(reason="day_end")
+
+    return run
+
+
 # ── 즉시 실행(점검) 액션 ────────────────────────────────────
 # 스케줄 시각을 기다리지 않고 UI에서 바로 하루 흐름의 각 단계를 실행하기 위한 목록.
 # 실행 주체는 스케줄러와 동일한 workflow/engine 메서드이므로 동작이 갈리지 않는다.
 MANUAL_ACTIONS: Dict[str, str] = {
     "recommend": "① LLM 추천 + 메일 발송",
     "buy": "② 매수 실행",
-    "sell_all": "③ 전량 매도 (청산)",
-    "report": "④ 최종 리포트 메일",
+    "cancel_unfilled": "③ 미체결 매수 취소 + 결과 메일",
+    "sell_all": "④ 전량 매도 (청산)",
+    "report": "⑤ 최종 리포트 메일",
     # 매도 '설정'은 별도 단계가 아니다 — 익절/손절 라인은 엔진 시작 시 적용되어 있고,
     # 매수로 포지션이 생기는 순간 RiskManager.check_exit 감시가 자동으로 붙는다.
     "full": "매수 및 매도설정까지 일괄 수행",
 }
 
 # 실제 주문이 나가는 액션 — UI가 실행 전 확인을 받는다
-ORDER_ACTIONS = frozenset({"buy", "sell_all", "full"})
+ORDER_ACTIONS = frozenset({"buy", "cancel_unfilled", "sell_all", "full"})
 
 
 @dataclass(frozen=True)
@@ -221,6 +240,13 @@ def manual_steps(runtime: Runtime, action: str) -> List[ManualStep]:
         ],
         "buy": [
             ManualStep(MANUAL_ACTIONS["buy"], runtime.workflow.execute_buys, touches_orders=True)
+        ],
+        "cancel_unfilled": [
+            ManualStep(
+                MANUAL_ACTIONS["cancel_unfilled"],
+                runtime.workflow.cancel_unfilled_buys,
+                touches_orders=True,
+            )
         ],
         "sell_all": [
             ManualStep(

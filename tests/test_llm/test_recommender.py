@@ -9,6 +9,7 @@ from src.llm.recommender import (
     apply_price_guardrail,
     build_system_prompt,
     build_user_prompt,
+    drop_unknown_tickers,
     normalize_target_price,
     parse_recommendations,
     tick_size,
@@ -218,6 +219,56 @@ def test_recommend_applies_guardrail_to_target_price():
     result = _fake_recommender(response).recommend([stock(ticker="068270", prev_close=180_000.0)])
 
     assert result[0].target_price == 189_000
+
+
+def test_recommend_drops_stock_missing_from_candidates():
+    """후보 밖 종목은 전일 종가를 몰라 ±5% 가드레일이 꺼진다 — 주문 전에 걸러낸다."""
+    text = (
+        '{"recommendations": ['
+        '{"ticker": "068270", "name": "셀트리온", "target_price": 180000, "reason": "수급"},'
+        '{"ticker": "999999", "name": "없는종목", "target_price": 5000, "reason": "환각"}]}'
+    )
+    response = _response("end_turn", [SimpleNamespace(type="text", text=text)])
+    result = _fake_recommender(response).recommend([stock(ticker="068270", prev_close=180_000.0)])
+
+    assert [r.ticker for r in result] == ["068270"]
+
+
+def test_recommend_keeps_going_when_fewer_than_target_count_remain():
+    """모자란 몫은 현금으로 남긴다 — 기존 정책(PRD 10절)과 같게 유지한다."""
+    text = (
+        '{"recommendations": ['
+        '{"ticker": "068270", "name": "셀트리온", "target_price": 180000, "reason": "수급"},'
+        '{"ticker": "999999", "name": "없는종목", "target_price": 5000, "reason": "환각"}]}'
+    )
+    response = _response("end_turn", [SimpleNamespace(type="text", text=text)])
+    recommender = _fake_recommender(response)  # target_stock_count=3
+
+    result = recommender.recommend([stock(ticker="068270", prev_close=180_000.0)])
+
+    assert len(result) == 1
+
+
+def test_recommend_returns_none_when_every_stock_is_off_list():
+    """전부 후보 밖이면 매수할 근거가 남지 않으므로 그날은 스킵한다."""
+    text = (
+        '{"recommendations": [{"ticker": "999999", "name": "없는종목",'
+        ' "target_price": 5000, "reason": "환각"}]}'
+    )
+    response = _response("end_turn", [SimpleNamespace(type="text", text=text)])
+
+    assert _fake_recommender(response).recommend([stock(ticker="068270")]) is None
+
+
+def test_drop_unknown_tickers_keeps_only_candidates():
+    recommendations = [
+        StockRecommendation("005930", "삼성전자", 70_000, "수급"),
+        StockRecommendation("999999", "없는종목", 5_000, "환각"),
+    ]
+
+    kept = drop_unknown_tickers(recommendations, [stock(ticker="005930")])
+
+    assert [r.ticker for r in kept] == ["005930"]
 
 
 # ── 프롬프트 ────────────────────────────────────────────────

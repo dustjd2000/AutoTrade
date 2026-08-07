@@ -1,4 +1,6 @@
+import json
 import logging
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import List, Optional
@@ -29,6 +31,20 @@ logger = logging.getLogger(__name__)
 # 오전에 이미 보낸 리포트를 15:30이 다시 보낸다.
 DEFAULT_REPORT_MARK_PATH = Path("data") / "final_report_sent"
 
+# 09:00 매수 결과를 09:30 마무리까지 넘기는 파일. 인메모리 필드로 두면 그 사이 엔진이
+# 재시작될 때(설정 저장 등) 기록이 사라져, 취소는 체결내역 조회로 살아나도 매수 결과
+# 메일만 조용히 빠진다 — 사용자는 미체결인지 장애인지 구분할 수 없다.
+DEFAULT_BUY_RECORDS_PATH = Path("data") / "buy_records.json"
+
+
+@dataclass
+class BuyRecordState:
+    """09:00이 남기고 09:30이 집어 가는 매수 실행 상태 (`DEFAULT_BUY_RECORDS_PATH`)."""
+
+    cash: float                # 매수 산정에 쓴 예수금
+    amount_per_stock: float    # 종목당 배정액
+    records: List[BuyRecord] = field(default_factory=list)
+
 
 class DailyWorkflow:
     """1호 전략의 하루 흐름을 스케줄러 트리거에 연결한다 (PRD 5.5-B, 5.11).
@@ -49,6 +65,7 @@ class DailyWorkflow:
         email: EmailNotifier,
         ws_client=None,
         report_mark_path: Optional[Path] = None,
+        buy_records_path: Optional[Path] = None,
     ):
         self.collector = collector
         self.recommender = recommender
@@ -64,11 +81,12 @@ class DailyWorkflow:
         self.report_mark_path = Path(
             report_mark_path if report_mark_path is not None else DEFAULT_REPORT_MARK_PATH
         )
-        # 09:00 매수 결과를 09:30 마무리(cancel_unfilled_buys)까지 들고 있는다 — 지정가
+        # 09:00 매수 결과를 09:30 마무리(cancel_unfilled_buys)까지 넘기는 파일 — 지정가
         # 주문은 접수 시점에 체결 여부를 알 수 없어, 결과 메일을 그때 보내야 확정된 값이 실린다.
-        self._buy_records: List[BuyRecord] = []
-        self._buy_cash: float = 0.0
-        self._buy_amount_per_stock: float = 0.0
+        # 인메모리가 아니라 파일인 이유는 DEFAULT_BUY_RECORDS_PATH 주석 참고.
+        self.buy_records_path = Path(
+            buy_records_path if buy_records_path is not None else DEFAULT_BUY_RECORDS_PATH
+        )
 
     def recommend_and_notify(self, today: Optional[date] = None) -> None:
         """08:45 — 당일 데이터 수집 → LLM 추천 → 결과를 이메일로 발송."""
@@ -266,38 +284,39 @@ class DailyWorkflow:
                 )
 
         # 결과 메일은 09:30 cancel_unfilled_buys가 보낸다 — 지정가라 지금은 체결 여부를 모른다
-        self._buy_records = records
-        self._buy_cash = cash
-        self._buy_amount_per_stock = plans[0].amount
+        self._write_buy_records(cash, plans[0].amount, records)
 
-    def cancel_unfilled_buys(self) -> None:
+    def cancel_unfilled_buys(self, today: Optional[date] = None) -> None:
         """09:30 — 목표가에 닿지 않은 매수 주문을 취소하고 매수 결과를 알린다 (PRD 5.5-B 6단계).
 
-        취소 대상은 인메모리 주문 목록이 아니라 **당일 체결내역 조회**에서 찾는다. 09:00과
-        09:30 사이에 설정 저장 등으로 엔진이 재시작되면 인메모리 기록이 사라지는데, 그때도
-        미체결 주문이 장 마감까지 방치되면 안 되기 때문이다.
-        """
-        cancelled_ids = self._cancel_unfilled_orders()
+        취소 대상은 **당일 체결내역 조회**에서 찾는다. 09:00과 09:30 사이에 설정 저장 등으로
+        엔진이 재시작돼도 미체결 주문이 장 마감까지 방치되면 안 되기 때문이다.
 
-        if not self._buy_records:
-            logger.info("이번 엔진 실행에서 접수한 매수 주문이 없어 결과 메일을 보내지 않습니다.")
+        15:20 마감 정리(`runtime.close_out`)가 한 번 더 부른다 — 09:30을 놓친 날의 그물이다.
+        메일을 보내고 나면 기록 파일을 지우므로 같은 메일이 두 번 나가지는 않는다.
+        """
+        state = self._read_buy_records(today or date.today())
+        cancelled_ids = self._cancel_unfilled_orders(state.records if state else [])
+
+        if state is None:
+            logger.info("오늘 접수한 매수 주문 기록이 없어 결과 메일을 보내지 않습니다.")
             return
 
-        records = self._buy_records
-        self._buy_records = []
+        records = state.records
 
         # 체결 반영이 먼저다 — 부분체결분까지 채운 뒤에 남은 '접수' 상태만 취소로 확정한다
         fills_synced = self._fill_buy_prices(records)
         for record in records:
             if record.order_id in cancelled_ids and record.outcome == BuyOutcome.ORDERED:
                 record.outcome = BuyOutcome.CANCELLED
-                record.note = "목표 매수가에 닿지 않아 09:30에 미체결분을 취소했습니다"
+                record.note = "목표 매수가에 닿지 않아 미체결분을 취소했습니다"
 
-        self._notify_buy_result(
-            self._buy_cash, self._buy_amount_per_stock, records, fills_synced
-        )
+        # 메일이 실패해도 (_notify_buy_result가 예외를 삼킨다) 기록은 지운다 — 남겨두면
+        # 15:20 마감 정리가 같은 메일을 다시 시도하며 매번 취소 로그까지 되풀이한다.
+        self._clear_buy_records()
+        self._notify_buy_result(state.cash, state.amount_per_stock, records, fills_synced)
 
-    def _cancel_unfilled_orders(self) -> set:
+    def _cancel_unfilled_orders(self, records: List[BuyRecord]) -> set:
         """미체결 매수 주문을 취소하고, 취소에 성공한 주문번호 집합을 돌려준다."""
         try:
             fills = self.engine.order_client.get_today_fills()
@@ -306,7 +325,7 @@ class DailyWorkflow:
             self.engine.notify("[경고] 미체결 매수 주문을 조회하지 못했습니다. 직접 확인하세요.")
             return set()
 
-        targets = self._cancel_targets(fills)
+        targets = self._cancel_targets(fills, records)
         if not targets:
             logger.info("취소할 미체결 매수 주문이 없습니다.")
             return set()
@@ -327,11 +346,11 @@ class DailyWorkflow:
         logger.info("미체결 매수 주문 %d건 중 %d건을 취소했습니다.", len(targets), len(cancelled))
         return cancelled
 
-    def _cancel_targets(self, fills) -> List[tuple]:
+    def _cancel_targets(self, fills, records: List[BuyRecord]) -> List[tuple]:
         """취소할 (주문번호, 종목코드, 종목명, 수량) 목록. 수량 0은 '잔량 전부'다.
 
-        1순위는 체결내역 조회가 알려주는 미체결 잔량이다 — 이 경로는 인메모리 기록에
-        의존하지 않아 엔진이 재시작돼도 동작한다.
+        1순위는 체결내역 조회가 알려주는 미체결 잔량이다 — 이 경로는 저장된 기록에
+        의존하지 않아 기록을 읽지 못해도 동작한다.
         2순위는 **조회 결과에 흔적조차 없는 접수 주문**이다. 체결내역 TR(ka10076)이 아직
         한 주도 체결되지 않은 대기 주문을 싣는지 확인하지 못했는데, 싣지 않는다면 1순위만으로는
         그 주문이 장 마감까지 살아남는다. 체결된 주문은 조회 결과에 잡히므로 여기 걸리지 않는다.
@@ -345,12 +364,78 @@ class DailyWorkflow:
         known_ids = {fill.order_id for fill in fills}
         targets.extend(
             (record.order_id, record.ticker, record.name, 0)
-            for record in self._buy_records
+            for record in records
             if record.order_id
             and record.outcome == BuyOutcome.ORDERED
             and record.order_id not in known_ids
         )
         return targets
+
+    # ── 매수 기록 파일 (09:00 → 09:30 인계) ────────────────────
+    def _write_buy_records(
+        self, cash: float, amount_per_stock: float, records: List[BuyRecord]
+    ) -> None:
+        """매수 기록을 파일에 남긴다. 실패해도 주문은 이미 나갔으므로 흐름을 막지 않는다."""
+        payload = {
+            "date": date.today().isoformat(),
+            "cash": cash,
+            "amount_per_stock": amount_per_stock,
+            "records": [
+                {**asdict(record), "outcome": record.outcome.value} for record in records
+            ],
+        }
+        try:
+            self.buy_records_path.parent.mkdir(parents=True, exist_ok=True)
+            self.buy_records_path.write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError:
+            logger.warning(
+                "매수 기록을 남기지 못했습니다 (%s) — 엔진이 재시작되면 매수 결과 메일이 "
+                "빠질 수 있습니다.",
+                self.buy_records_path,
+                exc_info=True,
+            )
+
+    def _read_buy_records(self, today: date) -> Optional[BuyRecordState]:
+        """오늘 저장된 매수 기록. 없거나·깨졌거나·다른 날짜면 None.
+
+        읽기에 실패하면 '기록 없음'으로 본다 — 메일이 빠지는 편이, 깨진 값으로 취소 판정을
+        하거나 어제 결과를 오늘 메일로 보내는 것보다 낫다.
+        """
+        try:
+            payload = json.loads(self.buy_records_path.read_text(encoding="utf-8"))
+            if date.fromisoformat(payload["date"]) != today:
+                logger.info("저장된 매수 기록이 오늘 것이 아니라 무시합니다: %s", payload["date"])
+                return None
+            return BuyRecordState(
+                cash=float(payload["cash"]),
+                amount_per_stock=float(payload["amount_per_stock"]),
+                records=[
+                    BuyRecord(**{**row, "outcome": BuyOutcome(row["outcome"])})
+                    for row in payload["records"]
+                ],
+            )
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError, KeyError, TypeError):
+            logger.warning(
+                "매수 기록을 읽지 못했습니다 (%s) — 결과 메일을 건너뜁니다. 취소는 그대로 진행합니다.",
+                self.buy_records_path,
+                exc_info=True,
+            )
+            return None
+
+    def _clear_buy_records(self) -> None:
+        """인계가 끝난 기록을 지운다 — 남겨두면 15:20 마감 정리가 같은 메일을 또 보낸다."""
+        try:
+            self.buy_records_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning(
+                "매수 기록 파일을 지우지 못했습니다 (%s) — 매수 결과 메일이 중복될 수 있습니다.",
+                self.buy_records_path,
+                exc_info=True,
+            )
 
     def _notify_buy_result(
         self,

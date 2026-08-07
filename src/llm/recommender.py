@@ -220,6 +220,30 @@ def parse_recommendations(raw_text: str) -> List[StockRecommendation]:
     return recommendations
 
 
+def drop_unknown_tickers(
+    recommendations: List[StockRecommendation], daily_data: List[DailyStockData]
+) -> List[StockRecommendation]:
+    """후보 목록에 없는 종목을 걸러낸다 — 프롬프트 '절대 규칙 1'을 코드로도 강제한다.
+
+    후보 밖 종목은 전일 종가를 알 수 없어 `apply_price_guardrail`의 ±5% 경계가 통째로
+    꺼진다. 자릿수를 틀린 값이 그대로 주문가가 되는, 가드레일이 가장 필요한 자리에서
+    가드레일이 사라지는 셈이라 주문 경로에 들어가기 전에 잘라낸다.
+    """
+    known = {data.ticker for data in daily_data}
+    kept = []
+    for rec in recommendations:
+        if rec.ticker in known:
+            kept.append(rec)
+        else:
+            logger.warning(
+                "후보에 없는 종목을 추천해 제외합니다: %s %s (목표가 %s원)",
+                rec.ticker,
+                rec.name,
+                f"{rec.target_price:,}",
+            )
+    return kept
+
+
 def apply_price_guardrail(
     recommendations: List[StockRecommendation], daily_data: List[DailyStockData]
 ) -> None:
@@ -315,6 +339,11 @@ class LLMRecommender:
                 "LLM recommended 0 stock(s) (prompt_version=%s) — no confident picks today.",
                 PROMPT_TEMPLATE_VERSION,
             )
+            return None
+
+        recommendations = drop_unknown_tickers(recommendations, daily_data)
+        if not recommendations:
+            logger.error("추천 종목이 모두 후보 밖입니다 — 오늘 매수를 스킵합니다.")
             return None
 
         apply_price_guardrail(recommendations, daily_data)

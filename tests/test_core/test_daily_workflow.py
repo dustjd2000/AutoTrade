@@ -28,6 +28,14 @@ def report_mark(tmp_path, monkeypatch):
     return path
 
 
+@pytest.fixture(autouse=True)
+def buy_records_file(tmp_path, monkeypatch):
+    """09:00 매수 기록 파일도 테스트마다 격리한다."""
+    path = tmp_path / "buy_records.json"
+    monkeypatch.setattr(daily_workflow, "DEFAULT_BUY_RECORDS_PATH", path)
+    return path
+
+
 class FakeEmail:
     def __init__(self):
         self.sent = []
@@ -465,6 +473,66 @@ def test_cancel_failure_is_notified():
     workflow.cancel_unfilled_buys()
 
     assert any("미체결 매수 취소 실패" in n for n in notifications)
+
+
+def test_buy_result_email_survives_an_engine_restart():
+    """09:00~09:30 사이 설정 저장으로 엔진이 재시작돼도 매수 결과는 알려야 한다."""
+    recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a")]
+    workflow, _, _, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.execute_buys()
+
+    # 엔진 재시작 — DailyWorkflow가 통째로 새로 만들어진다
+    restarted, email, order_client, _, _ = make_workflow(recommendations=recs)
+    order_client.fills = [unfilled_fill()]
+    restarted.cancel_unfilled_buys()
+
+    assert len(email.sent) == 1
+    _, body, _ = email.sent[0]
+    assert "005930" in body
+
+
+def test_buy_result_email_is_not_sent_twice():
+    """09:30이 보낸 메일을 15:20 마감 정리가 또 보내면 안 된다."""
+    recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a")]
+    workflow, email, order_client, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    order_client.fills = [unfilled_fill()]
+
+    workflow.execute_buys()
+    workflow.cancel_unfilled_buys()
+    workflow.cancel_unfilled_buys()
+
+    assert len(email.sent) == 1
+
+
+def test_buy_records_from_another_day_are_ignored(buy_records_file):
+    """어제 남은 기록으로 오늘 매수 결과 메일을 보내면 안 된다."""
+    buy_records_file.write_text(
+        '{"date": "2020-01-02", "cash": 1000.0, "amount_per_stock": 500.0,'
+        ' "records": [{"ticker": "005930", "name": "삼성전자", "outcome": "ordered",'
+        ' "quantity": 1, "reference_price": 1000.0, "filled_quantity": 0,'
+        ' "filled_price": null, "order_id": "1", "note": null}]}',
+        encoding="utf-8",
+    )
+    workflow, email, order_client, _, _ = make_workflow(recommendations=[])
+    order_client.fills = []
+
+    workflow.cancel_unfilled_buys()
+
+    assert email.sent == []
+
+
+def test_unreadable_buy_records_do_not_stop_cancellation(buy_records_file):
+    """기록이 깨져도 미체결 취소는 돌아야 한다 — 취소가 메일보다 중요하다."""
+    buy_records_file.write_text("{망가진 json", encoding="utf-8")
+    workflow, email, order_client, _, _ = make_workflow(recommendations=[])
+    order_client.fills = [unfilled_fill()]
+
+    workflow.cancel_unfilled_buys()
+
+    assert order_client.cancelled == [("1", "005930", 2000)]
+    assert email.sent == []
 
 
 def test_cancel_runs_even_without_in_memory_records():

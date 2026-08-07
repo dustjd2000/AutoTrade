@@ -409,7 +409,9 @@ class MainWindow(QMainWindow):
             "스케줄(추천 시각 / 09:00 / 09:30 / 15:20 / 15:30)과 무관하게 지금 바로 실행합니다. "
             "엔진이 실행 중일 때만 동작하며, 장 시간 외에는 주문이 거부될 수 있습니다.\n"
             "일괄 수행은 ①② (추천→지정가 매수)만 돌립니다. 매수 후에는 익절/손절이 자동 감시되며, "
-            "미체결 취소·매수 결과 메일(09:30), 청산(15:20), 리포트(15:30)는 스케줄에 맡깁니다."
+            "미체결 취소·매수 결과 메일(09:30), 청산(15:20), 리포트(15:30)는 스케줄에 맡깁니다.\n"
+            "엔진을 09:30 이후에 켠 날은 그 취소가 스케줄에서 빠지므로 ③을 직접 눌러야 합니다 "
+            "(누르지 않아도 15:20 청산 직전에 한 번 더 거둡니다)."
         )
         run_hint.setWordWrap(True)
         run_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
@@ -419,7 +421,9 @@ class MainWindow(QMainWindow):
         grid.setSpacing(8)
         self._action_buttons: dict[str, QPushButton] = {}
         self._action_accent: dict[str, bool] = {}
-        for index, action in enumerate(("recommend", "buy", "sell_all", "report")):
+        for index, action in enumerate(
+            ("recommend", "buy", "cancel_unfilled", "sell_all", "report")
+        ):
             btn = self._make_action_button(action)
             grid.addWidget(btn, index // 2, index % 2)
         run_layout.addLayout(grid)
@@ -888,6 +892,10 @@ class MainWindow(QMainWindow):
     def _confirm_action(self, action: str) -> bool:
         detail = {
             "buy": "추천 종목을 목표 매수가에 지정가로 매수합니다.",
+            "cancel_unfilled": (
+                "아직 체결되지 않은 매수 주문을 취소하고 매수 결과 메일을 보냅니다.\n"
+                "이미 체결된 종목은 그대로 두고 보유합니다."
+            ),
             "sell_all": "보유 중인 모든 포지션을 시장가로 청산합니다.",
             "full": (
                 "LLM 추천 + 메일 → 목표가 지정가 매수를 순서대로 실행합니다.\n"

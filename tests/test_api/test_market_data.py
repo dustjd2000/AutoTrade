@@ -1,6 +1,8 @@
 from datetime import date
 from types import SimpleNamespace
 
+import pytest
+
 from src.api.market_data import MarketDataClient
 
 
@@ -123,6 +125,39 @@ def test_previous_day_metrics_leaves_surge_zero_without_earlier_candles():
     client = make_client({"daly_stkpc": [candle("20260805", volume="500")]})
 
     assert client.get_previous_day_metrics("005930", today=date(2026, 8, 6)).volume_surge == 0.0
+
+
+def test_previous_day_change_rate_falls_back_to_close_comparison():
+    """flu_rt가 없으면 전 종목 등락률이 0이 되어 후보 선정도 프롬프트도 함께 망가진다."""
+    bare = {"date": "20260805", "close_pric": "-70000", "trde_qty": "3000"}
+    earlier = {"date": "20260804", "close_pric": "-68000", "trde_qty": "1000"}
+    client = make_client({"daly_stkpc": [bare, earlier]})
+
+    result = client.get_previous_day_metrics("005930", today=date(2026, 8, 6))
+
+    # (70,000 - 68,000) / 68,000 × 100
+    assert result.change_rate == pytest.approx(2.941, abs=0.001)
+
+
+def test_previous_day_change_rate_prefers_the_reported_value():
+    """폴백이 키움이 준 flu_rt를 덮어써서는 안 된다."""
+    client = make_client(
+        {
+            "daly_stkpc": [
+                candle("20260805", close="70000", flu_rt="+2.50"),
+                candle("20260804", close="68000"),
+            ]
+        }
+    )
+
+    assert client.get_previous_day_metrics("005930", today=date(2026, 8, 6)).change_rate == 2.5
+
+
+def test_previous_day_change_rate_stays_zero_without_an_earlier_close():
+    """비교 대상이 없으면 0으로 남긴다 — 없는 값을 지어내지 않는다."""
+    client = make_client({"daly_stkpc": [{"date": "20260805", "close_pric": "70000"}]})
+
+    assert client.get_previous_day_metrics("005930", today=date(2026, 8, 6)).change_rate == 0.0
 
 
 def test_previous_day_metrics_returns_none_without_usable_candles():

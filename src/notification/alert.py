@@ -1,5 +1,6 @@
 import logging
 import re
+import threading
 from datetime import date
 from typing import Callable, Optional, Set
 
@@ -38,18 +39,23 @@ class AlertNotifier:
         self._today = today
         self._day: Optional[date] = None
         self._sent: Set[str] = set()
+        self._lock = threading.Lock()
 
     def send(self, message: str) -> None:
-        today = self._today()
-        if self._day != today:
-            # 날짜가 바뀌면 억제 이력을 비운다 — 어제 한 번 본 장애라고 오늘까지 묻어두지 않는다
-            self._day = today
-            self._sent.clear()
-
         key = dedupe_key(message)
-        if key in self._sent:
-            logger.info("같은 내용의 알림을 오늘 이미 보냈습니다 — 메일을 건너뜁니다: %s", message)
-            return
+        with self._lock:
+            today = self._today()
+            if self._day != today:
+                # 날짜가 바뀌면 억제 이력을 비운다 — 어제 한 번 본 장애라고 오늘까지 묻어두지 않는다
+                self._day = today
+                self._sent.clear()
 
-        self._sent.add(key)
+            if key in self._sent:
+                logger.info("같은 내용의 알림을 오늘 이미 보냈습니다 — 메일을 건너뜁니다: %s", message)
+                return
+
+            self._sent.add(key)
+
+        # SMTP는 몇 초가 걸리므로 락 밖에서 보낸다 — 그동안 다른 스레드의 알림까지 막으면
+        # 정작 급한 장애 알림이 뒤로 밀린다. 발송 실패해도 키는 남아 그날은 재시도하지 않는다.
         self._email.send(ALERT_SUBJECT, message)

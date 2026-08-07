@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.core.runtime import MANUAL_ACTIONS, ORDER_ACTIONS, manual_steps
+from src.core.runtime import MANUAL_ACTIONS, ORDER_ACTIONS, close_out, manual_steps
 
 
 def make_runtime(calls):
@@ -10,6 +10,7 @@ def make_runtime(calls):
     workflow = SimpleNamespace(
         recommend_and_notify=lambda: calls.append("recommend"),
         execute_buys=lambda: calls.append("buy"),
+        cancel_unfilled_buys=lambda: calls.append("cancel_unfilled"),
         send_daily_report=lambda: calls.append("report"),
     )
     engine = SimpleNamespace(
@@ -23,6 +24,7 @@ def make_runtime(calls):
     [
         ("recommend", ["recommend"]),
         ("buy", ["buy"]),
+        ("cancel_unfilled", ["cancel_unfilled"]),
         ("sell_all", ["sell_all:manual"]),
         ("report", ["report"]),
     ],
@@ -71,3 +73,36 @@ def test_unknown_action_raises():
 
 def test_order_actions_are_known_actions():
     assert ORDER_ACTIONS <= set(MANUAL_ACTIONS)
+
+
+def test_cancel_unfilled_needs_confirmation_and_the_engine_loop():
+    """주문이 나가는 액션이므로 확인을 받고, 실시간 감시와 직렬화되어야 한다."""
+    assert "cancel_unfilled" in ORDER_ACTIONS
+    steps = manual_steps(make_runtime([]), "cancel_unfilled")
+    assert [step.touches_orders for step in steps] == [True]
+
+
+# ── 15:20 마감 정리 ─────────────────────────────────────────
+def test_closeout_cancels_unfilled_buys_before_liquidating():
+    """순서가 뒤집히면 청산 뒤 살아남은 매수 주문이 체결돼 오버나이트 포지션이 된다."""
+    calls = []
+    runtime = make_runtime(calls)
+
+    close_out(runtime.workflow, runtime.engine)()
+
+    assert calls == ["cancel_unfilled", "sell_all:day_end"]
+
+
+def test_closeout_liquidates_even_if_cancelling_raises():
+    """취소 조회가 실패해도 당일 청산은 반드시 나가야 한다."""
+    calls = []
+    runtime = make_runtime(calls)
+
+    def boom():
+        calls.append("cancel_unfilled")
+        raise RuntimeError("체결내역 조회 실패")
+
+    runtime.workflow.cancel_unfilled_buys = boom
+    close_out(runtime.workflow, runtime.engine)()
+
+    assert calls == ["cancel_unfilled", "sell_all:day_end"]
