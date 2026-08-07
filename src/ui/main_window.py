@@ -340,6 +340,16 @@ class MainWindow(QMainWindow):
         risk_form.addRow("익절 (%)", self._take_profit)
         risk_form.addRow("손절 (%)", self._stop_loss)
         risk_form.addRow("갭 허용치 (%)", self._buy_price_tolerance)
+
+        # 이름만으로는 무엇에 대한 허용치인지 알 수 없다 — 익절/손절과 달리 '팔 때'가 아니라
+        # '사기 전'을 보는 값이라는 점이 특히 드러나야 한다
+        gap_hint = QLabel(
+            "(09:00 현재가가 목표 매수가보다 이 비율을 넘게 높으면 갭 상승으로 보고 "
+            "그 종목은 매수하지 않습니다)"
+        )
+        gap_hint.setWordWrap(True)
+        gap_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
+        risk_form.addRow(gap_hint)
         fund_risk_row.addWidget(risk_box, 1)
 
         root.addLayout(fund_risk_row)
