@@ -33,14 +33,12 @@ def recommendation_email(
 
     lines = [f"{today:%Y-%m-%d} LLM 추천 결과입니다.", ""]
     for i, r in enumerate(recommendations, start=1):
-        lines.extend(
-            [
-                f"{i}. {format_stock(r.ticker, r.name)}",
-                f"   목표 매수가: {r.target_price:,}원",
-                f"   추천 근거: {r.reason}",
-                "",
-            ]
-        )
+        lines.append(f"{i}. {format_stock(r.ticker, r.name)}")
+        lines.append(f"   목표 매수가: {r.target_price:,}원")
+        sell_line = _sell_target_line(r)
+        if sell_line:
+            lines.append(sell_line)
+        lines.extend([f"   추천 근거: {r.reason}", ""])
 
     if len(recommendations) < target_stock_count:
         per_stock_ratio = investable_ratio / target_stock_count
@@ -51,13 +49,27 @@ def recommendation_email(
         )
         lines.append("")
 
-    lines.extend(
-        [
-            "※ 09:00에 위 목표 매수가로 지정가 주문을 넣고, 09:30까지 체결되지 않으면 취소합니다.",
-            "※ 이 추천은 사전 유효성 검증(거래정지·상장폐지 등)을 거치지 않았습니다.",
-        ]
-    )
+    lines.append("※ 09:00에 위 목표 매수가로 지정가 주문을 넣고, 09:30까지 체결되지 않으면 취소합니다.")
+    # 매도가를 한 줄도 싣지 못했으면 이 주석도 뺀다 — 메일에 없는 값을 설명하는 꼴이 된다
+    if any(_sell_target_line(r) for r in recommendations):
+        lines.append(
+            "※ 목표 매도가는 LLM의 참고 수치이며 주문에 사용되지 않습니다 — 실제 매도는 "
+            "순손익 기준 익절·손절과 15:20 강제청산이 담당합니다."
+        )
+    lines.append("※ 이 추천은 사전 유효성 검증(거래정지·상장폐지 등)을 거치지 않았습니다.")
     return subject, "\n".join(lines)
+
+
+def _sell_target_line(r: StockRecommendation) -> str:
+    """추천 메일의 목표 매도가 한 줄. 산출되지 않았으면(0) 빈 문자열이라 줄이 통째로 빠진다.
+
+    매수가 대비 상승률을 함께 적는다 — 절대 가격만으로는 이 목표가 익절선(순손익 기준)보다
+    위인지 아래인지 한눈에 들어오지 않는다.
+    """
+    if r.target_sell_price <= 0 or r.target_price <= 0:
+        return ""
+    gain = (r.target_sell_price - r.target_price) / r.target_price * 100
+    return f"   목표 매도가: {r.target_sell_price:,}원 (매수가 대비 {gain:+.2f}%, 참고용)"
 
 
 def buy_result_email(execution: BuyExecution) -> tuple[str, str, str]:

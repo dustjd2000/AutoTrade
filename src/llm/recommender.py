@@ -11,7 +11,7 @@ from src.data.collector import DailyStockData
 logger = logging.getLogger(__name__)
 
 # 프롬프트 템플릿 버전 — 추천 근거를 나중에 추적할 수 있도록 코드로 버전 관리한다 (PRD 5.5-B).
-PROMPT_TEMPLATE_VERSION = "v6"
+PROMPT_TEMPLATE_VERSION = "v7"
 
 # 목표 매수가가 전일 종가에서 이 비율을 벗어나면 경계로 자른다 (PRD 5.5-B '주문 방식').
 # LLM이 자릿수를 틀리는 것을 막는 가드레일이며, 정상 범위의 판단에는 개입하지 않는다.
@@ -51,9 +51,13 @@ RECOMMENDATION_SCHEMA = {
                         "type": "integer",
                         "description": "오늘 매수할 목표 가격 (원 단위 정수)",
                     },
+                    "target_sell_price": {
+                        "type": "integer",
+                        "description": "오늘 장중 도달할 것으로 보는 매도 목표 가격 (원 단위 정수)",
+                    },
                     "reason": {"type": "string", "description": "급등이 예상되는 근거"},
                 },
-                "required": ["ticker", "name", "target_price", "reason"],
+                "required": ["ticker", "name", "target_price", "target_sell_price", "reason"],
                 "additionalProperties": False,
             },
         }
@@ -94,8 +98,8 @@ def build_system_prompt(target_count: int) -> str:
 
 ## 역할
 사용자가 제공하는 **전일(직전 거래일) 마감 데이터만을** 근거로, 오늘 장중 상대적으로 강한 상승
-흐름을 보일 가능성이 높은 코스피 대형주 {target_count}종목을 선별하고, 각 종목을 오늘 매수할
-**목표 매수가**를 제시합니다. 사용자가 제공하는 목록은 이미 전일 거래량 급증 배수 상위로 추려진
+흐름을 보일 가능성이 높은 코스피 대형주 {target_count}종목을 선별하고, 각 종목의 **목표 매수가**와
+**목표 매도가**를 제시합니다. 사용자가 제공하는 목록은 이미 전일 거래량 급증 배수 상위로 추려진
 후보군입니다.
 
 ## 절대 규칙
@@ -106,6 +110,7 @@ def build_system_prompt(target_count: int) -> str:
 4. 절대적인 확신이 없어도, 제공된 종목 중 상대적으로 가장 강한 신호를 보이는 종목 순으로 반드시
    {target_count}종목을 채우십시오. 후보 자체가 부족한 경우에만 더 적게 선정할 수 있습니다.
 5. target_price는 **원 단위 정수**로, 해당 종목의 전일 종가 대비 ±5% 이내에서 제시하십시오.
+6. target_sell_price는 **원 단위 정수**로, 반드시 target_price보다 높아야 합니다.
 
 ## 판단 기준 (제공된 데이터 범위 내에서, 우선순위 순)
 - 전일 거래량 급증 배수 — 그 이전 거래일들의 평균 거래량 대비 전일 거래량의 배수입니다. 평소보다
@@ -127,6 +132,12 @@ def build_system_prompt(target_count: int) -> str:
 가격을 제시하십시오. 전일 종가가 최근 고가에 바짝 붙어 있다면 그 가격을 그대로 좇기보다 눌림을
 기다리는 편이 유리하고, 이동평균 아래로 내려온 종목이라면 이동평균을 회복 목표로 참고하십시오.
 
+## 목표 매도가 작성 지침
+target_sell_price는 목표 매수가에 매수했다고 가정하고, **오늘 장중에 실제로 닿을 것으로 보는
+매도 목표가**입니다. 전일 고가와 최근 고가가 저항으로 작용하는지, 이동평균에서 얼마나 떨어져
+있는지를 근거로 삼으십시오. 하루 안에 닿지 못할 가격을 적지 말고, 오늘의 현실적인 상단을
+제시하십시오.
+
 ## 근거 작성 지침
 reason은 반드시 제공된 데이터의 구체적 수치를 인용해 작성하십시오.
 ("전일 등락률 +2.15%, 전일 거래량 320,450주(평균 대비 3.4배)"처럼 구체적으로.
@@ -139,6 +150,9 @@ class StockRecommendation:
     name: str
     target_price: int
     reason: str
+    # 목표 매도가 — 추천 메일에 참고로 싣기만 하고 주문에는 쓰지 않는다 (PRD 5.5-B '목표 매도가').
+    # 0은 '산출 안 됨'이며(거래량 급증 배수와 같은 규약), 그 경우 메일에서 줄이 통째로 빠진다.
+    target_sell_price: int = 0
 
 
 def build_user_prompt(daily_data: List[DailyStockData], target_count: int = 3) -> str:
@@ -170,7 +184,7 @@ def build_user_prompt(daily_data: List[DailyStockData], target_count: int = 3) -
 
     lines.append(
         f"\n위 데이터를 참고해 오늘 급등이 예상되는 종목 {target_count}개와 "
-        "각 종목의 목표 매수가를 추천하세요."
+        "각 종목의 목표 매수가·목표 매도가를 추천하세요."
     )
     return "\n".join(lines)
 
@@ -228,6 +242,8 @@ def parse_recommendations(raw_text: str) -> List[StockRecommendation]:
                 name=item["name"],
                 # 스키마가 정수를 요구하지만 문자열로 오더라도 받아들인다
                 target_price=int(float(item["target_price"])),
+                # 참고용 값이라 빠져 있어도 추천 자체를 버리지 않는다 (0 = 산출 안 됨)
+                target_sell_price=int(float(item.get("target_sell_price", 0))),
                 reason=item["reason"],
             )
         )
@@ -278,6 +294,24 @@ def apply_price_guardrail(
                 f"{original:,}",
                 f"{rec.target_price:,}",
                 f"{prev_close.get(rec.ticker, 0.0):,.0f}",
+            )
+
+
+def warn_invalid_sell_targets(recommendations: List[StockRecommendation]) -> None:
+    """목표 매도가가 목표 매수가보다 낮으면 로그에 남긴다 — 값은 그대로 둔다.
+
+    목표 매도가는 주문에 쓰이지 않는 참고 수치라(PRD 5.5-B '목표 매도가') 보정하지 않는다.
+    보정하면 LLM이 실제로 무슨 값을 냈는지 나중에 되짚을 수 없고, 이 값을 청산에 쓸지
+    판단하려고 모으는 관찰 데이터가 오염된다.
+    """
+    for rec in recommendations:
+        if 0 < rec.target_sell_price <= rec.target_price:
+            logger.warning(
+                "목표 매도가가 매수가보다 높지 않습니다: %s %s — 매수 %s원 / 매도 %s원",
+                rec.ticker,
+                rec.name,
+                f"{rec.target_price:,}",
+                f"{rec.target_sell_price:,}",
             )
 
 
@@ -361,10 +395,13 @@ class LLMRecommender:
             return None
 
         apply_price_guardrail(recommendations, daily_data)
+        warn_invalid_sell_targets(recommendations)
+        # 매수가와 매도가를 함께 남긴다 — 나중에 실제 고가와 대조해 목표 매도가가
+        # 쓸 만했는지 되짚을 유일한 근거다 (DB에는 남지 않는다)
         logger.info(
             "LLM recommended %d stock(s) (prompt_version=%s): %s",
             len(recommendations),
             PROMPT_TEMPLATE_VERSION,
-            [f"{r.ticker}@{r.target_price:,}" for r in recommendations],
+            [f"{r.ticker}@{r.target_price:,}→{r.target_sell_price:,}" for r in recommendations],
         )
         return recommendations

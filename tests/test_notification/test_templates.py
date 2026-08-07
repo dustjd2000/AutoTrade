@@ -388,3 +388,31 @@ def test_recommendation_email_omits_shortfall_note_when_full():
     )
 
     assert "미만입니다" not in body
+
+
+def test_recommendation_email_shows_the_sell_target_with_gain():
+    recs = [
+        StockRecommendation(
+            ticker="005930",
+            name="삼성전자",
+            target_price=70_000,
+            reason="근거",
+            target_sell_price=71_400,
+        )
+    ]
+    _, body = templates.recommendation_email(
+        recs, DAY, investable_ratio=0.5, target_stock_count=1
+    )
+
+    assert "목표 매도가: 71,400원 (매수가 대비 +2.00%, 참고용)" in body
+    assert "주문에 사용되지 않습니다" in body
+
+
+def test_recommendation_email_omits_the_sell_target_when_unavailable():
+    """산출되지 않은 값(0)을 '0원'으로 적으면 목표가로 읽힌다."""
+    recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="근거")]
+    _, body = templates.recommendation_email(
+        recs, DAY, investable_ratio=0.5, target_stock_count=1
+    )
+
+    assert "목표 매도가" not in body

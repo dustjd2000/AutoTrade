@@ -13,6 +13,7 @@ from src.llm.recommender import (
     normalize_target_price,
     parse_recommendations,
     tick_size,
+    warn_invalid_sell_targets,
 )
 
 
@@ -334,3 +335,56 @@ def test_build_system_prompt_states_previous_day_basis():
 
     assert "전일" in prompt
     assert "09:30" in prompt  # 미체결 취소 규칙을 알려야 목표가를 현실적으로 잡는다
+
+
+# ── 목표 매도가 (참고용, v7) ─────────────────────────────────
+def test_parse_reads_target_sell_price():
+    raw = (
+        '[{"ticker": "005930", "name": "삼성전자", "target_price": 70000,'
+        ' "target_sell_price": 72000, "reason": "수급"}]'
+    )
+    assert parse_recommendations(raw)[0].target_sell_price == 72_000
+
+
+def test_parse_defaults_sell_price_to_zero_when_missing():
+    """참고용 값이므로 빠져 있어도 추천 자체를 버리지 않는다."""
+    raw = '[{"ticker": "005930", "name": "삼성전자", "target_price": 70000, "reason": "수급"}]'
+    assert parse_recommendations(raw)[0].target_sell_price == 0
+
+
+def test_recommend_leaves_the_sell_target_untouched():
+    """매수가는 ±5%로 잘려도 매도가는 손대지 않는다 — 보정하면 관찰 데이터가 오염된다."""
+    text = (
+        '{"recommendations": [{"ticker": "068270", "name": "셀트리온",'
+        ' "target_price": 1800000, "target_sell_price": 195000, "reason": "수급"}]}'
+    )
+    response = _response("end_turn", [SimpleNamespace(type="text", text=text)])
+    result = _fake_recommender(response).recommend([stock(ticker="068270", prev_close=180_000.0)])
+
+    assert result[0].target_price == 189_000  # 가드레일이 잘랐다
+    assert result[0].target_sell_price == 195_000  # 매도가는 LLM이 낸 값 그대로
+
+
+def test_warn_invalid_sell_targets_logs_when_not_above_buy(caplog):
+    recommendations = [StockRecommendation("005930", "삼성전자", 70_000, "수급", 69_000)]
+
+    with caplog.at_level("WARNING"):
+        warn_invalid_sell_targets(recommendations)
+
+    assert "목표 매도가가 매수가보다 높지 않습니다" in caplog.text
+    assert recommendations[0].target_sell_price == 69_000  # 경고만 하고 값은 그대로 둔다
+
+
+def test_warn_invalid_sell_targets_ignores_missing_value(caplog):
+    """0은 '산출 안 됨'이라 경고 대상이 아니다."""
+    with caplog.at_level("WARNING"):
+        warn_invalid_sell_targets([StockRecommendation("005930", "삼성전자", 70_000, "수급")])
+
+    assert caplog.text == ""
+
+
+def test_build_system_prompt_asks_for_a_sell_target():
+    prompt = build_system_prompt(target_count=3)
+
+    assert "목표 매도가" in prompt
+    assert "target_sell_price" in prompt
