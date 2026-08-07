@@ -283,6 +283,32 @@ def test_build_user_prompt_includes_previous_day_data():
     assert "신규 수주 공시" in prompt
 
 
+def test_build_user_prompt_includes_the_recent_price_band():
+    """전일 하루만 보면 지금 가격이 최근 범위 어디인지 알 수 없다 (v6)."""
+    prompt = build_user_prompt(
+        [stock(recent_high=77000.0, recent_low=63000.0, moving_average=68000.0)]
+    )
+
+    assert "77,000" in prompt
+    assert "63,000" in prompt
+    assert "68,000" in prompt
+
+
+def test_build_user_prompt_omits_the_recent_band_when_unavailable():
+    """산출하지 못한 값을 0원으로 적으면 LLM이 그 숫자를 근거로 삼는다."""
+    prompt = build_user_prompt([stock(recent_high=0.0, recent_low=0.0, moving_average=0.0)])
+
+    assert "최근" not in prompt
+    assert "이동평균" not in prompt
+
+
+def test_build_system_prompt_explains_the_recent_band():
+    prompt = build_system_prompt(target_count=3)
+
+    assert "최근" in prompt
+    assert "이동평균" in prompt
+
+
 def test_build_user_prompt_marks_missing_volume_surge():
     """급증률을 못 구한 종목은 그 기준을 빼고 보라고 알려야 한다."""
     assert "평균대비 판단불가" in build_user_prompt([stock(volume_surge=0.0)])

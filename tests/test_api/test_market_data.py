@@ -160,6 +160,43 @@ def test_previous_day_change_rate_stays_zero_without_an_earlier_close():
     assert client.get_previous_day_metrics("005930", today=date(2026, 8, 6)).change_rate == 0.0
 
 
+def test_previous_day_metrics_summarizes_the_recent_price_band():
+    """목표 매수가를 정하려면 전일 하루가 아니라 최근 가격대를 알아야 한다."""
+    client = make_client(
+        {
+            "daly_stkpc": [
+                candle("20260806", close="71000"),           # 당일 봉 — 제외 대상
+                candle("20260805", close="70000", high="72000", low="69000"),
+                candle("20260804", close="66000", high="67000", low="64000"),
+                candle("20260803", close="62000", high="63000", low="61000"),
+            ]
+        }
+    )
+
+    result = client.get_previous_day_metrics("005930", today=date(2026, 8, 6))
+
+    assert result.recent_high == 72000.0                    # 당일 봉을 빼고 계산한다
+    assert result.recent_low == 61000.0
+    assert result.moving_average == 66000.0                 # (70,000+66,000+62,000)/3
+
+
+def test_recent_band_ignores_zero_prices():
+    """조회 실패로 0이 섞인 봉이 저가를 0으로 끌어내리면 안 된다."""
+    client = make_client(
+        {
+            "daly_stkpc": [
+                candle("20260805", close="70000", high="71000", low="69000"),
+                {"date": "20260804", "close_pric": "0", "high_pric": "0", "low_pric": "0"},
+            ]
+        }
+    )
+
+    result = client.get_previous_day_metrics("005930", today=date(2026, 8, 6))
+
+    assert result.recent_low == 69000.0
+    assert result.moving_average == 70000.0
+
+
 def test_previous_day_metrics_returns_none_without_usable_candles():
     client = make_client({"daly_stkpc": [candle("20260806")]})
 

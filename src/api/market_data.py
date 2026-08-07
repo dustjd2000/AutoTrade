@@ -27,6 +27,11 @@ class PreviousDayMetrics:
     change_rate: float  # 전일 등락률 (%)
     volume: int         # 전일 거래량
     volume_surge: float  # 전일 거래량 ÷ 그 이전 거래일 평균 (0이면 산출 불가)
+    # 아래 셋은 목표 매수가 산정용 — 전일 하루만으로는 지금 가격이 비싼지 싼지 알 수 없다.
+    # 어차피 한 번의 일봉 호출로 최근 거래일이 통째로 오므로 추가 조회 없이 뽑는다.
+    recent_high: float = 0.0      # 당일 제외 최근 거래일 중 최고가
+    recent_low: float = 0.0       # 당일 제외 최근 거래일 중 최저가
+    moving_average: float = 0.0   # 당일 제외 최근 거래일 종가 평균
 
 
 @dataclass
@@ -59,6 +64,13 @@ def _first_present(row: Dict[str, Any], *keys: str):
         if key in row and str(row[key]).strip() != "":
             return row[key]
     return None
+
+
+def _positive_prices(candles: List[Dict[str, Any]], *keys: str) -> List[float]:
+    """일봉 목록에서 해당 가격 필드를 뽑는다. 0 이하는 버린다 — 조회가 비어 온 봉이
+    최저가를 0으로 끌어내리거나 평균을 왜곡하는 것을 막는다."""
+    prices = (abs(to_float(_first_present(candle, *keys))) for candle in candles)
+    return [price for price in prices if price > 0]
 
 
 def _change_rate(candle: Dict[str, Any], close: float, earlier_close: float) -> float:
@@ -178,6 +190,10 @@ class MarketDataClient:
             abs(to_float(_first_present(earlier[0], "close_pric", "cur_prc"))) if earlier else 0.0
         )
 
+        highs = _positive_prices(past, "high_pric")
+        lows = _positive_prices(past, "low_pric")
+        closes = _positive_prices(past, "close_pric", "cur_prc")
+
         return PreviousDayMetrics(
             ticker=ticker,
             close=close,
@@ -186,6 +202,9 @@ class MarketDataClient:
             change_rate=_change_rate(previous, close, earlier_close),
             volume=volume,
             volume_surge=volume / average if average > 0 else 0.0,
+            recent_high=max(highs) if highs else 0.0,
+            recent_low=min(lows) if lows else 0.0,
+            moving_average=sum(closes) / len(closes) if closes else 0.0,
         )
 
     def get_orderbook(self, ticker: str) -> dict:

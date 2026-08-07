@@ -11,7 +11,7 @@ from src.data.collector import DailyStockData
 logger = logging.getLogger(__name__)
 
 # 프롬프트 템플릿 버전 — 추천 근거를 나중에 추적할 수 있도록 코드로 버전 관리한다 (PRD 5.5-B).
-PROMPT_TEMPLATE_VERSION = "v5"
+PROMPT_TEMPLATE_VERSION = "v6"
 
 # 목표 매수가가 전일 종가에서 이 비율을 벗어나면 경계로 자른다 (PRD 5.5-B '주문 방식').
 # LLM이 자릿수를 틀리는 것을 막는 가드레일이며, 정상 범위의 판단에는 개입하지 않는다.
@@ -115,12 +115,17 @@ def build_system_prompt(target_count: int) -> str:
   많습니다. 거래량만 터지고 크게 하락한 종목은 악재일 가능성을 함께 고려하십시오
 - 전일 종가가 고가·저가 사이 어디에 위치하는지 — 고가 근처에서 마감했다면 매수세가 장 마감까지
   유지됐다는 뜻입니다
+- 최근 가격대에서의 위치 — '최근 고가/저가'는 당일을 제외한 최근 20거래일 이내의 최고가·최저가이고,
+  '이동평균'은 같은 구간의 종가 평균입니다. 전일 종가가 이동평균 위에 있으면 상승 추세, 최근 고가에
+  근접했다면 돌파 구간, 최근 저가 근처라면 낙폭이 큰 상태로 봅니다
 - 뉴스/공시 헤드라인의 구체성 (실적·수주·계약 등 구체적 재료인지, 단순 언급인지)
 
 ## 목표 매수가 작성 지침
 오늘 09:00에 이 가격으로 지정가 매수 주문을 내고, **09:30까지 체결되지 않으면 그날 그 종목은
 매수하지 않습니다.** 너무 낮게 잡으면 매수 자체가 무산되고, 너무 높게 잡으면 비싸게 사게 됩니다.
-전일 종가와 고가·저가 범위를 근거로 오늘 실제 체결될 만한 가격을 제시하십시오.
+전일 종가·고가·저가와 최근 가격대(최근 고가/저가, 이동평균)를 함께 보고, 오늘 실제 체결될 만한
+가격을 제시하십시오. 전일 종가가 최근 고가에 바짝 붙어 있다면 그 가격을 그대로 좇기보다 눌림을
+기다리는 편이 유리하고, 이동평균 아래로 내려온 종목이라면 이동평균을 회복 목표로 참고하십시오.
 
 ## 근거 작성 지침
 reason은 반드시 제공된 데이터의 구체적 수치를 인용해 작성하십시오.
@@ -146,11 +151,20 @@ def build_user_prompt(daily_data: List[DailyStockData], target_count: int = 3) -
     for d in daily_data:
         headlines = "; ".join(d.headlines) if d.headlines else "없음"
         surge = f"{d.volume_surge:.2f}배" if d.volume_surge else "판단불가"
+        # 산출하지 못한 값은 줄에서 통째로 뺀다 — "최근 고가 0원"을 적으면 그 0을 근거로 삼는
+        # 추천이 나온다 (거래량 급증 배수를 '판단불가'로 적는 것과 같은 이유다)
+        band = ""
+        if d.recent_high > 0 and d.recent_low > 0 and d.moving_average > 0:
+            band = (
+                f"최근 고가 {d.recent_high:,.0f} / 최근 저가 {d.recent_low:,.0f} / "
+                f"이동평균 {d.moving_average:,.0f}, "
+            )
         lines.append(
             f"- {d.ticker} {d.name}: 전일 종가 {d.prev_close:,.0f}원"
             f"(고가 {d.prev_high:,.0f} / 저가 {d.prev_low:,.0f}), "
             f"전일 등락률 {d.prev_change_rate:+.2f}%, "
             f"전일 거래량 {d.prev_volume:,}(평균대비 {surge}), "
+            f"{band}"
             f"뉴스/공시: {headlines}"
         )
 

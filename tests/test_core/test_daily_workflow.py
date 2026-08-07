@@ -357,18 +357,79 @@ def test_execute_buys_sends_limit_orders_at_target_price():
     assert order.quantity == 1666  # 종목당 200만 ÷ 1,200원
 
 
-def test_execute_buys_does_not_query_current_price():
-    """수량은 목표가로 산정한다 — 현재가 조회는 더 이상 필요 없다."""
+def test_quantity_is_sized_by_target_price_not_current_price():
+    """현재가는 갭 판정에만 쓴다 — 수량은 목표가 기준이다."""
     recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a")]
-    workflow, _, _, _, strategy = make_workflow(recommendations=recs)
+    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    # 현재가가 목표가보다 낮아도(=갭 하락) 수량 산정 기준은 목표가다
+    workflow.engine.market_data = SimpleNamespace(
+        get_current_price=lambda t: MarketData(ticker=t, price=500.0, volume=100)
+    )
+
+    workflow.execute_buys()
+
+    assert order_client.orders[0].price == 1000
+    assert order_client.orders[0].quantity == 2000  # 종목당 200만 ÷ 1,000원
+
+
+def test_buy_is_skipped_when_the_open_gaps_above_the_target():
+    """전일 종가로 잡은 목표가가 갭 상승으로 무의미해진 날은 참여하지 않는다."""
+    recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a")]
+    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.engine.market_data = SimpleNamespace(  # 허용치 2% → 1,020원 초과면 스킵
+        get_current_price=lambda t: MarketData(ticker=t, price=1021.0, volume=100)
+    )
+
+    workflow.execute_buys()
+
+    assert order_client.orders == []
+
+
+def test_buy_proceeds_inside_the_gap_tolerance():
+    recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a")]
+    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.engine.market_data = SimpleNamespace(
+        get_current_price=lambda t: MarketData(ticker=t, price=1020.0, volume=100)
+    )
+
+    workflow.execute_buys()
+
+    assert len(order_client.orders) == 1
+
+
+def test_gap_skip_is_reported_in_the_buy_result_email():
+    recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a")]
+    workflow, email, order_client, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.engine.market_data = SimpleNamespace(
+        get_current_price=lambda t: MarketData(ticker=t, price=1500.0, volume=100)
+    )
+
+    workflow.execute_buys()
+    workflow.cancel_unfilled_buys()
+
+    _, body, _ = email.sent[0]
+    assert "건너뜀" in body
+    assert "갭" in body
+
+
+def test_buy_proceeds_when_the_current_price_cannot_be_read():
+    """시세 조회가 실패해도 매수는 낸다 — 지정가라 목표가보다 비싸게 체결되지 않는다."""
+    recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a")]
+    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
     strategy.set_recommendations(recs)
 
     def boom(ticker):
-        raise AssertionError("현재가를 조회하면 안 된다")
+        raise RuntimeError("시세 조회 실패")
 
     workflow.engine.market_data = SimpleNamespace(get_current_price=boom)
 
     workflow.execute_buys()
+
+    assert len(order_client.orders) == 1
 
 
 # ── 09:30 미체결 취소 + 매수 결과 메일 ──────────────────────

@@ -105,6 +105,17 @@ class Settings:
     def stop_loss_ratio(self) -> float:
         return self.stop_loss_percent / 100
 
+    # 09:00 매수 직전 현재가가 목표 매수가보다 이 비율을 넘게 높으면 그 종목을 건너뛴다.
+    # 추천은 전일 종가 기준이라 갭 상승한 날에는 목표가가 이미 의미를 잃는데, 지정가는
+    # 시장가보다 낮게 걸리므로 그대로 두면 종일 미체결로 남거나 고가에 물린다 (PRD 5.5-B).
+    buy_price_tolerance_percent: float = field(
+        default_factory=lambda: float(os.getenv("BUY_PRICE_TOLERANCE_PERCENT", "2"))
+    )
+
+    @property
+    def buy_price_tolerance_ratio(self) -> float:
+        return self.buy_price_tolerance_percent / 100
+
     # 익절/손절 판정에 반영할 비용 — 매매수수료(매수·매도 동일), 세금(매도 시만), 슬리피지(추정)
     commission_percent: float = field(default_factory=lambda: float(os.getenv("COMMISSION_PERCENT", "0.015")))
     tax_percent: float = field(default_factory=lambda: float(os.getenv("TAX_PERCENT", "0.18")))

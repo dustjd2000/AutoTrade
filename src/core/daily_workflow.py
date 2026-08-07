@@ -66,6 +66,7 @@ class DailyWorkflow:
         ws_client=None,
         report_mark_path: Optional[Path] = None,
         buy_records_path: Optional[Path] = None,
+        buy_price_tolerance_ratio: float = 0.02,
     ):
         self.collector = collector
         self.recommender = recommender
@@ -87,6 +88,8 @@ class DailyWorkflow:
         self.buy_records_path = Path(
             buy_records_path if buy_records_path is not None else DEFAULT_BUY_RECORDS_PATH
         )
+        # 09:00 시가가 목표 매수가보다 이만큼 넘게 높으면 그 종목은 건너뛴다 (_gap_note 참고)
+        self.buy_price_tolerance_ratio = buy_price_tolerance_ratio
 
     def recommend_and_notify(self, today: Optional[date] = None) -> None:
         """08:45 — 당일 데이터 수집 → LLM 추천 → 결과를 이메일로 발송."""
@@ -136,6 +139,21 @@ class DailyWorkflow:
             label = format_stock(plan.ticker, plan.name)
             try:
                 price = float(plan.target_price)
+
+                gap_note = self._gap_note(plan.ticker, label, price)
+                if gap_note is not None:
+                    skipped.append(plan.ticker)
+                    records.append(
+                        BuyRecord(
+                            ticker=plan.ticker,
+                            name=plan.name,
+                            outcome=BuyOutcome.SKIPPED,
+                            reference_price=price,
+                            note=gap_note,
+                        )
+                    )
+                    continue
+
                 quantity = int(plan.amount // price)
                 if quantity <= 0:
                     logger.warning(
@@ -285,6 +303,38 @@ class DailyWorkflow:
 
         # 결과 메일은 09:30 cancel_unfilled_buys가 보낸다 — 지정가라 지금은 체결 여부를 모른다
         self._write_buy_records(cash, plans[0].amount, records)
+
+    def _gap_note(self, ticker: str, label: str, target_price: float) -> Optional[str]:
+        """갭 상승으로 이 종목을 건너뛰어야 하면 사유 문구를, 그대로 매수하면 None을 돌려준다.
+
+        목표 매수가는 전일 종가를 근거로 잡은 값이다. 시가가 그보다 크게 높으면 그 전제가
+        이미 깨진 것이므로 그날은 참여하지 않는다 (확정 2026-08-07).
+
+        지정가 주문이라 목표가보다 비싸게 체결되는 일 자체는 없다 — 이 판정이 막는 것은
+        갭 상승 뒤 목표가까지 되밀린 종목을 받아내는 경우다. 그래서 시세 조회에 실패하면
+        매수를 막지 않고 그대로 진행한다: 가격 상한은 지정가가 이미 지키고 있다.
+        """
+        try:
+            current = self.engine.market_data.get_current_price(ticker).price
+        except Exception:
+            logger.warning("현재가 조회 실패 — 갭 판정을 건너뛰고 매수합니다: %s", label, exc_info=True)
+            return None
+
+        limit = target_price * (1 + self.buy_price_tolerance_ratio)
+        if current <= 0 or current <= limit:
+            return None
+
+        logger.info(
+            "매수 건너뜀: %s — 현재가 %s원이 목표가 %s원의 허용 상한 %s원을 넘었습니다.",
+            label,
+            f"{current:,.0f}",
+            f"{target_price:,.0f}",
+            f"{limit:,.0f}",
+        )
+        return (
+            f"갭 상승 — 현재가 {current:,.0f}원이 목표가 {target_price:,.0f}원 대비 "
+            f"허용치 {self.buy_price_tolerance_ratio * 100:.1f}%를 초과"
+        )
 
     def cancel_unfilled_buys(self, today: Optional[date] = None) -> None:
         """09:30 — 목표가에 닿지 않은 매수 주문을 취소하고 매수 결과를 알린다 (PRD 5.5-B 6단계).

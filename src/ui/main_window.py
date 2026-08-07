@@ -320,21 +320,26 @@ class MainWindow(QMainWindow):
         fund_form.addRow("총 매수가능 금액", self._investable_amount)
         fund_risk_row.addWidget(fund_box, 1)
 
-        risk_box = QGroupBox("리스크 관리 (익절 / 손절)")
+        risk_box = QGroupBox("리스크 관리 (익절 / 손절 / 갭 허용치)")
         risk_form = QFormLayout(risk_box)
         risk_form.setSpacing(8)
         risk_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # 두 값 모두 수수료·세금·슬리피지를 뺀 '순손익률' 기준이다 (PRD 5.5-B)
+        # 익절·손절 두 값은 수수료·세금·슬리피지를 뺀 '순손익률' 기준이다 (PRD 5.5-B)
         self._take_profit = QLineEdit()
         self._take_profit.setPlaceholderText("예: 0.5 (순손익 +0.5%)")
         self._take_profit.setValidator(QDoubleValidator(0.0, 100.0, 2))
         self._stop_loss = QLineEdit()
         self._stop_loss.setPlaceholderText("예: 2 (순손익 -2%)")
         self._stop_loss.setValidator(QDoubleValidator(0.0, 100.0, 2))
+        # 09:00 시가가 목표 매수가보다 이만큼 넘게 높으면 그 종목을 건너뛴다
+        self._buy_price_tolerance = QLineEdit()
+        self._buy_price_tolerance.setPlaceholderText("예: 2 (목표가 +2% 초과 시 매수 안 함)")
+        self._buy_price_tolerance.setValidator(QDoubleValidator(0.0, 100.0, 2))
 
         risk_form.addRow("익절 (%)", self._take_profit)
         risk_form.addRow("손절 (%)", self._stop_loss)
+        risk_form.addRow("갭 허용치 (%)", self._buy_price_tolerance)
         fund_risk_row.addWidget(risk_box, 1)
 
         root.addLayout(fund_risk_row)
@@ -656,6 +661,7 @@ class MainWindow(QMainWindow):
         self._email_to.setText(env.get("EMAIL_TO", ""))
         self._take_profit.setText(env.get("TAKE_PROFIT_PERCENT", "0.5"))
         self._stop_loss.setText(env.get("STOP_LOSS_PERCENT", "2"))
+        self._buy_price_tolerance.setText(env.get("BUY_PRICE_TOLERANCE_PERCENT", "2"))
         self._select_combo_value(self._investable_ratio, env.get("INVESTABLE_RATIO_PERCENT"), default=50)
         self._select_combo_value(self._target_stock_count, env.get("TARGET_STOCK_COUNT"), default=3)
         self._select_combo_text(
@@ -702,6 +708,7 @@ class MainWindow(QMainWindow):
             "EMAIL_TO": self._email_to.text().strip(),
             "TAKE_PROFIT_PERCENT": self._take_profit.text().strip() or "0.5",
             "STOP_LOSS_PERCENT": self._stop_loss.text().strip() or "2",
+            "BUY_PRICE_TOLERANCE_PERCENT": self._buy_price_tolerance.text().strip() or "2",
             "INVESTABLE_RATIO_PERCENT": str(self._investable_ratio.currentData()),
             "TARGET_STOCK_COUNT": str(self._target_stock_count.currentData()),
             "RECOMMEND_TIME": str(self._recommend_time.currentData()),
@@ -891,7 +898,11 @@ class MainWindow(QMainWindow):
 
     def _confirm_action(self, action: str) -> bool:
         detail = {
-            "buy": "추천 종목을 목표 매수가에 지정가로 매수합니다.",
+            "buy": (
+                "추천 종목을 목표 매수가에 지정가로 매수합니다.\n"
+                f"현재가가 목표가보다 {self._buy_price_tolerance.text().strip() or '2'}% 넘게 "
+                "높은 종목은 건너뜁니다."
+            ),
             "cancel_unfilled": (
                 "아직 체결되지 않은 매수 주문을 취소하고 매수 결과 메일을 보냅니다.\n"
                 "이미 체결된 종목은 그대로 두고 보유합니다."

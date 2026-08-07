@@ -157,6 +157,7 @@ def build_runtime(settings: Settings) -> Runtime:
         account=account,
         trade_store=trade_store,
         email=email,
+        buy_price_tolerance_ratio=settings.buy_price_tolerance_ratio,
         ws_client=ws_client,
     )
 

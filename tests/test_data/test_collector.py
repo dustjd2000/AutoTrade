@@ -33,6 +33,9 @@ def metrics(ticker, change_rate=1.5, volume_surge=1.0, close=10000.0, volume=500
         change_rate=change_rate,
         volume=volume,
         volume_surge=volume_surge,
+        recent_high=close * 1.10,
+        recent_low=close * 0.90,
+        moving_average=close * 0.95,
     )
 
 
@@ -155,3 +158,14 @@ def test_collector_fills_remaining_slots_with_fallen_stocks():
     )
 
     assert [d.ticker for d in result] == ["200000", "100000"]
+
+
+def test_collector_carries_the_recent_price_band_to_the_prompt_data():
+    """LLM이 목표 매수가를 정하려면 최근 가격대가 필요하다 (프롬프트 v6)."""
+    universe = make_universe([row("005930", "삼성전자")])
+
+    result = collect(universe, fake_market_data(lambda t: metrics(t, close=10000.0)))
+
+    assert result[0].recent_high == 11000.0
+    assert result[0].recent_low == 9000.0
+    assert result[0].moving_average == 9500.0

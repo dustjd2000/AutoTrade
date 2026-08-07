@@ -46,6 +46,10 @@ class DailyStockData:
     prev_change_rate: float  # 전일 등락률 (%)
     prev_volume: int         # 전일 거래량
     volume_surge: float      # 전일 거래량 ÷ 그 이전 거래일 평균 (0이면 산출 불가)
+    # 최근 가격대 — 전일 종가만으로는 지금이 비싼지 싼지 알 수 없어 목표 매수가의 기준이 된다
+    recent_high: float = 0.0      # 당일 제외 최근 거래일 중 최고가
+    recent_low: float = 0.0       # 당일 제외 최근 거래일 중 최저가
+    moving_average: float = 0.0   # 당일 제외 최근 거래일 종가 평균
     headlines: List[str] = field(default_factory=list)  # 뉴스/공시 헤드라인
 
 
@@ -214,5 +218,8 @@ class DataCollector:
             prev_change_rate=metrics.change_rate,
             prev_volume=metrics.volume,
             volume_surge=metrics.volume_surge,
+            recent_high=metrics.recent_high,
+            recent_low=metrics.recent_low,
+            moving_average=metrics.moving_average,
             headlines=self.news_client.get_headlines(ticker),
         )
