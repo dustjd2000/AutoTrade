@@ -283,7 +283,7 @@ class DailyWorkflow:
             # 이 보유분이 전량 매도되면 리포트를 다시 보내고, 남으면 15:30이 보낸다.
             self._clear_report_mark()
 
-        # 접수된 종목만 실시간 시세를 구독한다 — 익절/손절 감시(RiskManager.check_exit)의 전제.
+        # 접수된 종목만 실시간 시세를 구독한다 — 익절/손절 감시(RiskManager.check_portfolio_exit)의 전제.
         # 거부된 종목까지 구독하면 보유하지도 않은 종목의 시세를 받는다.
         if ordered and self.ws_client is not None:
             self.ws_client.subscribe(ordered)

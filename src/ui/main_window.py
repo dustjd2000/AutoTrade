@@ -325,12 +325,13 @@ class MainWindow(QMainWindow):
         risk_form.setSpacing(8)
         risk_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # 익절·손절 두 값은 수수료·세금·슬리피지를 뺀 '순손익률' 기준이다 (PRD 5.5-B)
+        # 익절·손절 두 값은 수수료·세금·슬리피지를 뺀 '순손익률' 기준이며, 종목별이 아니라
+        # 보유 종목을 합산한 값으로 판정한다 (PRD 5.5-B)
         self._take_profit = QLineEdit()
-        self._take_profit.setPlaceholderText("예: 0.5 (순손익 +0.5%)")
+        self._take_profit.setPlaceholderText("예: 0.5 (합산 순손익 +0.5%)")
         self._take_profit.setValidator(QDoubleValidator(0.0, 100.0, 2))
         self._stop_loss = QLineEdit()
-        self._stop_loss.setPlaceholderText("예: 2 (순손익 -2%)")
+        self._stop_loss.setPlaceholderText("예: 2 (합산 순손익 -2%)")
         self._stop_loss.setValidator(QDoubleValidator(0.0, 100.0, 2))
         # 09:00 시가가 목표 매수가보다 이만큼 넘게 높으면 그 종목을 건너뛴다
         self._buy_price_tolerance = QLineEdit()
@@ -339,6 +340,17 @@ class MainWindow(QMainWindow):
 
         risk_form.addRow("익절 (%)", self._take_profit)
         risk_form.addRow("손절 (%)", self._stop_loss)
+
+        # 종목별 판정이 아니라는 점을 입력란 바로 아래에서 알려야 한다 — 한 종목이 크게
+        # 무너져도 다른 종목이 상쇄하면 매도가 나가지 않는다 (PRD 5.5-B, 확정 2026-08-10)
+        exit_hint = QLabel(
+            "(보유 종목을 합산한 순손익 기준입니다. 조건에 닿으면 보유 종목을 전량 매도하며, "
+            "종목별 익절/손절은 없습니다)"
+        )
+        exit_hint.setWordWrap(True)
+        exit_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
+        risk_form.addRow(exit_hint)
+
         risk_form.addRow("갭 허용치 (%)", self._buy_price_tolerance)
 
         # 이름만으로는 무엇에 대한 허용치인지 알 수 없다 — 익절/손절과 달리 '팔 때'가 아니라
@@ -423,7 +435,8 @@ class MainWindow(QMainWindow):
         run_hint = QLabel(
             "스케줄(추천 시각 / 09:00 / 09:30 / 15:20 / 15:30)과 무관하게 지금 바로 실행합니다. "
             "엔진이 실행 중일 때만 동작하며, 장 시간 외에는 주문이 거부될 수 있습니다.\n"
-            "일괄 수행은 ①② (추천→지정가 매수)만 돌립니다. 매수 후에는 익절/손절이 자동 감시되며, "
+            "일괄 수행은 ①② (추천→지정가 매수)만 돌립니다. 매수 후에는 합산 순손익 기준 "
+            "익절/손절이 자동 감시되며, "
             "미체결 취소·매수 결과 메일(09:30), 청산(15:20), 리포트(15:30)는 스케줄에 맡깁니다.\n"
             "엔진을 09:30 이후에 켠 날은 그 취소가 스케줄에서 빠지므로 ③을 직접 눌러야 합니다 "
             "(누르지 않아도 15:20 청산 직전에 한 번 더 거둡니다)."
@@ -590,7 +603,25 @@ class MainWindow(QMainWindow):
         total_pnl = sum(held.pnl for held in rows)
         cost = sum(held.avg_price * held.quantity for held in rows)
         percent = f" ({total_pnl / cost * 100:+.2f}%)" if cost > 0 else ""
-        return f"{len(rows)}종목 · 평가손익 {total_pnl:+,.0f}원{percent}"
+        return f"{len(rows)}종목 · 평가손익 {total_pnl:+,.0f}원{percent}{self._exit_progress()}"
+
+    def _exit_progress(self) -> str:
+        """익절/손절 판정에 실제로 쓰이는 합산 순손익률.
+
+        평가손익률과는 수수료·세금·슬리피지만큼 벌어진다 — 판정이 보유 목록 전체 합산으로
+        바뀐 뒤로 이 값이 곧 매도 트리거라(PRD 5.5-B), 평가손익률만 보이면 익절선이 +0.5%인데
+        +0.8%에서 팔린 것처럼 읽힌다. 계산은 엔진이 판정에 쓴 값을 그대로 가져온다.
+        """
+        ret = self._engine_thread.portfolio_return()
+        if ret is None:
+            return ""
+        # 지금 향하고 있는 쪽 라인만 붙인다 — 둘 다 적으면 한 줄에 들어가지 않는다
+        line = (
+            f"익절 +{self._take_profit.text().strip() or '0.5'}%"
+            if ret >= 0
+            else f"손절 -{self._stop_loss.text().strip() or '2'}%"
+        )
+        return f" · 합산 순손익 {ret * 100:+.2f}% ({line})"
 
     # ── 매도 불가 ────────────────────────────────────────────
     def _build_unsellable_box(self) -> QGroupBox:
@@ -920,9 +951,10 @@ class MainWindow(QMainWindow):
             "sell_all": "보유 중인 모든 포지션을 시장가로 청산합니다.",
             "full": (
                 "LLM 추천 + 메일 → 목표가 지정가 매수를 순서대로 실행합니다.\n"
-                f"매수 후에는 순손익 기준 익절 +{self._take_profit.text().strip() or '0.5'}% / "
-                f"손절 -{self._stop_loss.text().strip() or '2'}% 라인이 자동 감시됩니다 "
-                "(엔진이 켜져 있는 동안만).\n"
+                f"매수 후에는 보유 종목 합산 순손익 기준 익절 "
+                f"+{self._take_profit.text().strip() or '0.5'}% / "
+                f"손절 -{self._stop_loss.text().strip() or '2'}% 라인이 자동 감시되며, "
+                "닿으면 전량 매도합니다 (엔진이 켜져 있는 동안만).\n"
                 "청산(15:20)과 최종 리포트(15:30)는 지금 실행하지 않고 예정 시각에 맡깁니다."
             ),
         }[action]

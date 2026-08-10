@@ -69,8 +69,9 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   `generate_signal`은 항상 `HOLD`만 반환한다. 실제 진입은 `DailyWorkflow`가 추천 시각/09:00
   스케줄에서 `set_recommendations` → `build_buy_plans`를 직접 호출해 트리거한다. 매수는
   LLM이 함께 제시한 **목표 매수가로 지정가** 주문이고, 09:30에 미체결분을 취소하면서
-  매수 결과 메일을 보낸다(`cancel_unfilled_buys`). 청산은 `RiskManager.check_exit`
-  (실시간 시세 콜백, 순손익 ±설정값 기준 익절/손절)와 15:20 강제청산이 담당한다.
+  매수 결과 메일을 보낸다(`cancel_unfilled_buys`). 청산은 `RiskManager.check_portfolio_exit`
+  (실시간 시세 콜백, **보유 종목 합산** 순손익 ±설정값 기준 익절/손절)와 15:20 강제청산이
+  담당한다.
 - 새 전략을 추가할 때는 `BaseStrategy`를 구현하는 새 모듈만 추가하면 되고, 나머지
   (주문 실행/리스크/로깅)는 그대로 재사용된다 — 단, 시간 기반 전략이라면 1호 전략처럼
   `DailyWorkflow`류의 오케스트레이션을 별도로 붙여야 한다.
@@ -100,12 +101,16 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   (`calc_buy_quantity`/`max_position_ratio`)는 실시간 시세 기반 신호 경로
   (`generate_signal` → `Signal.BUY`)에서만 쓰이며, `generate_signal`이 항상 `HOLD`인
   1호 전략에는 적용되지 않는다.
-- 익절/손절(`check_exit`)은 키움 REST가 스탑오더(조건부 예약주문)를 지원하지 않아, 이
-  프로그램이 떠 있는 동안의 실시간 시세 감시가 **1차이자 사실상 유일한 청산 수단**이다
+- 익절/손절(`check_portfolio_exit`)은 키움 REST가 스탑오더(조건부 예약주문)를 지원하지 않아,
+  이 프로그램이 떠 있는 동안의 실시간 시세 감시가 **1차이자 사실상 유일한 청산 수단**이다
   — 앱이 꺼지거나 WebSocket이 끊기면 그 사이 손절도 멈춘다.
 - 익절/손절 판정은 가격 변동률이 아니라 **순손익률**(수수료·세금·슬리피지를 뺀 값) 기준이다.
   기본값은 익절 +0.5%(`TAKE_PROFIT_PERCENT`, 2026-08-06에 2%에서 낮춤) / 손절 -2%이며
   둘 다 UI에서 조정한다.
+- **판정 단위는 종목이 아니라 보유 목록 전체다** (2026-08-10에 종목별에서 바꿈). 합산
+  순손익률(= 전체 손익 ÷ 전체 매입금액)이 라인에 닿으면 `_execute_portfolio_exit`이 보유
+  종목을 **전량** 매도한다. 종목별 익절/손절은 없으므로, 한 종목이 크게 무너져도 다른
+  종목이 상쇄하면 15:20 강제청산까지 간다 — 의도된 동작이다 (PRD 5.5-B).
 
 ### 이메일이 유일한 알림 채널
 텔레그램은 검토 후 제거됐다. 운영 알림(`AlertNotifier`)과 `notification/templates.py`의

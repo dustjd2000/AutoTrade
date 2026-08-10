@@ -368,8 +368,10 @@ def _buy_notes(execution: BuyExecution) -> List[str]:
         )
     notes.extend(
         [
-            "※ 익절가·손절가는 표의 단가 기준으로 수수료·세금·슬리피지까지 반영해 순손익 "
-            "설정값에 도달하는 가격이며, 실제 판정은 계좌 평단가로 합니다.",
+            "※ 익절가·손절가는 이 종목 혼자였다면 순손익 설정값에 닿는 참고 가격입니다 "
+            "(표의 단가 기준, 수수료·세금·슬리피지 반영).",
+            "※ 실제 판정은 계좌 평단가로 보유 종목 전체를 합산해 하며, 조건에 닿으면 전량 매도합니다 "
+            "— 종목별 익절/손절은 없습니다.",
             "※ 익절/손절 감시는 이 프로그램이 실행 중일 때만 동작합니다 (키움 REST 스탑오더 미지원).",
             "※ 체결가·수수료·손익은 15:30 리포트에서 확정됩니다.",
         ]
@@ -393,7 +395,7 @@ def _buy_facts(execution: BuyExecution) -> List[tuple[str, str]]:
         ("종목당 배정", f"{_balance(execution.amount_per_stock)}{share}"),
         ("총 투입금액", _balance(execution.invested)),
         (
-            "익절 / 손절 라인 (순손익)",
+            "익절 / 손절 라인 (합산 순손익)",
             f"+{execution.take_profit_percent:.2f}% / -{execution.stop_loss_percent:.2f}%",
         ),
     ]

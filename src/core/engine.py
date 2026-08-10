@@ -364,6 +364,16 @@ class TradingEngine:
             if p.quantity > 0
         ]
 
+    def portfolio_return_snapshot(self) -> Optional[float]:
+        """익절/손절 판정에 쓰이는 합산 순손익률 (UI 스레드에서 호출 — API를 호출하지 않는다).
+
+        UI가 수수료율을 다시 읽어 따로 계산하면 엔진이 실제로 판정한 값과 어긋날 수 있어,
+        판정에 쓰는 그 함수(`RiskManager.portfolio_return`)를 그대로 부른다.
+        `position_snapshot`과 같이 `_positions` 참조를 한 번만 집어 일관된 사본으로 계산한다.
+        """
+        holdings = [p for t, p in self._positions.items() if t not in self._exiting]
+        return self.risk_manager.portfolio_return(holdings)
+
     def reset_for_new_day(self) -> None:
         """장 시작 전 일일 리스크 카운터를 초기화한다.
 
@@ -483,10 +493,8 @@ class TradingEngine:
         position = positions.get(data.ticker)
         if position is not None and data.ticker not in self._exiting:
             position.current_price = data.price
-            exit_reason = self.risk_manager.check_exit(position)
-            if exit_reason is not None:
-                self._execute_exit(position, exit_reason)
-                return
+        if self._check_portfolio_exit(positions):
+            return
 
         signal = self.strategy.generate_signal(data)
 
@@ -537,12 +545,61 @@ class TradingEngine:
             result.order_id,
         )
 
-    def _execute_exit(self, position: Position, reason: ExitReason) -> None:
-        """익절/손절 라인 도달 시 전략 신호와 무관하게 즉시 청산한다."""
+    def _check_portfolio_exit(self, positions: Dict[str, Position]) -> bool:
+        """보유 종목 합산 손익이 익절/손절 라인에 닿았으면 전량 매도한다. 매도를 시도했으면 True.
+
+        판정은 종목별이 아니라 합산이다 (PRD 5.5-B, 확정 2026-08-10). 이미 매도 주문을 낸
+        종목(`_exiting`)은 합산에서 뺀다 — 체결이 잔고에 반영되기까지 시차가 있어, 남겨두면
+        이미 판 물량이 다음 틱의 판정을 계속 왜곡한다.
+        """
+        holdings = [p for t, p in positions.items() if t not in self._exiting]
+        if not holdings:
+            return False
+
+        reason = self.risk_manager.check_portfolio_exit(holdings)
+        if reason is None:
+            return False
+
+        self._execute_portfolio_exit(holdings, reason)
+        return True
+
+    def _execute_portfolio_exit(self, holdings: List[Position], reason: ExitReason) -> None:
+        """합산 손익이 익절/손절 라인에 닿아 보유 종목을 전량 청산한다.
+
+        종목별 청산(`_execute_exit`)을 그대로 돌려 매도가능수량·주문 거부·상장폐지 제외
+        처리를 공유하고, **성공 알림만 한 통으로 묶는다** — 종목마다 보내면 보유 3종목에
+        메일 3통이 나간다(종목명이 달라 같은 날 중복 억제에도 걸리지 않는다).
+        주문이 거부된 종목은 `_execute_exit`이 종목별로 알린다.
+        """
+        ret = self.risk_manager.portfolio_return(holdings)
+        percent = f"{ret * 100:+.2f}%" if ret is not None else "-"
+        logger.info(
+            "합산 청산 조건 도달 (%s): 합산 순손익 %s, 대상 %d종목",
+            reason.value,
+            percent,
+            len(holdings),
+        )
+
+        sold = [
+            _position_summary(position)
+            for position in holdings
+            if self._execute_exit(position, reason)
+        ]
+        if sold:
+            self.notify(
+                f"{reason.value} 전량 청산 (합산 순손익 {percent}) — {len(sold)}종목\n"
+                + "\n".join(sold)
+            )
+
+    def _execute_exit(self, position: Position, reason: ExitReason) -> bool:
+        """익절/손절 라인 도달 시 전략 신호와 무관하게 즉시 청산한다. 주문이 접수되면 True.
+
+        성공 알림은 호출부(`_execute_portfolio_exit`)가 전량 기준으로 한 번에 보낸다.
+        """
         summary = _position_summary(position)
         quantity = self._closable_or_skip(position, reason.value)
         if quantity <= 0:
-            return
+            return False
 
         logger.info("청산 조건 도달 (%s): %s", reason.value, summary)
 
@@ -571,13 +628,13 @@ class TradingEngine:
                 self.notify(
                     f"[실패] {reason.value} 청산 거부: {position.label} — {result.error_message}"
                 )
-            return
+            return False
 
         self._mark_exited(position.ticker)
         logger.warning(
             "%s 청산 주문 접수: %s, 주문번호 %s", reason.value, summary, result.order_id
         )
-        self.notify(f"{reason.value} 청산: {summary}")
+        return True
 
     def _mark_exited(self, ticker: str) -> None:
         """청산 주문이 접수된 종목을 감시 대상에서 빼고 중복 매도를 막는다.

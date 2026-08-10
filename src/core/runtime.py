@@ -216,7 +216,7 @@ MANUAL_ACTIONS: Dict[str, str] = {
     "sell_all": "④ 전량 매도 (청산)",
     "report": "⑤ 최종 리포트 메일",
     # 매도 '설정'은 별도 단계가 아니다 — 익절/손절 라인은 엔진 시작 시 적용되어 있고,
-    # 매수로 포지션이 생기는 순간 RiskManager.check_exit 감시가 자동으로 붙는다.
+    # 매수로 포지션이 생기는 순간 RiskManager.check_portfolio_exit 감시가 자동으로 붙는다.
     "full": "매수 및 매도설정까지 일괄 수행",
 }
 
@@ -415,11 +415,13 @@ def adopt_carried_over_positions(runtime: Runtime) -> List[str]:
     """시작 시점에 남아 있는 보유 종목을 오늘의 매도 대상으로 편입한다.
 
     전일 청산에 실패했거나 앱이 꺼진 사이 넘어온 포지션은 아무도 구독하지 않는다.
-    실시간 시세 구독은 당일 매수분(DailyWorkflow.execute_buys)에서만 걸리므로, 이월 포지션은
-    시세가 오지 않아 익절/손절 판정(RiskManager.check_exit)이 한 번도 돌지 않는다.
+    실시간 시세 구독은 당일 매수분(DailyWorkflow.execute_buys)에서만 걸리므로, 이월 포지션만
+    남은 날에는 시세가 한 건도 오지 않아 익절/손절 판정(RiskManager.check_portfolio_exit)이
+    아예 돌지 않는다 — 판정은 틱을 받은 순간에만 도는 콜백이다.
     여기서 구독을 걸어야 감시가 시작된다. 15:20 강제청산은 잔고 전체를 읽으므로 자동 포함된다.
 
-    평단가는 최초 매수 시점 기준이라, 이미 손절선을 넘긴 포지션은 첫 시세에 곧바로 청산된다.
+    판정은 보유 종목 합산 기준이므로, 이월 포지션도 당일 매수분과 한 덩어리로 묶여 함께
+    팔린다. 평단가는 최초 매수 시점 기준이라 이월분의 손실이 그대로 합산에 들어온다.
     """
     held = runtime.engine.open_tickers
     if not held:

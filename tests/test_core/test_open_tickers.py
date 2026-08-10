@@ -32,7 +32,7 @@ def make_engine(positions, sell_status=OrderStatus.FILLED):
         risk_manager=SimpleNamespace(
             initialize=lambda s: None,
             record_order=lambda *a, **kw: None,
-            check_exit=lambda p: None,
+            check_portfolio_exit=lambda ps: None,
         ),
     )
 

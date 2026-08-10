@@ -61,7 +61,8 @@ def make_engine(account, exit_reason=None):
         risk_manager=SimpleNamespace(
             initialize=lambda s: None,
             record_order=lambda *a, **kw: None,
-            check_exit=lambda p: exit_reason,
+            check_portfolio_exit=lambda ps: exit_reason,
+            portfolio_return=lambda ps: None,
         ),
     )
     return engine, orders

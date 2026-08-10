@@ -1,8 +1,10 @@
 from datetime import datetime
 
+import pytest
+
 from src.api.account import BalanceSnapshot, Position
 from src.core.events import ExitReason, OrderRequest, OrderResult, OrderSide, OrderStatus, OrderType
-from src.risk.manager import RiskManager, exit_trigger_price
+from src.risk.manager import RiskManager, exit_trigger_price, net_return, portfolio_net_return
 
 
 def make_manager(
@@ -26,7 +28,13 @@ def make_manager(
     return manager
 
 
-def test_check_exit_triggers_take_profit_at_threshold():
+def held(ticker, quantity, avg_price, current_price):
+    return Position(
+        ticker=ticker, quantity=quantity, avg_price=avg_price, current_price=current_price
+    )
+
+
+def test_portfolio_exit_triggers_take_profit_at_threshold():
     """기본 익절선은 순손익 +0.5% — 비용이 0인 이 케이스에서는 가격 +0.5%가 곧 그 지점이다.
 
     정확히 경계값(1,005원)을 쓰지 않는 것은 부동소수 오차 때문이다 — 1005/1000-1이
@@ -34,59 +42,99 @@ def test_check_exit_triggers_take_profit_at_threshold():
     실전에서는 다음 틱에 잡히므로 로직을 손대지 않고 테스트만 경계 위에서 확인한다.
     """
     manager = make_manager(take_profit_ratio=0.005)
-    position = Position(ticker="005930", quantity=10, avg_price=1000.0, current_price=1006.0)
 
-    assert manager.check_exit(position) == ExitReason.TAKE_PROFIT
+    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 1006.0)]) == ExitReason.TAKE_PROFIT
 
 
-def test_check_exit_triggers_stop_loss_at_threshold():
+def test_portfolio_exit_triggers_stop_loss_at_threshold():
     manager = make_manager(stop_loss_ratio=0.02)
-    position = Position(ticker="005930", quantity=10, avg_price=1000.0, current_price=980.0)
 
-    assert manager.check_exit(position) == ExitReason.STOP_LOSS
+    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 980.0)]) == ExitReason.STOP_LOSS
 
 
-def test_check_exit_returns_none_within_band():
+def test_portfolio_exit_returns_none_within_band():
     manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02)
-    position = Position(ticker="005930", quantity=10, avg_price=1000.0, current_price=1002.0)
 
-    assert manager.check_exit(position) is None
+    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 1002.0)]) is None
 
 
-def test_check_exit_take_profit_reflects_costs():
+def test_portfolio_exit_take_profit_reflects_costs():
     """수수료·세금·슬리피지가 있으면 가격 +0.5%만으로는 순손익 +0.5%에 못 미친다."""
     manager = make_manager(
         take_profit_ratio=0.005, commission_rate=0.00015, tax_rate=0.0018, slippage_rate=0.001
     )
-    just_short = Position(ticker="005930", quantity=10, avg_price=1000.0, current_price=1005.0)
-    assert manager.check_exit(just_short) is None
+    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 1005.0)]) is None
 
     trigger_price = exit_trigger_price(1000.0, 0.005, 0.00015, 0.0018, 0.001)
     assert trigger_price > 1005.0  # 비용만큼 익절가가 위로 밀린다
-    at_trigger = Position(
-        ticker="005930", quantity=10, avg_price=1000.0, current_price=trigger_price + 1
-    )
-    assert manager.check_exit(at_trigger) == ExitReason.TAKE_PROFIT
+    at_trigger = [held("005930", 10, 1000.0, trigger_price + 1)]
+    assert manager.check_portfolio_exit(at_trigger) == ExitReason.TAKE_PROFIT
 
 
-def test_check_exit_stop_loss_triggers_earlier_with_costs():
+def test_portfolio_exit_stop_loss_triggers_earlier_with_costs():
     """비용이 있으면 원가 대비 -2%보다 얕은 하락(-1.8%)에서 이미 순손실 -2%에 도달한다."""
     manager = make_manager(
         stop_loss_ratio=0.02, commission_rate=0.00015, tax_rate=0.0018, slippage_rate=0.001
     )
-    shallower_drop = Position(ticker="005930", quantity=10, avg_price=1000.0, current_price=982.0)
-    assert manager.check_exit(shallower_drop) == ExitReason.STOP_LOSS
+    shallower_drop = [held("005930", 10, 1000.0, 982.0)]
+    assert manager.check_portfolio_exit(shallower_drop) == ExitReason.STOP_LOSS
 
     trigger_price = exit_trigger_price(1000.0, -0.02, 0.00015, 0.0018, 0.001)
-    at_trigger = Position(ticker="005930", quantity=10, avg_price=1000.0, current_price=trigger_price)
-    assert manager.check_exit(at_trigger) == ExitReason.STOP_LOSS
+    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, trigger_price)]) == ExitReason.STOP_LOSS
 
 
-def test_check_exit_returns_none_for_empty_position():
+def test_portfolio_exit_returns_none_without_anything_to_measure():
+    """보유가 없거나 평단·수량이 0이면 판정하지 않는다."""
     manager = make_manager()
-    position = Position(ticker="005930", quantity=0, avg_price=0.0, current_price=1000.0)
 
-    assert manager.check_exit(position) is None
+    assert manager.check_portfolio_exit([]) is None
+    assert manager.check_portfolio_exit([held("005930", 0, 0.0, 1000.0)]) is None
+
+
+def test_single_position_matches_the_per_stock_formula():
+    """종목이 하나면 종전의 종목별 순손익률과 같은 값이어야 한다 (PRD 5.5-B)."""
+    rates = (0.00015, 0.0018, 0.001)
+    position = held("005930", 7, 1000.0, 1012.0)
+
+    assert portfolio_net_return([position], *rates) == pytest.approx(
+        net_return(1012.0, 1000.0, *rates)
+    )
+
+
+def test_profit_and_loss_offset_each_other():
+    """한 종목이 손절선을 넘겨도 다른 종목이 상쇄하면 매도하지 않는다 (합산 판정의 대가)."""
+    manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02)
+    positions = [
+        held("005930", 100, 1000.0, 1010.0),  # +1%
+        held("000660", 100, 1000.0, 970.0),   # -3% — 종목별이었다면 손절
+    ]
+
+    assert manager.check_portfolio_exit(positions) is None  # 합산 -1%
+    assert manager.portfolio_return(positions) == pytest.approx(-0.01)
+
+
+def test_weighting_follows_invested_amount_not_stock_count():
+    """비중은 투입금액을 따른다 — 종목 개수로 나누는 단순평균이면 정반대 결과가 나온다."""
+    manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02)
+    positions = [
+        held("005930", 1000, 1000.0, 1010.0),  # 매입 100만원, +1%  → +1만원
+        held("000660", 10, 1000.0, 700.0),     # 매입 1만원,  -30% → -3천원
+    ]
+
+    # 단순평균이면 (+1% -30%)/2 = -14.5%로 손절이 나가야 하지만, 실제 손익은 +7,000원이다
+    assert manager.portfolio_return(positions) == pytest.approx(7_000 / 1_010_000)
+    assert manager.check_portfolio_exit(positions) == ExitReason.TAKE_PROFIT
+
+
+def test_positions_without_a_price_are_excluded():
+    """현재가 0(조회 실패·장 전)을 그대로 넣으면 -100%로 잡혀 합산이 즉시 손절선을 넘는다."""
+    manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02)
+    positions = [
+        held("005930", 10, 1000.0, 1006.0),
+        held("000660", 10, 1000.0, 0.0),  # 현재가를 못 읽은 종목
+    ]
+
+    assert manager.check_portfolio_exit(positions) == ExitReason.TAKE_PROFIT
 
 
 def test_record_order_accumulates_realized_loss_only_on_loss():

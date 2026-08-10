@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Optional
+from typing import Dict, Iterable, Optional
 
 from src.api.account import BalanceSnapshot, Position
 from src.core.events import ExitReason, OrderRequest, OrderResult, OrderSide, OrderStatus
@@ -29,12 +29,49 @@ def exit_trigger_price(
     tax_rate: float,
     slippage_rate: float,
 ) -> float:
-    """순손익률이 target_ratio에 도달하는 현재가 — net_return의 역함수 (표시용)."""
+    """순손익률이 target_ratio에 도달하는 현재가 — net_return의 역함수 (표시용).
+
+    익절/손절은 보유 종목 합산으로 판정하므로(PRD 5.5-B) 이 가격에 닿아도 그 종목만
+    팔리지는 않는다. "이 종목 혼자였다면 조건에 닿는 가격"이라는 참고값이다.
+    """
     return (
         avg_price
         * (target_ratio + 1 + commission_rate)
         / ((1 - slippage_rate) * (1 - commission_rate - tax_rate))
     )
+
+
+def portfolio_net_return(
+    positions: Iterable[Position],
+    commission_rate: float,
+    tax_rate: float,
+    slippage_rate: float,
+) -> Optional[float]:
+    """보유 종목 전체를 합산한 순손익률 (PRD 5.5-B "매도(청산) 조건", 확정 2026-08-10).
+
+        (전체 예상 매도수령액 - 전체 매입원가) / 전체 매입금액
+
+    매입금액으로 가중한 평균이므로 "보유 종목 손익을 전부 더해 투입 총액으로 나눈 값"과
+    같다. 종목 개수로 나누는 단순평균이 아니다 — 그러면 투입금액이 다른 종목을 같은 비중으로
+    취급해 실제 계좌 손익과 어긋난다. 종목이 하나뿐이면 net_return과 같은 값이 나온다.
+
+    평단·수량·현재가 중 하나라도 0인 종목은 계산에서 뺀다. 특히 현재가 0은 조회 실패나 장 전
+    상태인데, 그대로 넣으면 -100%로 잡혀 합산이 즉시 손절선을 넘는다.
+    계산에 넣을 종목이 하나도 없으면 None — '판정하지 않는다'는 뜻이다.
+    """
+    cost = 0.0
+    market_value = 0.0
+    for position in positions:
+        if position.avg_price <= 0 or position.quantity <= 0 or position.current_price <= 0:
+            continue
+        cost += position.avg_price * position.quantity
+        market_value += position.current_price * position.quantity
+
+    if cost <= 0:
+        return None
+
+    proceeds = market_value * (1 - slippage_rate) * (1 - commission_rate - tax_rate)
+    return (proceeds - cost * (1 + commission_rate)) / cost
 
 
 class RiskManager:
@@ -88,8 +125,18 @@ class RiskManager:
                 return False
         return True
 
-    def check_exit(self, position: Position) -> Optional[ExitReason]:
-        """보유 종목이 익절/손절 라인에 도달했는지 확인한다.
+    def portfolio_return(self, positions: Iterable[Position]) -> Optional[float]:
+        """보유 종목 합산 순손익률 — 설정된 수수료·세금·슬리피지를 적용한다."""
+        return portfolio_net_return(
+            positions, self.commission_rate, self.tax_rate, self.slippage_rate
+        )
+
+    def check_portfolio_exit(self, positions: Iterable[Position]) -> Optional[ExitReason]:
+        """보유 종목 **전체**가 익절/손절 라인에 도달했는지 확인한다.
+
+        판정은 종목별이 아니라 합산이다 (확정 2026-08-10, PRD 5.5-B). 조건에 닿으면
+        보유 종목을 전량 매도한다. 종목별 익절/손절은 두지 않으므로, 한 종목이 크게
+        무너져도 다른 종목이 상쇄하면 매도가 나가지 않고 15:20 강제청산까지 간다.
 
         키움 REST API에 조건부 예약주문(스탑오더) 엔드포인트가 확인되지 않아, 이 실시간
         모니터링이 **1차이자 사실상 유일한 청산 수단**이다 (PRD 5.5-B, 2026-07-27 확정).
@@ -99,16 +146,9 @@ class RiskManager:
         판정은 가격 변동률이 아니라 왕복 수수료·매도세금·슬리피지를 뺀 순손익률 기준이다.
         익절선(기본 0.5%)은 이미 비용을 뺀 값이라, 도달하면 그만큼이 실수령 이익이다.
         """
-        if position.avg_price <= 0 or position.quantity <= 0:
+        ret = self.portfolio_return(positions)
+        if ret is None:
             return None
-
-        ret = net_return(
-            position.current_price,
-            position.avg_price,
-            self.commission_rate,
-            self.tax_rate,
-            self.slippage_rate,
-        )
         if ret >= self.take_profit_ratio:
             return ExitReason.TAKE_PROFIT
         if ret <= -self.stop_loss_ratio:
