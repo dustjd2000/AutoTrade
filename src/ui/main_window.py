@@ -360,7 +360,7 @@ class MainWindow(QMainWindow):
         fund_form.addRow("총 매수가능 금액", self._investable_amount)
         fund_risk_row.addWidget(fund_box, 1)
 
-        risk_box = QGroupBox("리스크 관리 (익절 / 손절 / 갭 허용치)")
+        risk_box = QGroupBox("리스크 관리 (익절 / 손절 / 갭 허용치)")  # 갭은 상승·하락 두 값이다
         risk_form = QFormLayout(risk_box)
         risk_form.setSpacing(8)
         risk_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -377,6 +377,10 @@ class MainWindow(QMainWindow):
         self._buy_price_tolerance = QLineEdit()
         self._buy_price_tolerance.setPlaceholderText("예: 2 (목표가 +2% 초과 시 매수 안 함)")
         self._buy_price_tolerance.setValidator(QDoubleValidator(0.0, 100.0, 2))
+        # 09:00 시가가 전일 종가보다 이만큼 넘게 낮으면 건너뛴다. 위와 달리 0이 '끔'이다
+        self._gap_down_tolerance = QLineEdit()
+        self._gap_down_tolerance.setPlaceholderText("예: 1 (전일 종가 -1% 미만 시 매수 안 함, 0=끔)")
+        self._gap_down_tolerance.setValidator(QDoubleValidator(0.0, 100.0, 2))
 
         # 적용 여부 체크박스 — 끄면 그 라인은 감시하지 않는다. `.env`에 저장하지 않고
         # 엔진을 재시작하지도 않는다(끄고 싶은 순간에 감시 공백이 생기면 안 된다).
@@ -420,6 +424,18 @@ class MainWindow(QMainWindow):
         gap_hint.setWordWrap(True)
         gap_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
         risk_form.addRow(gap_hint)
+
+        risk_form.addRow("갭 하락 허용치 (%)", self._gap_down_tolerance)
+
+        # 위 '갭 허용치'와 기준이 다르다(목표가가 아니라 전일 종가). 0의 의미도 반대라서
+        # 둘 다 적어 두지 않으면 같은 규약으로 읽는다 (PRD 5.5-B)
+        gap_down_hint = QLabel(
+            "(09:00 현재가가 전일 종가보다 이 비율을 넘게 낮으면 갭 하락으로 보고 "
+            "그 종목은 매수하지 않습니다. 0을 넣으면 이 판정을 끕니다)"
+        )
+        gap_down_hint.setWordWrap(True)
+        gap_down_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
+        risk_form.addRow(gap_down_hint)
         fund_risk_row.addWidget(risk_box, 1)
 
         root.addLayout(fund_risk_row)
@@ -829,6 +845,17 @@ class MainWindow(QMainWindow):
         else:
             logger.warning("청산 조건 변경 — %s. 해제된 라인은 감시하지 않습니다.", state)
 
+    def _gap_down_text(self) -> str:
+        """매수 확인 팝업에 넣을 갭 하락 안내 — 0(꺼짐)이면 꺼져 있다고 알린다."""
+        raw = self._gap_down_tolerance.text().strip() or "1"
+        try:
+            percent = float(raw)
+        except ValueError:  # 검증기를 지나쳐 온 값 — 매수를 막지 않고 안내만 생략한다
+            return ""
+        if percent <= 0:
+            return "갭 하락 판정은 꺼져 있습니다 (전일 종가보다 얼마나 낮게 시작하든 매수합니다)."
+        return f"전일 종가보다 {percent:g}% 넘게 낮게 시작한 종목도 건너뜁니다."
+
     def _exit_watch_text(self) -> str:
         """매수 확인 팝업에 넣을 청산 감시 안내 — 해제된 라인은 빼고 알린다."""
         lines = []
@@ -902,6 +929,7 @@ class MainWindow(QMainWindow):
         self._take_profit.setText(env.get("TAKE_PROFIT_PERCENT", "0.5"))
         self._stop_loss.setText(env.get("STOP_LOSS_PERCENT", "2"))
         self._buy_price_tolerance.setText(env.get("BUY_PRICE_TOLERANCE_PERCENT", "2"))
+        self._gap_down_tolerance.setText(env.get("GAP_DOWN_TOLERANCE_PERCENT", "1"))
         self._select_combo_value(self._investable_ratio, env.get("INVESTABLE_RATIO_PERCENT"), default=50)
         self._select_combo_value(self._target_stock_count, env.get("TARGET_STOCK_COUNT"), default=3)
         self._select_combo_text(
@@ -949,6 +977,7 @@ class MainWindow(QMainWindow):
             "TAKE_PROFIT_PERCENT": self._take_profit.text().strip() or "0.5",
             "STOP_LOSS_PERCENT": self._stop_loss.text().strip() or "2",
             "BUY_PRICE_TOLERANCE_PERCENT": self._buy_price_tolerance.text().strip() or "2",
+            "GAP_DOWN_TOLERANCE_PERCENT": self._gap_down_tolerance.text().strip() or "1",
             "INVESTABLE_RATIO_PERCENT": str(self._investable_ratio.currentData()),
             "TARGET_STOCK_COUNT": str(self._target_stock_count.currentData()),
             "RECOMMEND_TIME": str(self._recommend_time.currentData()),
@@ -1156,7 +1185,8 @@ class MainWindow(QMainWindow):
             "buy": (
                 "추천 종목을 목표 매수가에 지정가로 매수합니다.\n"
                 f"현재가가 목표가보다 {self._buy_price_tolerance.text().strip() or '2'}% 넘게 "
-                "높은 종목은 건너뜁니다."
+                "높은 종목은 건너뜁니다.\n"
+                f"{self._gap_down_text()}"
             ),
             "cancel_unfilled": (
                 "아직 체결되지 않은 매수 주문을 취소하고 매수 결과 메일을 보냅니다.\n"

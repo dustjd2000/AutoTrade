@@ -416,6 +416,87 @@ def test_gap_skip_is_reported_in_the_buy_result_email():
     assert "갭" in body
 
 
+# ── 갭 하락 판정 (PRD 5.5-B, 확정 2026-08-11) ──────────────
+def gap_down_setup(current_price, prev_close=1000.0, target_price=1000):
+    recs = [
+        StockRecommendation(
+            ticker="005930",
+            name="삼성전자",
+            target_price=target_price,
+            reason="a",
+            prev_close=prev_close,
+        )
+    ]
+    workflow, email, order_client, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.engine.market_data = SimpleNamespace(
+        get_current_price=lambda t: MarketData(ticker=t, price=current_price, volume=100)
+    )
+    return workflow, email, order_client
+
+
+def test_buy_is_skipped_when_the_open_gaps_below_the_previous_close():
+    """전일 강세가 이어진다는 전제가 깨진 날은 참여하지 않는다 (허용치 1% → 990원 미만)."""
+    workflow, _, order_client = gap_down_setup(current_price=989.0)
+
+    workflow.execute_buys()
+
+    assert order_client.orders == []
+
+
+def test_buy_proceeds_inside_the_gap_down_tolerance():
+    workflow, _, order_client = gap_down_setup(current_price=990.0)
+
+    workflow.execute_buys()
+
+    assert len(order_client.orders) == 1
+
+
+def test_gap_down_is_measured_against_the_previous_close_not_the_target():
+    """2026-08-11 포스코퓨처엠 회귀 — 목표가 기준으로는 걸리지 않고 전일 종가 기준으로만 걸린다.
+
+    시가 163,300원은 목표가 163,500원 대비 -0.12%라 목표가 기준 ±2% 밴드에는 안 걸리지만,
+    전일 종가 165,500원 대비로는 -1.33%다. 이 종목은 이날 158,800원까지 밀려 손절됐다.
+    """
+    workflow, _, order_client = gap_down_setup(
+        current_price=163_300.0, prev_close=165_500.0, target_price=163_500
+    )
+
+    workflow.execute_buys()
+
+    assert order_client.orders == []
+
+
+def test_gap_down_check_is_off_when_the_tolerance_is_zero():
+    """임계값 근거가 약해 언제든 끌 수 있어야 한다 — 갭 상승 쪽(0 = 가장 엄격)과 반대 규약이다."""
+    workflow, _, order_client = gap_down_setup(current_price=800.0)
+    workflow.gap_down_tolerance_ratio = 0.0
+
+    workflow.execute_buys()
+
+    assert len(order_client.orders) == 1
+
+
+def test_gap_down_check_is_skipped_when_the_previous_close_is_unknown():
+    """전일 종가를 모르면 판정할 수 없다 — 시세 조회 실패와 같이 매수를 막지 않는다."""
+    workflow, _, order_client = gap_down_setup(current_price=800.0, prev_close=0.0)
+
+    workflow.execute_buys()
+
+    assert len(order_client.orders) == 1
+
+
+def test_gap_down_skip_is_reported_in_the_buy_result_email():
+    workflow, email, _ = gap_down_setup(current_price=989.0)
+
+    workflow.execute_buys()
+    workflow.cancel_unfilled_buys()
+
+    _, body, _ = email.sent[0]
+    assert "건너뜀" in body
+    assert "갭 하락" in body
+
+
 def test_buy_proceeds_when_the_current_price_cannot_be_read():
     """시세 조회가 실패해도 매수는 낸다 — 지정가라 목표가보다 비싸게 체결되지 않는다."""
     recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a")]

@@ -245,16 +245,78 @@ def test_rejected_orders_are_reported_separately(tmp_path):
     assert summary.trades == []
 
 
-def test_unknown_order_number_is_ignored(tmp_path):
-    """이 프로그램이 내지 않은 주문(수동 매매 등)은 기록 대상이 아니다."""
+def test_manual_buy_is_recorded_even_though_this_program_did_not_order_it(tmp_path):
+    """키움 앱에서 직접 낸 주문도 그날 계좌 손익의 일부다 (PRD 5.7, 확정 2026-08-11)."""
     store = make_store(tmp_path)
     seed_today(store)
 
-    updated = store.apply_fills(
-        [make_fill("9999999", "005930", OrderSide.BUY, 1, 70000.0)], DAY
+    applied = store.apply_fills(
+        [make_fill("9999999", "034220", OrderSide.BUY, 1, 9000.0)], DAY
     )
 
-    assert updated == 0
+    assert applied == 1
+    summary = store.daily_summary(DAY)
+    assert summary.buy_count == 1
+    assert summary.fees == 20.0  # 수수료는 매칭 여부와 무관하게 집계된다
+
+
+def test_manual_sell_uses_the_same_day_buy_price_as_its_average(tmp_path):
+    """수동 매도는 평단을 알 수 없어 같은 날 매수 체결가로 대신한다.
+
+    2026-08-11 엘앤에프가 이 경로로 리포트에서 통째로 빠졌던 건이다.
+    """
+    store = make_store(tmp_path)
+    record_pending(store, "0079364", "035720", OrderSide.BUY, 5, 9, name="카카오")
+
+    store.apply_fills(
+        [
+            make_fill("0079364", "035720", OrderSide.BUY, 5, 36300.0),
+            # 사용자가 앱에서 직접 판 물량 — 이 프로그램은 주문번호를 모른다
+            make_fill("9999999", "035720", OrderSide.SELL, 5, 37000.0, tax=369.0),
+        ],
+        DAY,
+    )
+
+    summary = store.daily_summary(DAY)
+    assert summary.sell_count == 1
+    assert summary.realized_pnl == (37000.0 - 36300.0) * 5
+    assert summary.cost == 36300.0 * 5
+    assert summary.fees == 20.0 + 20.0 + 369.0
+
+
+def test_manual_sell_of_a_carried_over_position_records_no_pnl(tmp_path):
+    """전일 이월분을 판 경우 평단을 알 길이 없다 — 틀린 손익을 적느니 비워 둔다."""
+    store = make_store(tmp_path)
+
+    store.apply_fills(
+        [make_fill("9999999", "035720", OrderSide.SELL, 5, 37000.0, tax=369.0)], DAY
+    )
+
+    summary = store.daily_summary(DAY)
+    assert summary.sell_count == 1
+    assert summary.realized_pnl == 0.0
+    assert summary.trades[0].pnl is None
+    assert summary.cost == 0.0          # 원가를 모르므로 수익률 분모에 넣지 않는다
+    assert summary.fees == 20.0 + 369.0  # 비용은 실제로 나갔으므로 집계한다
+
+
+def test_manual_fill_is_not_double_counted_on_rerun(tmp_path):
+    """리포트 재발송·엔진 재시작으로 다시 실행돼도 결과가 같아야 한다."""
+    store = make_store(tmp_path)
+    record_pending(store, "0079364", "035720", OrderSide.BUY, 5, 9, name="카카오")
+    fills = [
+        make_fill("0079364", "035720", OrderSide.BUY, 5, 36300.0),
+        make_fill("9999999", "035720", OrderSide.SELL, 5, 37000.0, tax=369.0),
+    ]
+
+    store.apply_fills(fills, DAY)
+    first = store.daily_summary(DAY)
+    store.apply_fills(fills, DAY)
+    second = store.daily_summary(DAY)
+
+    assert (second.buy_count, second.sell_count) == (first.buy_count, first.sell_count)
+    assert second.realized_pnl == first.realized_pnl
+    assert second.fees == first.fees
 
 
 def test_existing_db_gains_new_columns(tmp_path):

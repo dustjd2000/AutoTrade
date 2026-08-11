@@ -153,6 +153,10 @@ class StockRecommendation:
     # 목표 매도가 — 추천 메일에 참고로 싣기만 하고 주문에는 쓰지 않는다 (PRD 5.5-B '목표 매도가').
     # 0은 '산출 안 됨'이며(거래량 급증 배수와 같은 규약), 그 경우 메일에서 줄이 통째로 빠진다.
     target_sell_price: int = 0
+    # 전일 종가 — 09:00 갭 하락 판정의 기준값이다 (PRD 5.5-B '갭 하락한 종목도 건너뛴다').
+    # 추천 시각에 이미 수집해 둔 값을 실어 나르는 것이라 09:00에 일봉을 다시 조회하지 않는다.
+    # 0은 '모름'이며, 그 경우 갭 하락 판정을 건너뛴다.
+    prev_close: float = 0.0
 
 
 def build_user_prompt(daily_data: List[DailyStockData], target_count: int = 3) -> str:
@@ -297,6 +301,19 @@ def apply_price_guardrail(
             )
 
 
+def attach_prev_close(
+    recommendations: List[StockRecommendation], daily_data: List[DailyStockData]
+) -> None:
+    """전일 종가를 추천에 실어 준다 (제자리 수정, PRD 5.5-B '갭 하락한 종목도 건너뛴다').
+
+    09:00 갭 하락 판정이 쓸 기준값이다. 후보 밖 종목은 `drop_unknown_tickers`가 이미
+    걸러낸 뒤라 정상적으로는 전부 채워지지만, 못 찾으면 0(모름)으로 두어 판정을 건너뛰게 한다.
+    """
+    prev_close = {data.ticker: data.prev_close for data in daily_data}
+    for rec in recommendations:
+        rec.prev_close = prev_close.get(rec.ticker, 0.0)
+
+
 def warn_invalid_sell_targets(recommendations: List[StockRecommendation]) -> None:
     """목표 매도가가 목표 매수가보다 낮으면 로그에 남긴다 — 값은 그대로 둔다.
 
@@ -395,6 +412,7 @@ class LLMRecommender:
             return None
 
         apply_price_guardrail(recommendations, daily_data)
+        attach_prev_close(recommendations, daily_data)
         warn_invalid_sell_targets(recommendations)
         # 매수가와 매도가를 함께 남긴다 — 나중에 실제 고가와 대조해 목표 매도가가
         # 쓸 만했는지 되짚을 유일한 근거다 (DB에는 남지 않는다)

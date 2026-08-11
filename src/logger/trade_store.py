@@ -196,11 +196,16 @@ class TradeStore:
     def apply_fills(self, fills: Iterable[FillRecord], day: date) -> int:
         """체결내역 조회 결과를 당일 주문 기록에 주문번호로 매칭해 반영한다.
 
-        UPDATE만 하므로 같은 날 여러 번 실행해도 결과가 같다 — 리포트를 다시 보내거나
-        엔진을 재시작해도 중복 집계되지 않는다.
+        주문번호가 당일 기록에 없으면 **새 행으로 넣는다** (PRD 5.7, 확정 2026-08-11).
+        종전에는 건너뛰어서 키움 앱에서 직접 판 물량이 리포트 손익에 통째로 빠졌다 —
+        리포트가 계좌와 어긋나면 성과 판단의 근거 자체가 무너진다.
+
+        주문번호로 먼저 찾으므로 같은 날 여러 번 실행해도 결과가 같다(두 번째부터는 UPDATE로
+        흐른다) — 리포트를 다시 보내거나 엔진을 재시작해도 중복 집계되지 않는다.
         """
         start, end = _day_range(day)
         updated = 0
+        external: List[FillRecord] = []
 
         with closing(self._connect()) as conn:
             for fill in fills:
@@ -210,7 +215,7 @@ class TradeStore:
                     (fill.order_id, start, end),
                 ).fetchone()
                 if row is None:
-                    # 이 프로그램이 내지 않은 주문(수동 매매 등)은 기록 대상이 아니다
+                    external.append(fill)
                     continue
 
                 realized_pnl = None
@@ -236,10 +241,21 @@ class TradeStore:
                     ),
                 )
                 updated += 1
+
+            # 외부 체결은 매칭 건을 모두 반영한 뒤에 넣는다 — 수동 매도의 평단 대용으로 같은 날
+            # 매수 체결가를 쓰는데, 그 매수 행은 위 UPDATE를 거쳐야 체결가가 채워지기 때문이다
+            for fill in external:
+                _insert_external_fill(conn, fill, day, start, end)
             conn.commit()
 
-        logger.info("체결 결과 %d건을 매매 기록에 반영했습니다.", updated)
-        return updated
+        if external:
+            logger.warning(
+                "이 프로그램이 내지 않은 체결 %d건을 함께 기록했습니다 (수동 매매 추정): %s",
+                len(external),
+                [f.label for f in external],
+            )
+        logger.info("체결 결과 %d건을 매매 기록에 반영했습니다.", updated + len(external))
+        return updated + len(external)
 
     def daily_summary(self, day: date) -> DailySummary:
         start, end = _day_range(day)
@@ -274,6 +290,66 @@ class TradeStore:
                 (*FILLED_STATUSES, start, end),
             ).fetchone()
         return MonthlySummary(realized_pnl=row[0] or 0.0, fees=row[1] or 0.0)
+
+
+def _same_day_buy_price(
+    conn: sqlite3.Connection, ticker: str, start: str, end: str
+) -> Optional[float]:
+    """같은 날 같은 종목 매수 체결의 가중평균가 — 수동 매도의 평단 대용 (PRD 5.7).
+
+    전일 이월분을 판 경우에는 매수 행이 없어 None이 된다.
+    """
+    placeholders = ", ".join("?" for _ in FILLED_STATUSES)
+    rows = conn.execute(
+        f"""SELECT filled_price, filled_quantity FROM trades
+            WHERE ticker = ? AND side = ? AND status IN ({placeholders})
+                  AND timestamp BETWEEN ? AND ?""",
+        (ticker, OrderSide.BUY.value, *FILLED_STATUSES, start, end),
+    ).fetchall()
+    return _weighted_average([(r["filled_price"], r["filled_quantity"]) for r in rows]) or None
+
+
+def _insert_external_fill(
+    conn: sqlite3.Connection, fill: FillRecord, day: date, start: str, end: str
+) -> None:
+    """이 프로그램이 내지 않은 체결을 새 행으로 남긴다 (PRD 5.7, 확정 2026-08-11).
+
+    평단을 알 수 없으므로 매도는 같은 날 같은 종목의 매수 체결가로 대신한다. 그마저 없으면
+    손익을 비워 두고 체결 자체만 남긴다 — 틀린 손익을 적는 것보다 빈 값이 낫고, 수수료·세금은
+    어느 쪽이든 그대로 집계된다.
+
+    타임스탬프는 체결내역 조회(`ka10076`)가 시각을 주지 않아 그날 0시로 둔다. 집계는 날짜로만
+    걸러지므로(`_day_range`) 그날 범위 안이라는 것만 보장하면 된다.
+    """
+    avg_price = None
+    realized_pnl = None
+    if fill.side == OrderSide.SELL:
+        avg_price = _same_day_buy_price(conn, fill.ticker, start, end)
+        if avg_price:
+            realized_pnl = (fill.filled_price - avg_price) * fill.filled_quantity
+
+    conn.execute(
+        """INSERT INTO trades
+           (order_id, ticker, side, status, quantity, filled_quantity,
+            filled_price, avg_price, realized_pnl, error_message, timestamp,
+            name, commission, tax)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)""",
+        (
+            fill.order_id,
+            fill.ticker,
+            fill.side.value,
+            fill.status.value,
+            fill.filled_quantity + fill.unfilled_quantity,
+            fill.filled_quantity,
+            fill.filled_price,
+            avg_price,
+            realized_pnl,
+            datetime.combine(day, datetime.min.time()).isoformat(),
+            fill.name,
+            fill.commission,
+            fill.tax,
+        ),
+    )
 
 
 def _build_summary(day: date, rows: Iterable[sqlite3.Row]) -> DailySummary:
@@ -321,7 +397,9 @@ def _pair_by_ticker(filled: List[sqlite3.Row]) -> List[TradeRow]:
                 buy_price = _weighted_average(
                     [(r["filled_price"], r["filled_quantity"]) for r in buys]
                 )
-            pnl = sum(r["realized_pnl"] or 0.0 for r in sells)
+            # 평단을 모르는 수동 매도만 있으면 손익은 '모름'이다 — 0원(본전)으로 보이면 안 된다
+            known = [r["realized_pnl"] for r in sells if r["realized_pnl"] is not None]
+            pnl = sum(known) if known else None
         else:
             quantity = sum(r["filled_quantity"] for r in buys)
             sell_price = None

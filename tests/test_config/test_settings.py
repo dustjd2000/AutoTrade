@@ -46,3 +46,17 @@ def test_default_constant_matches_property_fallback():
     hour, minute = (int(part) for part in DEFAULT_RECOMMEND_TIME_HHMM.split(":"))
 
     assert Settings().recommend_time == dt_time(hour, minute)
+
+
+# ── 갭 하락 허용치 (PRD 5.5-B, 확정 2026-08-11) ──────────────
+def test_gap_down_tolerance_defaults_to_one_percent(monkeypatch):
+    monkeypatch.delenv("GAP_DOWN_TOLERANCE_PERCENT", raising=False)
+
+    assert Settings().gap_down_tolerance_ratio == 0.01
+
+
+def test_gap_down_tolerance_zero_means_off(monkeypatch):
+    """갭 상승 쪽(0 = 가장 엄격)과 반대 규약이라 값이 그대로 0으로 와야 한다."""
+    monkeypatch.setenv("GAP_DOWN_TOLERANCE_PERCENT", "0")
+
+    assert Settings().gap_down_tolerance_ratio == 0.0

@@ -157,13 +157,14 @@ def _row_cells(trade: TradeRow) -> tuple[str, str, str, str, str, str]:
     """표 한 줄의 셀 값 — 평문과 HTML이 같은 값을 쓰도록 한 곳에서 만든다."""
     if trade.sell_price is None:
         return (trade.label, f"{trade.buy_price:,.0f}", "보유중", f"{trade.quantity}", "-", "-")
+    # 팔렸지만 원가를 모르는 경우(전일 이월분을 수동 매도) 손익은 0원이 아니라 '모름'이다
     return (
         trade.label,
-        f"{trade.buy_price:,.0f}",
+        f"{trade.buy_price:,.0f}" if trade.buy_price else "-",
         f"{trade.sell_price:,.0f}",
         f"{trade.quantity}",
-        _won(trade.pnl or 0.0),
-        _percent(trade.return_pct or 0.0),
+        _won(trade.pnl) if trade.pnl is not None else "-",
+        _percent(trade.return_pct) if trade.return_pct is not None else "-",
     )
 
 

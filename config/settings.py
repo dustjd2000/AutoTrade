@@ -116,6 +116,18 @@ class Settings:
     def buy_price_tolerance_ratio(self) -> float:
         return self.buy_price_tolerance_percent / 100
 
+    # 09:00 매수 직전 현재가가 전일 종가보다 이 비율을 넘게 낮으면 그 종목을 건너뛴다.
+    # 목표 매수가는 눌림을 노려 전일 종가보다 낮게 잡히는 값이라, 위 갭 상승 판정처럼
+    # 목표가를 기준으로 하한을 두면 얼마나 낮게 출발했는지를 잡지 못한다 (PRD 5.5-B).
+    # 위와 달리 0이 '끔'이다 — 임계값 근거가 아직 약해 꺼둘 수 있어야 한다.
+    gap_down_tolerance_percent: float = field(
+        default_factory=lambda: float(os.getenv("GAP_DOWN_TOLERANCE_PERCENT", "1"))
+    )
+
+    @property
+    def gap_down_tolerance_ratio(self) -> float:
+        return self.gap_down_tolerance_percent / 100
+
     # 익절/손절 판정에 반영할 비용 — 매매수수료(매수·매도 동일), 세금(매도 시만), 슬리피지(추정)
     commission_percent: float = field(default_factory=lambda: float(os.getenv("COMMISSION_PERCENT", "0.015")))
     tax_percent: float = field(default_factory=lambda: float(os.getenv("TAX_PERCENT", "0.18")))
