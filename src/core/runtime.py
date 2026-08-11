@@ -8,7 +8,7 @@ import inspect
 import logging
 from dataclasses import dataclass
 from datetime import datetime, time as dt_time
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 from config.settings import Settings
 from src.api.account import AccountClient
@@ -218,10 +218,13 @@ MANUAL_ACTIONS: Dict[str, str] = {
     # 매도 '설정'은 별도 단계가 아니다 — 익절/손절 라인은 엔진 시작 시 적용되어 있고,
     # 매수로 포지션이 생기는 순간 RiskManager.check_portfolio_exit 감시가 자동으로 붙는다.
     "full": "매수 및 매도설정까지 일괄 수행",
+    # ①~⑤ 버튼 그리드에는 넣지 않는다 — 대상 종목을 보유 종목 표에서 골라야 하므로
+    # 버튼도 그 표 아래에 둔다. 여기 두는 것은 라벨과 잠금·확인 처리를 공유하기 위함이다.
+    "sell_selected": "선택 매도",
 }
 
 # 실제 주문이 나가는 액션 — UI가 실행 전 확인을 받는다
-ORDER_ACTIONS = frozenset({"buy", "cancel_unfilled", "sell_all", "full"})
+ORDER_ACTIONS = frozenset({"buy", "cancel_unfilled", "sell_all", "sell_selected", "full"})
 
 
 @dataclass(frozen=True)
@@ -233,8 +236,14 @@ class ManualStep:
     touches_orders: bool = False
 
 
-def manual_steps(runtime: Runtime, action: str) -> List[ManualStep]:
-    """액션 이름을 실행 단계 목록으로 바꾼다. '전체'는 하루 흐름의 진입 단계를 순서대로 이어 붙인다."""
+def manual_steps(
+    runtime: Runtime, action: str, tickers: Iterable[str] = ()
+) -> List[ManualStep]:
+    """액션 이름을 실행 단계 목록으로 바꾼다. '전체'는 하루 흐름의 진입 단계를 순서대로 이어 붙인다.
+
+    `tickers`는 '선택 매도'만 쓴다 — 다른 액션은 대상이 잔고 전체이거나 추천 결과로 정해진다.
+    """
+    selected = tuple(tickers)
     steps: Dict[str, List[ManualStep]] = {
         "recommend": [
             ManualStep(MANUAL_ACTIONS["recommend"], runtime.workflow.recommend_and_notify)
@@ -253,6 +262,13 @@ def manual_steps(runtime: Runtime, action: str) -> List[ManualStep]:
             ManualStep(
                 MANUAL_ACTIONS["sell_all"],
                 lambda: runtime.engine.force_close_all_positions(reason="manual"),
+                touches_orders=True,
+            )
+        ],
+        "sell_selected": [
+            ManualStep(
+                MANUAL_ACTIONS["sell_selected"],
+                lambda: runtime.engine.close_positions(selected, reason="manual_selected"),
                 touches_orders=True,
             )
         ],

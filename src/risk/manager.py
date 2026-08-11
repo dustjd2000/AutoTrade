@@ -85,6 +85,8 @@ class RiskManager:
         commission_rate: float = 0.00015,     # 매매수수료 (매수·매도 동일 적용)
         tax_rate: float = 0.0018,             # 증권거래세+농특세 (매도 시만)
         slippage_rate: float = 0.001,         # 시장가 청산 슬리피지 추정치
+        take_profit_enabled: bool = True,     # 익절 적용 여부 (UI 체크박스)
+        stop_loss_enabled: bool = True,       # 손절 적용 여부 (UI 체크박스)
     ):
         self.max_position_ratio = max_position_ratio
         self.max_daily_loss_ratio = max_daily_loss_ratio
@@ -94,6 +96,11 @@ class RiskManager:
         self.commission_rate = commission_rate
         self.tax_rate = tax_rate
         self.slippage_rate = slippage_rate
+        # 다른 설정과 달리 이 둘은 엔진이 도는 중에도 UI가 그대로 바꾼다 (PRD 5.5-B
+        # "익절/손절 적용 여부"). `.env`에 저장하지 않으므로 재시작하면 항상 True로 돌아간다 —
+        # 감시 공백을 만들지 않으려면 끄고 켜는 데 엔진 재시작이 끼어들면 안 된다.
+        self.take_profit_enabled = take_profit_enabled
+        self.stop_loss_enabled = stop_loss_enabled
 
         self._initial_asset: float = 0.0
         self._daily_realized_loss: float = 0.0
@@ -145,13 +152,17 @@ class RiskManager:
 
         판정은 가격 변동률이 아니라 왕복 수수료·매도세금·슬리피지를 뺀 순손익률 기준이다.
         익절선(기본 0.5%)은 이미 비용을 뺀 값이라, 도달하면 그만큼이 실수령 이익이다.
+
+        `take_profit_enabled`/`stop_loss_enabled`가 꺼져 있으면 그쪽 라인은 건너뛴다. 둘 다
+        꺼면 실시간 청산이 사라지고 15:20 강제청산만 남는다 — 합산 순손익률 계산 자체는
+        멈추지 않으므로 UI에는 그대로 표시된다.
         """
         ret = self.portfolio_return(positions)
         if ret is None:
             return None
-        if ret >= self.take_profit_ratio:
+        if self.take_profit_enabled and ret >= self.take_profit_ratio:
             return ExitReason.TAKE_PROFIT
-        if ret <= -self.stop_loss_ratio:
+        if self.stop_loss_enabled and ret <= -self.stop_loss_ratio:
             return ExitReason.STOP_LOSS
         return None
 

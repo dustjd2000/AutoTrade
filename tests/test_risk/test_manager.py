@@ -15,6 +15,8 @@ def make_manager(
     commission_rate=0.0,
     tax_rate=0.0,
     slippage_rate=0.0,
+    take_profit_enabled=True,
+    stop_loss_enabled=True,
 ):
     manager = RiskManager(
         take_profit_ratio=take_profit_ratio,
@@ -23,6 +25,8 @@ def make_manager(
         commission_rate=commission_rate,
         tax_rate=tax_rate,
         slippage_rate=slippage_rate,
+        take_profit_enabled=take_profit_enabled,
+        stop_loss_enabled=stop_loss_enabled,
     )
     manager.initialize(BalanceSnapshot(cash=initial_asset, positions={}))
     return manager
@@ -135,6 +139,44 @@ def test_positions_without_a_price_are_excluded():
     ]
 
     assert manager.check_portfolio_exit(positions) == ExitReason.TAKE_PROFIT
+
+
+def test_take_profit_can_be_disabled_without_affecting_stop_loss():
+    """익절 적용을 끄면 익절선에 닿아도 팔지 않는다 — 손절은 그대로 동작한다."""
+    manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02, take_profit_enabled=False)
+
+    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 1006.0)]) is None
+    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 980.0)]) == ExitReason.STOP_LOSS
+
+
+def test_stop_loss_can_be_disabled_without_affecting_take_profit():
+    manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02, stop_loss_enabled=False)
+
+    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 980.0)]) is None
+    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 1006.0)]) == ExitReason.TAKE_PROFIT
+
+
+def test_both_disabled_leaves_only_the_forced_close():
+    """둘 다 끄면 실시간 청산이 사라진다 — 15:20 강제청산만 남는다 (PRD 5.5-B)."""
+    manager = make_manager(take_profit_enabled=False, stop_loss_enabled=False)
+
+    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 1006.0)]) is None
+    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 980.0)]) is None
+
+
+def test_disabled_flags_do_not_stop_the_return_calculation():
+    """판정만 멈추고 합산 순손익률은 계속 계산한다 — UI 표시에 그대로 쓰인다."""
+    manager = make_manager(take_profit_enabled=False, stop_loss_enabled=False)
+
+    assert manager.portfolio_return([held("005930", 10, 1000.0, 1010.0)]) == pytest.approx(0.01)
+
+
+def test_flags_default_to_enabled():
+    """기본값은 '적용'이다 — 안전한 쪽이 기본이어야 한다."""
+    manager = RiskManager()
+
+    assert manager.take_profit_enabled is True
+    assert manager.stop_loss_enabled is True
 
 
 def test_record_order_accumulates_realized_loss_only_on_loss():

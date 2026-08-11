@@ -1,7 +1,7 @@
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional, Set
+from typing import Dict, Iterable, List, Optional, Set
 
 from src.api.auth import AuthClient
 from src.api.client import KiwoomAPIError
@@ -37,6 +37,14 @@ POSITION_CACHE_TTL_SECONDS = 5.0
 # 몇 번을 시도해도 같은 이유로 거부되는데 잔고에는 계속 남아 있어, 걸러내지 않으면
 # 감시 목록과 창 종료 경고, 다음 청산 시도에 매번 다시 올라온다 (2026-07-28 118970/395680).
 UNKNOWN_STOCK_ERROR = "종목 정보가 없"
+
+# 매도 사유를 로그·알림에 사람이 읽는 문구로 옮긴다. 사유 문자열 그대로 쓰면
+# "장마감 강제청산 (manual_selected)"처럼 실제 동작과 어긋나는 문장이 나간다.
+CLOSE_REASON_LABELS = {
+    "day_end": "장마감 강제청산",
+    "manual": "수동 전량 청산",
+    "manual_selected": "선택 매도",
+}
 
 
 @dataclass(frozen=True)
@@ -443,6 +451,42 @@ class TradingEngine:
             return
 
         logger.info("강제청산 시작 (%s) — 대상 %d종목", reason, len(holdings))
+        self._sell_positions(holdings, reason)
+
+    def close_positions(self, tickers: Iterable[str], reason: str = "manual_selected") -> None:
+        """선택한 종목만 시장가로 매도한다 (UI 보유 종목 표의 '선택 매도').
+
+        고르지 않은 종목은 그대로 보유하며 익절/손절 감시도 이어진다 — 판정은 보유 종목
+        합산이므로(PRD 5.5-B) 판 종목이 빠진 뒤의 나머지로 다시 계산된다.
+
+        `force_close_all_positions`와 주문 루프(`_sell_positions`)를 공유해 매도가능수량 0·
+        주문 거부·상장폐지 제외 처리가 갈리지 않게 한다.
+        """
+        wanted = set(tickers)
+        if not wanted:
+            logger.info("선택 매도할 종목이 지정되지 않았습니다.")
+            return
+
+        # 무엇을 파는지가 곧 결과이므로 캐시를 쓰지 않고 최신 잔고를 읽는다
+        positions = self._get_positions(force=True)
+        holdings = [
+            p for p in positions.values() if p.quantity > 0 and p.ticker in wanted
+        ]
+
+        # 고른 뒤 팔렸거나 매도 불가로 제외된 종목 — 주문을 내지 않고 알리기만 한다
+        missing = sorted(wanted - {p.ticker for p in holdings})
+        if missing:
+            logger.warning("선택 매도 대상에서 빠졌습니다 (잔고에 없음): %s", missing)
+        if not holdings:
+            logger.info("선택 매도할 보유 포지션이 없습니다.")
+            return
+
+        logger.info("선택 매도 시작 — 대상 %d종목", len(holdings))
+        self._sell_positions(holdings, reason)
+
+    def _sell_positions(self, holdings: List[Position], reason: str) -> None:
+        """주어진 보유 종목을 시장가로 매도한다 (전량 청산·선택 매도 공통 루프)."""
+        label = CLOSE_REASON_LABELS.get(reason, "청산")
         for position in holdings:
             summary = _position_summary(position)
             quantity = self._closable_or_skip(position, reason)
@@ -462,7 +506,7 @@ class TradingEngine:
 
             if result.status == OrderStatus.REJECTED:
                 logger.error(
-                    "강제청산 거부됨 (%s): %s — %s", reason, summary, result.error_message
+                    "%s 거부됨 (%s): %s — %s", label, reason, summary, result.error_message
                 )
                 # 종목정보 없음으로 제외한 건은 로그로 충분하다 (_exclude_untradable이 사유를 기록한다)
                 if not self._note_untradable(result):
@@ -472,15 +516,13 @@ class TradingEngine:
                         f"매도 주문 거부: {result.error_message}",
                     )
                     self.notify(
-                        f"[실패] 강제청산 거부: {position.label} — {result.error_message}"
+                        f"[실패] {label} 거부: {position.label} — {result.error_message}"
                     )
                 continue
 
             self._mark_exited(position.ticker)
-            logger.warning(
-                "장마감 강제청산 (%s): %s, 주문번호 %s", reason, summary, result.order_id
-            )
-            self.notify(f"장마감 강제청산 ({reason}): {summary}")
+            logger.warning("%s (%s): %s, 주문번호 %s", label, reason, summary, result.order_id)
+            self.notify(f"{label} ({reason}): {summary}")
 
     def on_market_data(self, data: MarketData) -> None:
         """WebSocket 시세 수신 시 호출되는 콜백."""

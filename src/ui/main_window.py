@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import date, datetime, time as dt_time
 from pathlib import Path
 from typing import Optional
 
@@ -10,6 +10,7 @@ from PyQt6.QtGui import QColor, QDoubleValidator, QFont, QIcon, QPalette
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QFrame,
@@ -58,9 +59,18 @@ COLOR_TEXT_DIM = "#6c7086"
 COLOR_PROFIT = "#ff5555"
 COLOR_LOSS = "#6ba3ff"
 
+# 익절/손절 적용 체크박스를 매일 다시 켜는 시각과 그 감시 주기 (PRD 5.5-B).
+# 엔진 스케줄러가 아니라 UI 타이머가 맡는다 — 엔진이 꺼져 있는 날에도 원복되어야
+# 어제 해제한 상태가 남은 채로 오늘 매매에 들어가는 일이 없다.
+EXIT_FLAG_RESET_TIME = dt_time(8, 45)
+EXIT_FLAG_RESET_CHECK_MS = 60_000
+
 # 보유 종목 표 갱신 주기 — 캐시값만 읽으므로 API 호출이 발생하지 않는다
 HOLDINGS_REFRESH_MS = 2000
-HOLDINGS_COLUMNS = ("종목", "수량", "평단", "현재가", "손익")
+# 0번 열은 '선택 매도' 대상 체크 — 표가 NoEditTriggers라 셀 체크박스는 클릭으로 토글되지
+# 않는다(실측). 체크 표시만 아이템으로 그리고 토글은 cellClicked에서 직접 처리한다.
+HOLDINGS_COLUMNS = ("선택", "종목", "수량", "평단", "현재가", "손익")
+HOLDINGS_CHECK_COLUMN = 0
 # 매도하지 못한 종목 — 보유 목록에서 제외된 건은 보유 종목 표에 나타나지 않으므로
 # 사유와 함께 따로 보여준다 (engine.UnsellableView)
 UNSELLABLE_COLUMNS = ("종목", "사유", "시각")
@@ -111,6 +121,17 @@ def _separator() -> QFrame:
     return line
 
 
+def _with_toggle(field: QLineEdit, toggle: QCheckBox) -> QWidget:
+    """입력란 오른쪽에 적용 여부 체크박스를 붙여 폼의 한 줄로 만든다 (익절/손절)."""
+    row = QWidget()
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(8)
+    layout.addWidget(field, 1)
+    layout.addWidget(toggle)
+    return row
+
+
 # ── 로그 핸들러 (UI TextEdit에 출력) ────────────────────────
 class _QtLogHandler(logging.Handler):
     def __init__(self, signal):
@@ -140,10 +161,22 @@ class MainWindow(QMainWindow):
         self._restart_pending = False
         # 보유 종목 표를 만드는 도중에도 갱신이 한 번 돌기 때문에, 아직 없을 수 있음을 표시해 둔다
         self._unsellable_box: Optional[QGroupBox] = None
+        # 익절/손절 적용 체크박스를 마지막으로 원복한 날 (None이면 아직 이번 실행에서 원복 전)
+        self._exit_flags_reset_on: Optional[date] = None
+        # '선택 매도' 대상으로 체크된 종목. 표는 2초마다 다시 그려지므로 상태를 여기 둔다
+        self._checked_tickers: set[str] = set()
+        # 즉시 실행 버튼이 마지막으로 지시받은 활성 상태 (_set_actions_enabled 참고)
+        self._actions_enabled = False
         self._setup_style()
         self._build_ui()
         self._setup_logging()
         self._load_settings()
+
+        # 엔진과 무관하게 항상 돈다 — 엔진이 꺼진 날에도 08:45 원복은 이뤄져야 한다
+        self._exit_flag_timer = QTimer(self)
+        self._exit_flag_timer.setInterval(EXIT_FLAG_RESET_CHECK_MS)
+        self._exit_flag_timer.timeout.connect(self._reset_exit_flags_daily)
+        self._exit_flag_timer.start()
 
         if auto_start:
             # 창이 완전히 뜬 뒤 "▶ 시작" 버튼을 누른 것과 동일하게 동작해야 하므로
@@ -207,6 +240,13 @@ class MainWindow(QMainWindow):
             QRadioButton {{
                 spacing: 8px;
                 padding: 4px 0;
+            }}
+            QCheckBox {{
+                spacing: 8px;
+            }}
+            QCheckBox::indicator {{
+                width: 18px;
+                height: 18px;
             }}
             QTextEdit {{
                 background: {COLOR_SURFACE};
@@ -338,14 +378,32 @@ class MainWindow(QMainWindow):
         self._buy_price_tolerance.setPlaceholderText("예: 2 (목표가 +2% 초과 시 매수 안 함)")
         self._buy_price_tolerance.setValidator(QDoubleValidator(0.0, 100.0, 2))
 
-        risk_form.addRow("익절 (%)", self._take_profit)
-        risk_form.addRow("손절 (%)", self._stop_loss)
+        # 적용 여부 체크박스 — 끄면 그 라인은 감시하지 않는다. `.env`에 저장하지 않고
+        # 엔진을 재시작하지도 않는다(끄고 싶은 순간에 감시 공백이 생기면 안 된다).
+        self._take_profit_enabled = QCheckBox("적용")
+        self._take_profit_enabled.setChecked(True)
+        self._stop_loss_enabled = QCheckBox("적용")
+        self._stop_loss_enabled.setChecked(True)
+        for toggle in (self._take_profit_enabled, self._stop_loss_enabled):
+            toggle.toggled.connect(self._on_exit_flag_toggled)
+
+        risk_form.addRow("익절 (%)", _with_toggle(self._take_profit, self._take_profit_enabled))
+        risk_form.addRow("손절 (%)", _with_toggle(self._stop_loss, self._stop_loss_enabled))
+
+        # 해제된 라인이 있으면 그 사실을 입력란 바로 아래에 띄운다 — 체크박스만으로는
+        # 눈에 잘 띄지 않는데, 손절이 꺼진 줄 모르는 것이 이 화면에서 가장 위험한 오해다
+        self._exit_flag_hint = QLabel()
+        self._exit_flag_hint.setWordWrap(True)
+        self._exit_flag_hint.setStyleSheet(f"color: {COLOR_WARNING}; font-size: 11px;")
+        self._exit_flag_hint.setVisible(False)
+        risk_form.addRow(self._exit_flag_hint)
 
         # 종목별 판정이 아니라는 점을 입력란 바로 아래에서 알려야 한다 — 한 종목이 크게
         # 무너져도 다른 종목이 상쇄하면 매도가 나가지 않는다 (PRD 5.5-B, 확정 2026-08-10)
         exit_hint = QLabel(
             "(보유 종목을 합산한 순손익 기준입니다. 조건에 닿으면 보유 종목을 전량 매도하며, "
-            "종목별 익절/손절은 없습니다)"
+            "종목별 익절/손절은 없습니다. '적용'을 끄면 그 라인은 감시하지 않으며, "
+            f"매일 {EXIT_FLAG_RESET_TIME:%H:%M}에 자동으로 다시 켜집니다)"
         )
         exit_hint.setWordWrap(True)
         exit_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
@@ -526,12 +584,19 @@ class MainWindow(QMainWindow):
         table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         table.setMinimumHeight(140)
         header = table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for col in range(1, len(HOLDINGS_COLUMNS)):
+        header.setSectionResizeMode(
+            HOLDINGS_CHECK_COLUMN, QHeaderView.ResizeMode.ResizeToContents
+        )
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)  # 종목명이 가장 길다
+        for col in range(2, len(HOLDINGS_COLUMNS)):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         table.setStyleSheet(_table_style())
+        table.cellClicked.connect(self._on_holdings_cell_clicked)
         self._holdings_view = table
         layout.addWidget(table)
+
+        # 대상을 표에서 골라야 하므로 버튼도 ①~⑤ 그리드가 아니라 표 바로 아래에 둔다
+        layout.addWidget(self._make_action_button("sell_selected"))
 
         # 표 갱신은 엔진 캐시만 읽으므로 API 호출이 발생하지 않는다 (engine.position_snapshot)
         self._holdings_timer = QTimer(self)
@@ -541,10 +606,36 @@ class MainWindow(QMainWindow):
         self._refresh_holdings()
         return box
 
+    def _on_holdings_cell_clicked(self, row: int, column: int) -> None:
+        """선택 열을 누르면 그 종목의 체크를 뒤집는다.
+
+        표가 `NoEditTriggers`라 셀 체크박스는 클릭으로 토글되지 않으므로(실측) 직접 처리한다.
+        상태는 표가 아니라 `_checked_tickers`가 갖는다 — 표는 2초마다 다시 그려진다.
+        """
+        if column != HOLDINGS_CHECK_COLUMN:
+            return
+        item = self._holdings_view.item(row, HOLDINGS_CHECK_COLUMN)
+        if item is None:
+            return
+
+        ticker = item.data(Qt.ItemDataRole.UserRole)
+        self._checked_tickers ^= {ticker}
+        self._refresh_holdings()
+
+    def _selected_labels(self, tickers: tuple) -> str:
+        """확인 팝업에 보여줄 대상 종목 — 코드만 늘어놓으면 무엇을 파는지 알기 어렵다."""
+        thread = self._engine_thread
+        labels = {p.ticker: p.label for p in thread.position_snapshot()} if thread else {}
+        return "\n".join(labels.get(ticker, f"({ticker})") for ticker in tickers)
+
     def _refresh_holdings(self) -> None:
         """매수된 종목만 표에 남긴다 — 매도된 건은 엔진 잔고에서 빠지며 함께 사라진다."""
         thread = self._engine_thread
         rows = sorted(thread.position_snapshot(), key=lambda p: p.ticker) if thread else []
+
+        # 팔렸거나 보유 목록에서 제외된 종목은 선택도 함께 거둔다 — 남겨두면 다음에 같은
+        # 종목을 다시 매수했을 때 고르지도 않은 종목이 체크된 채로 나타난다
+        self._checked_tickers &= {held.ticker for held in rows}
 
         table = self._holdings_view
         table.setRowCount(len(rows))
@@ -561,13 +652,28 @@ class MainWindow(QMainWindow):
                     color,
                 ),
             )
-            for col, (text, align, cell_color) in enumerate(cells):
+            for col, (text, align, cell_color) in enumerate(cells, start=1):
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
                 item.setForeground(QColor(cell_color))
                 table.setItem(row, col, item)
 
+            # 체크 상태의 주인은 표가 아니라 _checked_tickers다 (_on_holdings_cell_clicked).
+            # ItemIsUserCheckable을 빼는 것이 중요하다 — 그 플래그가 있으면 체크 표시를
+            # 정확히 눌렀을 때 Qt 델리게이트가 한 번 더 뒤집어 클릭이 상쇄된다.
+            check = QTableWidgetItem()
+            check.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            check.setData(Qt.ItemDataRole.UserRole, held.ticker)
+            check.setCheckState(
+                Qt.CheckState.Checked
+                if held.ticker in self._checked_tickers
+                else Qt.CheckState.Unchecked
+            )
+            table.setItem(row, HOLDINGS_CHECK_COLUMN, check)
+
         self._holdings_hint.setText(self._holdings_summary(rows))
+        # 체크된 종목이 늘거나 줄면 '선택 매도' 버튼의 활성 여부가 달라진다
+        self._set_actions_enabled(self._actions_enabled)
         # 표를 만드는 도중에 불리는 첫 호출에서는 매도 불가 표가 아직 없다
         if self._unsellable_box is not None:
             self._refresh_unsellable()
@@ -615,12 +721,20 @@ class MainWindow(QMainWindow):
         ret = self._engine_thread.portfolio_return()
         if ret is None:
             return ""
-        # 지금 향하고 있는 쪽 라인만 붙인다 — 둘 다 적으면 한 줄에 들어가지 않는다
-        line = (
-            f"익절 +{self._take_profit.text().strip() or '0.5'}%"
-            if ret >= 0
-            else f"손절 -{self._stop_loss.text().strip() or '2'}%"
-        )
+        # 지금 향하고 있는 쪽 라인만 붙인다 — 둘 다 적으면 한 줄에 들어가지 않는다.
+        # 해제된 쪽은 값 대신 '해제'로 적는다 — 닿아도 팔리지 않으므로 숫자를 보이면 오해한다.
+        if ret >= 0:
+            line = (
+                f"익절 +{self._take_profit.text().strip() or '0.5'}%"
+                if self._take_profit_enabled.isChecked()
+                else "익절 해제"
+            )
+        else:
+            line = (
+                f"손절 -{self._stop_loss.text().strip() or '2'}%"
+                if self._stop_loss_enabled.isChecked()
+                else "손절 해제"
+            )
         return f" · 합산 순손익 {ret * 100:+.2f}% ({line})"
 
     # ── 매도 불가 ────────────────────────────────────────────
@@ -691,6 +805,91 @@ class MainWindow(QMainWindow):
             f"오늘 매도하지 못한 종목 {len(rows)}건 (보유 목록 제외 {excluded}건) — "
             "제외된 종목은 계좌에 남아 있으며 자동 청산되지 않습니다. 직접 확인하세요."
         )
+
+    # ── 익절/손절 적용 여부 ──────────────────────────────────
+    def _on_exit_flag_toggled(self) -> None:
+        """체크박스 상태를 돌고 있는 엔진에 그대로 밀어 넣는다 (재시작하지 않는다).
+
+        `.env`에 저장하지 않으므로 앱을 다시 켜면 항상 '적용'으로 돌아간다 — 매일 08:45
+        원복과 같은 방향(안전한 쪽이 기본)이다.
+        """
+        take_profit = self._take_profit_enabled.isChecked()
+        stop_loss = self._stop_loss_enabled.isChecked()
+        self._refresh_exit_flag_hint()
+
+        thread = self._engine_thread
+        if thread is None or not thread.set_exit_flags(take_profit, stop_loss):
+            return
+
+        state = (
+            f"익절 {'적용' if take_profit else '해제'} / 손절 {'적용' if stop_loss else '해제'}"
+        )
+        if take_profit and stop_loss:
+            logger.info("청산 조건 변경 — %s", state)
+        else:
+            logger.warning("청산 조건 변경 — %s. 해제된 라인은 감시하지 않습니다.", state)
+
+    def _exit_watch_text(self) -> str:
+        """매수 확인 팝업에 넣을 청산 감시 안내 — 해제된 라인은 빼고 알린다."""
+        lines = []
+        if self._take_profit_enabled.isChecked():
+            lines.append(f"익절 +{self._take_profit.text().strip() or '0.5'}%")
+        if self._stop_loss_enabled.isChecked():
+            lines.append(f"손절 -{self._stop_loss.text().strip() or '2'}%")
+
+        if not lines:
+            return (
+                "⚠ 익절/손절이 모두 해제되어 있어 매수 후 실시간 청산이 동작하지 않습니다.\n"
+                "15:20 강제청산까지 보유합니다."
+            )
+        prefix = "" if len(lines) == 2 else "⚠ "
+        return (
+            f"{prefix}매수 후에는 보유 종목 합산 순손익 기준 {' / '.join(lines)} 라인이 "
+            "자동 감시되며, 닿으면 전량 매도합니다 (엔진이 켜져 있는 동안만)."
+        )
+
+    def _refresh_exit_flag_hint(self) -> None:
+        """해제된 라인이 있을 때만 경고 문구를 띄운다."""
+        disabled = [
+            name
+            for name, toggle in (
+                ("익절", self._take_profit_enabled),
+                ("손절", self._stop_loss_enabled),
+            )
+            if not toggle.isChecked()
+        ]
+        self._exit_flag_hint.setVisible(bool(disabled))
+        if not disabled:
+            return
+
+        tail = (
+            "실시간 청산이 동작하지 않아 15:20 강제청산까지 보유합니다."
+            if len(disabled) == 2
+            else "그 라인에 닿아도 매도하지 않습니다."
+        )
+        self._exit_flag_hint.setText(f"⚠ {' / '.join(disabled)} 적용 해제됨 — {tail}")
+
+    def _reset_exit_flags_daily(self) -> None:
+        """매일 EXIT_FLAG_RESET_TIME(08:45)에 두 체크박스를 다시 켠다 (PRD 5.5-B).
+
+        해제는 그날 하루짜리 판단이라는 전제다 — 어제 끈 손절이 오늘까지 꺼진 채로 남으면
+        감시가 빠진 줄 모르고 매매에 들어간다. 엔진이 꺼져 있어도 원복되도록 UI가 맡는다.
+        """
+        now = datetime.now()
+        if now.date() == self._exit_flags_reset_on or now.time() < EXIT_FLAG_RESET_TIME:
+            return
+
+        self._exit_flags_reset_on = now.date()
+        if self._take_profit_enabled.isChecked() and self._stop_loss_enabled.isChecked():
+            return  # 이미 둘 다 켜져 있으면 되돌릴 것이 없다
+
+        logger.info(
+            "%s — 익절/손절 적용을 기본값(적용)으로 되돌립니다.",
+            f"{EXIT_FLAG_RESET_TIME:%H:%M}",
+        )
+        # setChecked가 toggled를 발생시켜 엔진 반영과 문구 갱신까지 이어진다
+        self._take_profit_enabled.setChecked(True)
+        self._stop_loss_enabled.setChecked(True)
 
     # ── 설정 저장/불러오기 ───────────────────────────────────
     def _load_settings(self) -> None:
@@ -919,8 +1118,17 @@ class MainWindow(QMainWindow):
         btn.setStyleSheet(style)
 
     def _set_actions_enabled(self, enabled: bool) -> None:
+        # 보유 종목 표가 2초마다 이 값을 그대로 다시 적용하므로(체크가 바뀌면 '선택 매도'의
+        # 활성 여부도 바뀐다) 마지막으로 지시받은 상태를 기억해 둔다
+        self._actions_enabled = enabled
         for action in self._action_buttons:
-            self._style_action_button(action, enabled)
+            self._style_action_button(action, enabled and self._action_has_target(action))
+
+    def _action_has_target(self, action: str) -> bool:
+        """대상이 정해져야만 누를 수 있는 액션인지 — 선택 매도는 체크된 종목이 있어야 한다."""
+        if action == "sell_selected":
+            return bool(self._checked_tickers)
+        return True
 
     def _run_action(self, action: str) -> None:
         thread = self._engine_thread
@@ -929,15 +1137,21 @@ class MainWindow(QMainWindow):
             self._statusbar.showMessage("엔진을 먼저 시작하세요.", 4000)
             return
 
-        # 주문이 나가는 액션은 실수 클릭을 막기 위해 한 번 확인한다
-        if action in ORDER_ACTIONS and not self._confirm_action(action):
+        # 확인 팝업을 띄우는 사이에 표가 갱신되어 대상이 바뀌지 않도록 여기서 한 번 집는다
+        tickers = sorted(self._checked_tickers) if action == "sell_selected" else ()
+        if action == "sell_selected" and not tickers:
+            self._statusbar.showMessage("매도할 종목을 먼저 선택하세요.", 4000)
             return
 
-        if thread.run_action(action):
+        # 주문이 나가는 액션은 실수 클릭을 막기 위해 한 번 확인한다
+        if action in ORDER_ACTIONS and not self._confirm_action(action, tickers):
+            return
+
+        if thread.run_action(action, tickers):
             self._set_actions_enabled(False)
             self._statusbar.showMessage(f"즉시 실행 요청: {MANUAL_ACTIONS[action]}")
 
-    def _confirm_action(self, action: str) -> bool:
+    def _confirm_action(self, action: str, tickers: tuple = ()) -> bool:
         detail = {
             "buy": (
                 "추천 종목을 목표 매수가에 지정가로 매수합니다.\n"
@@ -949,12 +1163,15 @@ class MainWindow(QMainWindow):
                 "이미 체결된 종목은 그대로 두고 보유합니다."
             ),
             "sell_all": "보유 중인 모든 포지션을 시장가로 청산합니다.",
+            "sell_selected": (
+                f"선택한 {len(tickers)}종목을 시장가로 매도합니다.\n"
+                f"{self._selected_labels(tickers)}\n\n"
+                "나머지 보유 종목은 그대로 두며, 익절/손절은 남은 종목의 합산 손익으로 "
+                "다시 판정됩니다."
+            ),
             "full": (
                 "LLM 추천 + 메일 → 목표가 지정가 매수를 순서대로 실행합니다.\n"
-                f"매수 후에는 보유 종목 합산 순손익 기준 익절 "
-                f"+{self._take_profit.text().strip() or '0.5'}% / "
-                f"손절 -{self._stop_loss.text().strip() or '2'}% 라인이 자동 감시되며, "
-                "닿으면 전량 매도합니다 (엔진이 켜져 있는 동안만).\n"
+                f"{self._exit_watch_text()}\n"
                 "청산(15:20)과 최종 리포트(15:30)는 지금 실행하지 않고 예정 시각에 맡깁니다."
             ),
         }[action]
@@ -1051,6 +1268,10 @@ class MainWindow(QMainWindow):
 
     def _set_engine_running(self, running: bool) -> None:
         self._set_actions_enabled(running)
+        # 새로 뜬 엔진은 기본값(둘 다 적용)으로 시작하므로, 화면에서 해제해 둔 상태를
+        # 여기서 다시 밀어 넣어야 시작·재시작 뒤에도 어긋나지 않는다
+        if running:
+            self._on_exit_flag_toggled()
         # 정지 상태에서는 읽을 잔고가 없으므로 표 갱신도 멈춘다
         if running:
             self._holdings_timer.start()

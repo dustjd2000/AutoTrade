@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from concurrent.futures import Future
-from typing import Optional
+from typing import Iterable, Optional
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -92,17 +92,35 @@ class EngineThread(QThread):
             return None
         return runtime.engine.cash_snapshot()
 
+    def set_exit_flags(self, take_profit: bool, stop_loss: bool) -> bool:
+        """익절/손절 적용 여부를 돌고 있는 엔진에 바로 반영한다. 반영했으면 True.
+
+        다른 리스크 설정과 달리 `.env` 저장 → 엔진 재시작 경로를 타지 않는다. 재시작 사이에는
+        WebSocket이 끊겨 감시가 멈추는데, 정작 손절을 끄고 싶은 순간에 그 공백이 생긴다.
+
+        bool 대입은 원자적이고 주문을 내지 않으므로 `run_action`처럼 루프 스레드로 넘겨
+        직렬화할 필요가 없다 — 다음 시세 틱의 판정부터 바뀐 값이 쓰인다.
+        """
+        runtime = self._runtime
+        if runtime is None:
+            return False
+        runtime.engine.risk_manager.take_profit_enabled = take_profit
+        runtime.engine.risk_manager.stop_loss_enabled = stop_loss
+        return True
+
     # ── 즉시 실행 ────────────────────────────────────────────
     @property
     def action_busy(self) -> bool:
         return self._action_busy
 
-    def run_action(self, action: str) -> bool:
+    def run_action(self, action: str, tickers: Iterable[str] = ()) -> bool:
         """스케줄 시각과 무관하게 하루 흐름의 단계를 지금 실행한다.
 
         주문을 내는 단계는 엔진 루프 스레드에서 실행해 실시간 시세 콜백과 직렬화하고
         (같은 종목을 동시에 청산하는 경쟁 상태 방지), 오래 걸리는 수집·LLM·메일은
         별도 스레드로 넘긴다. 예약에 성공하면 True — 완료는 action_finished로 알린다.
+
+        `tickers`는 '선택 매도'만 쓴다 (`manual_steps` 참고).
         """
         loop, runtime = self._loop, self._runtime
         if runtime is None or loop is None or not loop.is_running():
@@ -113,7 +131,7 @@ class EngineThread(QThread):
             return False
 
         try:
-            steps = runtime_module.manual_steps(runtime, action)
+            steps = runtime_module.manual_steps(runtime, action, tickers)
         except ValueError:
             logger.error("알 수 없는 즉시 실행 액션: %s", action)
             return False
