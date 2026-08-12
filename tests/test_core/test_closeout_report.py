@@ -48,6 +48,7 @@ def make_engine(positions, sell_status=OrderStatus.FILLED):
             initialize=lambda s: None,
             record_order=lambda *a, **kw: None,
             check_portfolio_exit=lambda ps: None,
+            check_simple_take_profits=lambda ps: [],
         ),
     )
 

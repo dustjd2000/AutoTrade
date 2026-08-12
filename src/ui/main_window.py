@@ -59,10 +59,13 @@ COLOR_TEXT_DIM = "#6c7086"
 COLOR_PROFIT = "#ff5555"
 COLOR_LOSS = "#6ba3ff"
 
-# 익절/손절 적용 체크박스를 매일 다시 켜는 시각과 그 감시 주기 (PRD 5.5-B).
+# 익절/손절/단순익절 적용 체크박스를 매일 다시 켜는 시각과 그 감시 주기 (PRD 5.5-B).
 # 엔진 스케줄러가 아니라 UI 타이머가 맡는다 — 엔진이 꺼져 있는 날에도 원복되어야
 # 어제 해제한 상태가 남은 채로 오늘 매매에 들어가는 일이 없다.
-EXIT_FLAG_RESET_TIME = dt_time(8, 45)
+# 08:45가 아니라 08:00인 것은, 추천 시각이 설정값(08:40~08:55)이라 08:45 원복이 그날의
+# 추천·매수 판단보다 뒤로 밀릴 수 있고, 장 준비 중에 끈 라인이 25분 만에 되켜지기
+# 때문이다 (확정 2026-08-12).
+EXIT_FLAG_RESET_TIME = dt_time(8, 0)
 EXIT_FLAG_RESET_CHECK_MS = 60_000
 
 # 보유 종목 표 갱신 주기 — 캐시값만 읽으므로 API 호출이 발생하지 않는다
@@ -121,14 +124,18 @@ def _separator() -> QFrame:
     return line
 
 
-def _with_toggle(field: QLineEdit, toggle: QCheckBox) -> QWidget:
-    """입력란 오른쪽에 적용 여부 체크박스를 붙여 폼의 한 줄로 만든다 (익절/손절)."""
+def _with_toggle(field: QLineEdit, *toggles: QCheckBox) -> QWidget:
+    """입력란 오른쪽에 적용 여부 체크박스를 붙여 폼의 한 줄로 만든다 (익절/손절).
+
+    익절 행은 '적용'과 '단순익절적용' 두 개를 단다.
+    """
     row = QWidget()
     layout = QHBoxLayout(row)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(8)
     layout.addWidget(field, 1)
-    layout.addWidget(toggle)
+    for toggle in toggles:
+        layout.addWidget(toggle)
     return row
 
 
@@ -161,8 +168,12 @@ class MainWindow(QMainWindow):
         self._restart_pending = False
         # 보유 종목 표를 만드는 도중에도 갱신이 한 번 돌기 때문에, 아직 없을 수 있음을 표시해 둔다
         self._unsellable_box: Optional[QGroupBox] = None
-        # 익절/손절 적용 체크박스를 마지막으로 원복한 날 (None이면 아직 이번 실행에서 원복 전)
+        # 익절/손절/단순익절 적용 체크박스를 마지막으로 원복한 날
+        # (None이면 아직 이번 실행에서 원복 전)
         self._exit_flags_reset_on: Optional[date] = None
+        # 배타 처리로 반대쪽 체크박스를 끄는 동안 True — 그때 딸려오는 toggled는 무시한다
+        # (안 그러면 같은 상태로 엔진 반영과 로그가 두 번 나간다)
+        self._syncing_exit_flags = False
         # '선택 매도' 대상으로 체크된 종목. 표는 2초마다 다시 그려지므로 상태를 여기 둔다
         self._checked_tickers: set[str] = set()
         # 즉시 실행 버튼이 마지막으로 지시받은 활성 상태 (_set_actions_enabled 참고)
@@ -171,8 +182,11 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._setup_logging()
         self._load_settings()
+        # 체크박스 초기값은 연결 전에 setChecked로 넣어 toggled가 울리지 않는다 — 입력란
+        # 활성/비활성 같은 연동 상태를 여기서 한 번 맞춰 준다 (엔진은 아직 없으므로 반영은 생략됨)
+        self._on_exit_flag_toggled()
 
-        # 엔진과 무관하게 항상 돈다 — 엔진이 꺼진 날에도 08:45 원복은 이뤄져야 한다
+        # 엔진과 무관하게 항상 돈다 — 엔진이 꺼진 날에도 원복은 이뤄져야 한다
         self._exit_flag_timer = QTimer(self)
         self._exit_flag_timer.setInterval(EXIT_FLAG_RESET_CHECK_MS)
         self._exit_flag_timer.timeout.connect(self._reset_exit_flags_daily)
@@ -216,6 +230,13 @@ class MainWindow(QMainWindow):
             QLineEdit:focus {{
                 border: 1px solid {COLOR_ACCENT};
             }}
+            /* 비활성 위젯은 눈에 띄게 죽여 둔다 — 스타일시트를 씌우면 Qt 기본
+               disabled 표현(팔레트 기반)이 먹지 않아 활성 상태와 구분되지 않는다 */
+            QLineEdit:disabled {{
+                background: {COLOR_BG};
+                border: 1px solid {COLOR_BORDER};
+                color: {COLOR_TEXT_DIM};
+            }}
             QComboBox {{
                 background: {COLOR_SURFACE};
                 border: 1px solid {COLOR_BORDER};
@@ -225,6 +246,10 @@ class MainWindow(QMainWindow):
             }}
             QComboBox:focus {{
                 border: 1px solid {COLOR_ACCENT};
+            }}
+            QComboBox:disabled {{
+                background: {COLOR_BG};
+                color: {COLOR_TEXT_DIM};
             }}
             QComboBox QAbstractItemView {{
                 background: {COLOR_SURFACE};
@@ -247,6 +272,13 @@ class MainWindow(QMainWindow):
             QCheckBox::indicator {{
                 width: 18px;
                 height: 18px;
+            }}
+            QCheckBox:disabled, QRadioButton:disabled, QLabel:disabled {{
+                color: {COLOR_TEXT_DIM};
+            }}
+            QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {{
+                border: 1px solid {COLOR_BORDER};
+                background: {COLOR_BG};
             }}
             QTextEdit {{
                 background: {COLOR_SURFACE};
@@ -365,8 +397,8 @@ class MainWindow(QMainWindow):
         risk_form.setSpacing(8)
         risk_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # 익절·손절 두 값은 수수료·세금·슬리피지를 뺀 '순손익률' 기준이며, 종목별이 아니라
-        # 보유 종목을 합산한 값으로 판정한다 (PRD 5.5-B)
+        # 익절·손절 두 값은 수수료·세금·슬리피지를 뺀 '순손익률' 기준이며, 보유 종목을
+        # 합산한 값으로 판정한다 (PRD 5.5-B). 종목별 판정은 단순익절 하나뿐이다.
         self._take_profit = QLineEdit()
         self._take_profit.setPlaceholderText("예: 0.5 (합산 순손익 +0.5%)")
         self._take_profit.setValidator(QDoubleValidator(0.0, 100.0, 2))
@@ -384,14 +416,32 @@ class MainWindow(QMainWindow):
 
         # 적용 여부 체크박스 — 끄면 그 라인은 감시하지 않는다. `.env`에 저장하지 않고
         # 엔진을 재시작하지도 않는다(끄고 싶은 순간에 감시 공백이 생기면 안 된다).
+        # 익절 '적용'만 기본 해제인데, 익절의 기본 방식이 아래 단순익절이기 때문이다.
         self._take_profit_enabled = QCheckBox("적용")
-        self._take_profit_enabled.setChecked(True)
+        self._take_profit_enabled.setChecked(False)
         self._stop_loss_enabled = QCheckBox("적용")
         self._stop_loss_enabled.setChecked(True)
-        for toggle in (self._take_profit_enabled, self._stop_loss_enabled):
-            toggle.toggled.connect(self._on_exit_flag_toggled)
+        # 단순익절 — 익절선을 입력값(%)이 아니라 0으로 두고 종목별로 판정한다. 위 '적용'
+        # (합산 퍼센트 익절)과는 배타적이라 한쪽을 켜면 다른 쪽이 꺼진다. 둘 다 끄면 익절 없음.
+        self._simple_take_profit_enabled = QCheckBox("단순익절적용")
+        self._simple_take_profit_enabled.setChecked(True)
+        self._simple_take_profit_enabled.setToolTip(
+            "종목마다 따로 봅니다 — 그 종목의 순손익이 0을 넘으면(비용을 빼고 조금이라도 "
+            "이익이면) 그 종목만 즉시 매도하고 나머지는 계속 보유합니다."
+        )
+        self._take_profit_enabled.setToolTip(
+            "보유 종목을 합산한 순손익이 익절(%)에 닿으면 전량 매도합니다."
+        )
+        self._take_profit_enabled.toggled.connect(self._on_take_profit_toggled)
+        self._simple_take_profit_enabled.toggled.connect(self._on_simple_take_profit_toggled)
+        self._stop_loss_enabled.toggled.connect(self._on_exit_flag_toggled)
 
-        risk_form.addRow("익절 (%)", _with_toggle(self._take_profit, self._take_profit_enabled))
+        risk_form.addRow(
+            "익절 (%)",
+            _with_toggle(
+                self._take_profit, self._take_profit_enabled, self._simple_take_profit_enabled
+            ),
+        )
         risk_form.addRow("손절 (%)", _with_toggle(self._stop_loss, self._stop_loss_enabled))
 
         # 해제된 라인이 있으면 그 사실을 입력란 바로 아래에 띄운다 — 체크박스만으로는
@@ -405,9 +455,13 @@ class MainWindow(QMainWindow):
         # 종목별 판정이 아니라는 점을 입력란 바로 아래에서 알려야 한다 — 한 종목이 크게
         # 무너져도 다른 종목이 상쇄하면 매도가 나가지 않는다 (PRD 5.5-B, 확정 2026-08-10)
         exit_hint = QLabel(
-            "(보유 종목을 합산한 순손익 기준입니다. 조건에 닿으면 보유 종목을 전량 매도하며, "
-            "종목별 익절/손절은 없습니다. '적용'을 끄면 그 라인은 감시하지 않으며, "
-            f"매일 {EXIT_FLAG_RESET_TIME:%H:%M}에 자동으로 다시 켜집니다)"
+            "(손절과 익절(%)은 보유 종목을 합산한 순손익 기준이며, 닿으면 보유 종목을 전량 "
+            "매도합니다. '단순익절적용'만 종목별입니다 — 그 종목의 순손익이 0을 넘으면 비용을 "
+            "빼고 조금이라도 이익인 것이므로 그 종목만 팔고 나머지는 계속 보유하며, 익절(%) "
+            "입력란은 쓰이지 않습니다. 익절 '적용'과 '단순익절적용'은 둘 중 하나만 켜지고, "
+            "둘 다 끄면 익절이 없습니다. 이익 난 종목이 먼저 빠지면 남은 종목의 손실을 상쇄할 "
+            "것이 없어져 합산 손절이 더 쉽게 걸립니다. "
+            f"매일 {EXIT_FLAG_RESET_TIME:%H:%M}에 손절과 단순익절이 자동으로 다시 켜집니다)"
         )
         exit_hint.setWordWrap(True)
         exit_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
@@ -740,11 +794,7 @@ class MainWindow(QMainWindow):
         # 지금 향하고 있는 쪽 라인만 붙인다 — 둘 다 적으면 한 줄에 들어가지 않는다.
         # 해제된 쪽은 값 대신 '해제'로 적는다 — 닿아도 팔리지 않으므로 숫자를 보이면 오해한다.
         if ret >= 0:
-            line = (
-                f"익절 +{self._take_profit.text().strip() or '0.5'}%"
-                if self._take_profit_enabled.isChecked()
-                else "익절 해제"
-            )
+            line = self._take_profit_label() if self._take_profit_watched() else "익절 해제"
         else:
             line = (
                 f"손절 -{self._stop_loss.text().strip() or '2'}%"
@@ -823,24 +873,60 @@ class MainWindow(QMainWindow):
         )
 
     # ── 익절/손절 적용 여부 ──────────────────────────────────
+    def _on_take_profit_toggled(self, checked: bool) -> None:
+        """퍼센트 익절(합산)과 단순익절(종목별)은 배타적이다 — 켜는 쪽이 다른 쪽을 끈다."""
+        if checked:
+            self._uncheck_quietly(self._simple_take_profit_enabled)
+        self._on_exit_flag_toggled()
+
+    def _on_simple_take_profit_toggled(self, checked: bool) -> None:
+        if checked:
+            self._uncheck_quietly(self._take_profit_enabled)
+        self._on_exit_flag_toggled()
+
+    def _uncheck_quietly(self, toggle: QCheckBox) -> None:
+        """반대쪽 체크박스를 끄되, 그때 딸려오는 toggled 처리는 건너뛴다.
+
+        끄지 않으면 같은 최종 상태로 엔진 반영과 로그가 두 번 나간다 — 실제 작업은 배타
+        처리를 시작한 바깥쪽 핸들러가 한 번만 한다.
+        """
+        if not toggle.isChecked():
+            return
+        self._syncing_exit_flags = True
+        try:
+            toggle.setChecked(False)
+        finally:
+            self._syncing_exit_flags = False
+
     def _on_exit_flag_toggled(self) -> None:
         """체크박스 상태를 돌고 있는 엔진에 그대로 밀어 넣는다 (재시작하지 않는다).
 
-        `.env`에 저장하지 않으므로 앱을 다시 켜면 항상 '적용'으로 돌아간다 — 매일 08:45
-        원복과 같은 방향(안전한 쪽이 기본)이다.
+        `.env`에 저장하지 않으므로 앱을 다시 켜면 항상 기본값(단순익절 + 손절)으로 돌아간다
+        — 매일 08:00 원복과 같은 방향이다.
         """
+        if self._syncing_exit_flags:
+            return
+
         take_profit = self._take_profit_enabled.isChecked()
         stop_loss = self._stop_loss_enabled.isChecked()
+        simple_take_profit = self._simple_take_profit_enabled.isChecked()
+
+        # 단순익절은 익절선을 0으로 보므로 입력값(%)이 쓰이지 않는다
+        self._take_profit.setEnabled(not simple_take_profit)
         self._refresh_exit_flag_hint()
 
         thread = self._engine_thread
-        if thread is None or not thread.set_exit_flags(take_profit, stop_loss):
+        if thread is None or not thread.set_exit_flags(take_profit, stop_loss, simple_take_profit):
             return
 
-        state = (
-            f"익절 {'적용' if take_profit else '해제'} / 손절 {'적용' if stop_loss else '해제'}"
-        )
-        if take_profit and stop_loss:
+        if simple_take_profit:
+            take_profit_state = "단순익절(종목별)"
+        elif take_profit:
+            take_profit_state = "적용"
+        else:
+            take_profit_state = "해제"
+        state = f"익절 {take_profit_state} / 손절 {'적용' if stop_loss else '해제'}"
+        if (take_profit or simple_take_profit) and stop_loss:
             logger.info("청산 조건 변경 — %s", state)
         else:
             logger.warning("청산 조건 변경 — %s. 해제된 라인은 감시하지 않습니다.", state)
@@ -856,11 +942,27 @@ class MainWindow(QMainWindow):
             return "갭 하락 판정은 꺼져 있습니다 (전일 종가보다 얼마나 낮게 시작하든 매수합니다)."
         return f"전일 종가보다 {percent:g}% 넘게 낮게 시작한 종목도 건너뜁니다."
 
+    def _take_profit_label(self) -> str:
+        """익절 라인을 한 줄로 적는다 — 방식에 따라 기준선도 판정 단위도 다르다.
+
+        둘 다 꺼져 있으면 호출부가 '익절 해제'로 적으므로 여기서는 다루지 않는다.
+        """
+        if self._simple_take_profit_enabled.isChecked():
+            return "단순익절(종목별) 0% 초과"
+        return f"익절 +{self._take_profit.text().strip() or '0.5'}%"
+
+    def _take_profit_watched(self) -> bool:
+        """익절이 어떤 방식으로든 감시되고 있는지 — 두 체크박스는 배타적이다."""
+        return (
+            self._take_profit_enabled.isChecked()
+            or self._simple_take_profit_enabled.isChecked()
+        )
+
     def _exit_watch_text(self) -> str:
         """매수 확인 팝업에 넣을 청산 감시 안내 — 해제된 라인은 빼고 알린다."""
         lines = []
-        if self._take_profit_enabled.isChecked():
-            lines.append(f"익절 +{self._take_profit.text().strip() or '0.5'}%")
+        if self._take_profit_watched():
+            lines.append(self._take_profit_label())
         if self._stop_loss_enabled.isChecked():
             lines.append(f"손절 -{self._stop_loss.text().strip() or '2'}%")
 
@@ -870,21 +972,33 @@ class MainWindow(QMainWindow):
                 "15:20 강제청산까지 보유합니다."
             )
         prefix = "" if len(lines) == 2 else "⚠ "
+        # 단순익절만 종목별로 그 종목만 팔고, 나머지 라인은 합산 판정에 전량 매도다
+        unit = (
+            "매수 후에는 종목별 순손익 기준"
+            if self._simple_take_profit_enabled.isChecked()
+            else "매수 후에는 보유 종목 합산 순손익 기준"
+        )
+        tail = (
+            "닿은 종목만 매도합니다"
+            if self._simple_take_profit_enabled.isChecked()
+            else "닿으면 전량 매도합니다"
+        )
         return (
-            f"{prefix}매수 후에는 보유 종목 합산 순손익 기준 {' / '.join(lines)} 라인이 "
-            "자동 감시되며, 닿으면 전량 매도합니다 (엔진이 켜져 있는 동안만)."
+            f"{prefix}{unit} {' / '.join(lines)} 라인이 자동 감시되며, "
+            f"{tail} (엔진이 켜져 있는 동안만)."
         )
 
     def _refresh_exit_flag_hint(self) -> None:
-        """해제된 라인이 있을 때만 경고 문구를 띄운다."""
-        disabled = [
-            name
-            for name, toggle in (
-                ("익절", self._take_profit_enabled),
-                ("손절", self._stop_loss_enabled),
-            )
-            if not toggle.isChecked()
-        ]
+        """해제된 라인이 있을 때만 경고 문구를 띄운다.
+
+        익절은 두 체크박스 중 어느 쪽도 켜지지 않았을 때만 '해제'다 — 단순익절로 감시
+        중인데 '익절 적용 해제됨'이라고 띄우면 정반대로 읽힌다.
+        """
+        disabled = []
+        if not self._take_profit_watched():
+            disabled.append("익절")
+        if not self._stop_loss_enabled.isChecked():
+            disabled.append("손절")
         self._exit_flag_hint.setVisible(bool(disabled))
         if not disabled:
             return
@@ -897,26 +1011,30 @@ class MainWindow(QMainWindow):
         self._exit_flag_hint.setText(f"⚠ {' / '.join(disabled)} 적용 해제됨 — {tail}")
 
     def _reset_exit_flags_daily(self) -> None:
-        """매일 EXIT_FLAG_RESET_TIME(08:45)에 두 체크박스를 다시 켠다 (PRD 5.5-B).
+        """매일 EXIT_FLAG_RESET_TIME(08:00)에 체크박스를 기본 상태로 되돌린다 (PRD 5.5-B).
 
         해제는 그날 하루짜리 판단이라는 전제다 — 어제 끈 손절이 오늘까지 꺼진 채로 남으면
         감시가 빠진 줄 모르고 매매에 들어간다. 엔진이 꺼져 있어도 원복되도록 UI가 맡는다.
+
+        기본 상태는 **손절 + 단순익절**이다. 익절 '적용'(합산 퍼센트 익절)은 단순익절과
+        배타적이라 여기서 켜지 않는다 — 단순익절을 켜면 자동으로 꺼진다.
         """
         now = datetime.now()
         if now.date() == self._exit_flags_reset_on or now.time() < EXIT_FLAG_RESET_TIME:
             return
 
         self._exit_flags_reset_on = now.date()
-        if self._take_profit_enabled.isChecked() and self._stop_loss_enabled.isChecked():
-            return  # 이미 둘 다 켜져 있으면 되돌릴 것이 없다
+        defaults = (self._stop_loss_enabled, self._simple_take_profit_enabled)
+        if all(toggle.isChecked() for toggle in defaults):
+            return  # 이미 기본 상태면 되돌릴 것이 없다
 
         logger.info(
-            "%s — 익절/손절 적용을 기본값(적용)으로 되돌립니다.",
+            "%s — 청산 조건을 기본값(손절 + 단순익절)으로 되돌립니다.",
             f"{EXIT_FLAG_RESET_TIME:%H:%M}",
         )
-        # setChecked가 toggled를 발생시켜 엔진 반영과 문구 갱신까지 이어진다
-        self._take_profit_enabled.setChecked(True)
-        self._stop_loss_enabled.setChecked(True)
+        # setChecked가 toggled를 발생시켜 배타 처리·엔진 반영·문구 갱신까지 이어진다
+        for toggle in defaults:
+            toggle.setChecked(True)
 
     # ── 설정 저장/불러오기 ───────────────────────────────────
     def _load_settings(self) -> None:

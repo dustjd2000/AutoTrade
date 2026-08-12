@@ -92,8 +92,8 @@ class EngineThread(QThread):
             return None
         return runtime.engine.cash_snapshot()
 
-    def set_exit_flags(self, take_profit: bool, stop_loss: bool) -> bool:
-        """익절/손절 적용 여부를 돌고 있는 엔진에 바로 반영한다. 반영했으면 True.
+    def set_exit_flags(self, take_profit: bool, stop_loss: bool, simple_take_profit: bool) -> bool:
+        """익절/손절/단순익절 적용 여부를 돌고 있는 엔진에 바로 반영한다. 반영했으면 True.
 
         다른 리스크 설정과 달리 `.env` 저장 → 엔진 재시작 경로를 타지 않는다. 재시작 사이에는
         WebSocket이 끊겨 감시가 멈추는데, 정작 손절을 끄고 싶은 순간에 그 공백이 생긴다.
@@ -106,6 +106,7 @@ class EngineThread(QThread):
             return False
         runtime.engine.risk_manager.take_profit_enabled = take_profit
         runtime.engine.risk_manager.stop_loss_enabled = stop_loss
+        runtime.engine.risk_manager.simple_take_profit_enabled = simple_take_profit
         return True
 
     # ── 즉시 실행 ────────────────────────────────────────────

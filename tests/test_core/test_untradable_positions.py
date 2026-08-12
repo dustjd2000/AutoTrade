@@ -83,6 +83,7 @@ def make_engine(account, error_message=UNKNOWN_STOCK, exit_reason=None, market_d
             initialize=lambda s: None,
             record_order=lambda *a, **kw: None,
             check_portfolio_exit=lambda ps: exit_reason,
+            check_simple_take_profits=lambda ps: [],
             portfolio_return=lambda ps: None,
         ),
     )

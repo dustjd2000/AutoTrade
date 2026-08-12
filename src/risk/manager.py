@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, List, Optional
 
 from src.api.account import BalanceSnapshot, Position
 from src.core.events import ExitReason, OrderRequest, OrderResult, OrderSide, OrderStatus
@@ -31,8 +31,9 @@ def exit_trigger_price(
 ) -> float:
     """순손익률이 target_ratio에 도달하는 현재가 — net_return의 역함수 (표시용).
 
-    익절/손절은 보유 종목 합산으로 판정하므로(PRD 5.5-B) 이 가격에 닿아도 그 종목만
-    팔리지는 않는다. "이 종목 혼자였다면 조건에 닿는 가격"이라는 참고값이다.
+    합산으로 판정하는 손절·퍼센트 익절에서는 이 가격에 닿아도 그 종목만 팔리지는 않는다
+    (PRD 5.5-B) — "이 종목 혼자였다면 조건에 닿는 가격"이라는 참고값이다. 반면 종목별로
+    판정하는 단순익절(target_ratio=0)에서는 이 가격이 그 종목의 실제 매도 지점이다.
     """
     return (
         avg_price
@@ -87,6 +88,7 @@ class RiskManager:
         slippage_rate: float = 0.001,         # 시장가 청산 슬리피지 추정치
         take_profit_enabled: bool = True,     # 익절 적용 여부 (UI 체크박스)
         stop_loss_enabled: bool = True,       # 손절 적용 여부 (UI 체크박스)
+        simple_take_profit_enabled: bool = True,  # 단순익절 적용 여부 (UI 체크박스)
     ):
         self.max_position_ratio = max_position_ratio
         self.max_daily_loss_ratio = max_daily_loss_ratio
@@ -101,6 +103,11 @@ class RiskManager:
         # 감시 공백을 만들지 않으려면 끄고 켜는 데 엔진 재시작이 끼어들면 안 된다.
         self.take_profit_enabled = take_profit_enabled
         self.stop_loss_enabled = stop_loss_enabled
+        # 익절선을 `take_profit_ratio` 대신 0으로 두고 **종목별로** 판정하는 모드
+        # (PRD 5.5-B "단순익절"). 위 둘과 같이 `.env`에 저장하지 않고 매일 08:00에
+        # '적용'으로 되돌아간다. UI에서는 `take_profit_enabled`와 배타적이지만, 여기서는
+        # 서로 독립으로 다룬다 — 둘 다 켜져 있으면 합산 판정이 먼저 돈다(엔진 호출 순서).
+        self.simple_take_profit_enabled = simple_take_profit_enabled
 
         self._initial_asset: float = 0.0
         self._daily_realized_loss: float = 0.0
@@ -156,6 +163,10 @@ class RiskManager:
         `take_profit_enabled`/`stop_loss_enabled`가 꺼져 있으면 그쪽 라인은 건너뛴다. 둘 다
         꺼면 실시간 청산이 사라지고 15:20 강제청산만 남는다 — 합산 순손익률 계산 자체는
         멈추지 않으므로 UI에는 그대로 표시된다.
+
+        단순익절은 여기 끼지 않는다 — 종목별 판정이라 `check_simple_take_profits`가 따로
+        본다 (확정 2026-08-12). UI에서 익절 '적용'과 '단순익절적용'은 배타적이라 둘 중
+        하나만 켜지므로, 실제로는 이 메서드의 익절과 단순익절이 같은 날 함께 돌지 않는다.
         """
         ret = self.portfolio_return(positions)
         if ret is None:
@@ -165,6 +176,39 @@ class RiskManager:
         if self.stop_loss_enabled and ret <= -self.stop_loss_ratio:
             return ExitReason.STOP_LOSS
         return None
+
+    def check_simple_take_profits(self, positions: Iterable[Position]) -> List[Position]:
+        """단순익절 대상 — **종목별** 순손익률이 0을 넘은 종목만 골라 돌려준다 (PRD 5.5-B).
+
+        합산이 아니라 종목마다 따로 본다 (확정 2026-08-12). 돌려주는 것은 '지금 팔아야 하는
+        종목'이지 전량 청산 신호가 아니다 — 고르지 못한 종목은 그대로 보유한다.
+
+        비교가 `>=`가 아니라 `>`인 것은 본전(0)에서 팔지 않기 위해서다. '단순'은 기준선이
+        0이라는 뜻일 뿐, 순손익률에서 수수료·세금·슬리피지를 빼는 것은 합산 판정과 같다.
+
+        **이익 난 종목이 먼저 빠져나가면 남은 보유는 손실 종목 위주가 되어 합산 손절이 더
+        쉽게 걸린다** — 종목별 청산이 만드는 순서 의존성이며, 사용자가 알고 택한 동작이다.
+
+        평단·수량·현재가 중 하나라도 0인 종목은 판정하지 않는다 (현재가 0은 조회 실패나
+        장 전 상태다).
+        """
+        if not self.simple_take_profit_enabled:
+            return []
+        return [
+            position
+            for position in positions
+            if position.avg_price > 0
+            and position.quantity > 0
+            and position.current_price > 0
+            and net_return(
+                position.current_price,
+                position.avg_price,
+                self.commission_rate,
+                self.tax_rate,
+                self.slippage_rate,
+            )
+            > 0
+        ]
 
     def record_order(self, result: OrderResult, avg_price: Optional[float] = None) -> None:
         if (

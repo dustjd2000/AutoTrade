@@ -536,7 +536,14 @@ class DailyWorkflow:
             cash=cash,
             amount_per_stock=amount_per_stock,
             records=records,
-            take_profit_percent=self.engine.risk_manager.take_profit_ratio * 100,
+            # 단순익절이 켜져 있으면 그날의 익절선은 설정값(%)이 아니라 0이다 — 메일의
+            # 종목별 익절가가 실제 트리거(손익분기 가격)와 어긋나지 않게 0을 넘긴다
+            take_profit_percent=(
+                0.0
+                if self.engine.risk_manager.simple_take_profit_enabled
+                else self.engine.risk_manager.take_profit_ratio * 100
+            ),
+            simple_take_profit=self.engine.risk_manager.simple_take_profit_enabled,
             stop_loss_percent=self.engine.risk_manager.stop_loss_ratio * 100,
             commission_percent=self.engine.risk_manager.commission_rate * 100,
             tax_percent=self.engine.risk_manager.tax_rate * 100,

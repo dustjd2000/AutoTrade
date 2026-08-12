@@ -35,7 +35,7 @@ class FakeAccount:
         return BalanceSnapshot(cash=self.get_cash(), positions=self.get_positions())
 
 
-def make_engine(positions):
+def make_engine(positions, simple_take_profit_enabled=False):
     """비용을 0으로 둔 실물 RiskManager를 붙인 엔진 — 가격 변동률이 곧 순손익률이 된다."""
     orders = []
     alerts = []
@@ -65,6 +65,9 @@ def make_engine(positions):
             commission_rate=0.0,
             tax_rate=0.0,
             slippage_rate=0.0,
+            # 기본은 끈다 — 대부분의 테스트가 퍼센트 익절선(+0.5%)에서의 전량 매도를 보는데,
+            # 단순익절이 켜져 있으면 이익 난 종목이 먼저 개별 매도되어 검증 대상이 달라진다
+            simple_take_profit_enabled=simple_take_profit_enabled,
         ),
         notifier=SimpleNamespace(send=alerts.append),
     )
@@ -165,3 +168,52 @@ def test_position_without_a_price_does_not_trigger_a_selloff():
     engine.on_market_data(MarketData(ticker="005930", price=1002.0, volume=1))
 
     assert orders == [], "현재가를 못 읽은 종목이 합산에 -100%로 들어갔다"
+
+
+# ── 단순익절 (종목별, 확정 2026-08-12) ──────────────────────────
+def test_simple_take_profit_sells_only_the_winning_stock():
+    """이익 난 종목만 팔고 나머지는 그대로 둔다 — 합산 판정과 달리 전량이 아니다."""
+    engine, orders, _ = make_engine(two_holdings(), simple_take_profit_enabled=True)  # +1% / -3%
+
+    engine.on_market_data(MarketData(ticker="005930", price=1010.0, volume=1))
+
+    assert [(o.ticker, o.side) for o in orders] == [("005930", OrderSide.SELL)]
+    assert engine.open_tickers == ["000660"], "손실 종목까지 함께 팔렸다"
+
+
+def test_simple_take_profit_alert_names_the_sold_stock():
+    engine, _, alerts = make_engine(two_holdings(), simple_take_profit_enabled=True)
+
+    engine.on_market_data(MarketData(ticker="005930", price=1010.0, volume=1))
+
+    [message] = alerts
+    assert "단순익절" in message
+    assert "삼성전자" in message and "SK하이닉스" not in message
+
+
+def test_stop_loss_beats_simple_take_profit():
+    """계좌 전체가 손절선 아래면 이익 난 종목 하나를 파는 것보다 전량 청산이 우선이다."""
+    engine, orders, _ = make_engine(
+        two_holdings(price_a=1010.0, price_b=940.0), simple_take_profit_enabled=True
+    )  # +1% / -6% → 합산 -2.5%
+
+    engine.on_market_data(MarketData(ticker="000660", price=940.0, volume=1))
+
+    assert {o.ticker for o in orders} == {"005930", "000660"}
+
+
+def test_remaining_loser_can_hit_the_stop_loss_after_the_winner_leaves():
+    """종목별 익절이 만드는 순서 의존성 — 이익 종목이 빠지면 남은 손실이 상쇄를 잃는다.
+
+    합산만 볼 때는 -1%로 아무것도 팔리지 않던 조합이, 단순익절로 +1% 종목이 먼저 나가면
+    남은 -3% 하나가 손절선(-2%)을 넘겨 결국 둘 다 정리된다 (PRD 5.5-B, 사용자가 택한 동작).
+    """
+    engine, orders, _ = make_engine(two_holdings(), simple_take_profit_enabled=True)
+
+    engine.on_market_data(MarketData(ticker="005930", price=1010.0, volume=1))
+    assert [o.ticker for o in orders] == ["005930"]
+
+    engine._invalidate_positions()
+    engine.on_market_data(MarketData(ticker="000660", price=970.0, volume=1))
+
+    assert [o.ticker for o in orders] == ["005930", "000660"]

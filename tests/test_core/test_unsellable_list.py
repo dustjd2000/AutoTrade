@@ -33,6 +33,7 @@ def make_engine(positions, sell_status=OrderStatus.FILLED, error_message="거부
             initialize=lambda s: None,
             record_order=lambda *a, **kw: None,
             check_portfolio_exit=lambda ps: None,
+            check_simple_take_profits=lambda ps: [],
         ),
         notifier=None,
     )

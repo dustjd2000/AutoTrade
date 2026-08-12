@@ -17,7 +17,12 @@ def make_manager(
     slippage_rate=0.0,
     take_profit_enabled=True,
     stop_loss_enabled=True,
+    simple_take_profit_enabled=False,
 ):
+    """대부분의 테스트가 퍼센트 익절선을 검증하므로 단순익절만 기본값을 뒤집어 둔다.
+
+    실제 기본값은 '적용'(True)이다 — `test_flags_default_to_enabled`가 그쪽을 지킨다.
+    """
     manager = RiskManager(
         take_profit_ratio=take_profit_ratio,
         stop_loss_ratio=stop_loss_ratio,
@@ -27,6 +32,7 @@ def make_manager(
         slippage_rate=slippage_rate,
         take_profit_enabled=take_profit_enabled,
         stop_loss_enabled=stop_loss_enabled,
+        simple_take_profit_enabled=simple_take_profit_enabled,
     )
     manager.initialize(BalanceSnapshot(cash=initial_asset, positions={}))
     return manager
@@ -171,12 +177,79 @@ def test_disabled_flags_do_not_stop_the_return_calculation():
     assert manager.portfolio_return([held("005930", 10, 1000.0, 1010.0)]) == pytest.approx(0.01)
 
 
+def test_simple_take_profit_picks_each_winner_on_its_own():
+    """판정은 합산이 아니라 종목별이다 — 이익 난 종목만 골라 돌려준다 (확정 2026-08-12)."""
+    manager = make_manager(simple_take_profit_enabled=True)
+    positions = [
+        held("005930", 100, 1000.0, 1001.0),  # +0.1%
+        held("000660", 100, 1000.0, 970.0),   # -3%
+    ]
+
+    # 합산은 -1.45%로 마이너스지만, 그것과 무관하게 이익 난 종목은 대상이 된다
+    assert manager.portfolio_return(positions) < 0
+    assert [p.ticker for p in manager.check_simple_take_profits(positions)] == ["005930"]
+
+
+def test_simple_take_profit_holds_at_break_even():
+    """0을 '넘어야' 판다 — 본전(0)에서는 팔지 않는다. 비용만 내고 끝나는 매매를 막는다."""
+    manager = make_manager(simple_take_profit_enabled=True)
+
+    assert manager.check_simple_take_profits([held("005930", 10, 1000.0, 1000.0)]) == []
+
+
+def test_simple_take_profit_still_measures_net_return_not_price():
+    """'단순'은 기준선이 0이라는 뜻이지, 비용을 무시한다는 뜻이 아니다."""
+    manager = make_manager(
+        simple_take_profit_enabled=True,
+        commission_rate=0.00015,
+        tax_rate=0.0018,
+        slippage_rate=0.001,
+    )
+
+    # 가격은 +0.2%로 올랐지만 왕복 비용을 빼면 아직 손실이다
+    assert manager.check_simple_take_profits([held("005930", 10, 1000.0, 1002.0)]) == []
+
+    break_even = exit_trigger_price(1000.0, 0.0, 0.00015, 0.0018, 0.001)
+    assert break_even > 1002.0
+    at_profit = [held("005930", 10, 1000.0, break_even + 1)]
+    assert [p.ticker for p in manager.check_simple_take_profits(at_profit)] == ["005930"]
+
+
+def test_simple_take_profit_returns_nothing_when_disabled():
+    manager = make_manager(simple_take_profit_enabled=False)
+
+    assert manager.check_simple_take_profits([held("005930", 10, 1000.0, 1050.0)]) == []
+
+
+def test_simple_take_profit_skips_positions_without_a_price():
+    """현재가 0(조회 실패·장 전)인 종목은 판정하지 않는다."""
+    manager = make_manager(simple_take_profit_enabled=True)
+
+    assert manager.check_simple_take_profits([held("000660", 10, 1000.0, 0.0)]) == []
+
+
+def test_simple_take_profit_does_not_reach_the_portfolio_judgement():
+    """단순익절은 합산 판정에 끼지 않는다 — 손절과 퍼센트 익절만 거기서 본다."""
+    manager = make_manager(
+        take_profit_ratio=0.005, stop_loss_ratio=0.02, simple_take_profit_enabled=True
+    )
+
+    # 합산 +0.1%는 퍼센트 익절선에 못 미치므로 합산 판정은 아무것도 내지 않는다
+    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 1001.0)]) is None
+    # 손절은 단순익절과 무관하게 그대로 동작한다
+    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 980.0)]) == ExitReason.STOP_LOSS
+
+
 def test_flags_default_to_enabled():
-    """기본값은 '적용'이다 — 안전한 쪽이 기본이어야 한다."""
+    """기본값은 '적용'이다 — 안전한 쪽이 기본이어야 한다.
+
+    단순익절도 기본 적용이라, 기본 상태의 익절선은 `take_profit_ratio`가 아니라 0이다.
+    """
     manager = RiskManager()
 
     assert manager.take_profit_enabled is True
     assert manager.stop_loss_enabled is True
+    assert manager.simple_take_profit_enabled is True
 
 
 def test_record_order_accumulates_realized_loss_only_on_loss():

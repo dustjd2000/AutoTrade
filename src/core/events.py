@@ -144,7 +144,10 @@ class BuyExecution:
     cash: float                       # 매수 산정에 쓴 예수금
     amount_per_stock: float           # 종목당 배정액
     records: List[BuyRecord] = field(default_factory=list)
+    # 단순익절이면 익절선이 0이므로 take_profit_percent도 0으로 담긴다 — 표의 익절가
+    # 칸이 손익분기 가격으로 계산되게 하려는 것이고, 아래 플래그는 요약 문구용이다
     take_profit_percent: float = 0.0
+    simple_take_profit: bool = False
     stop_loss_percent: float = 0.0
     commission_percent: float = 0.0
     tax_percent: float = 0.0

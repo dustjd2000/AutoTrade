@@ -106,6 +106,8 @@ def make_workflow(recommendations=None, collected=True, cash=12_000_000):
             commission_rate=0.00015,
             tax_rate=0.0018,
             slippage_rate=0.001,
+            # 메일에 익절선(%)이 그대로 적히는지 보는 테스트들이라 퍼센트 익절로 고정한다
+            simple_take_profit_enabled=False,
         ),
         note_open_position=lambda ticker: None,
         notify=notifications.append,
