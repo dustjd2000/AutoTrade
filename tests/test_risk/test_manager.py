@@ -240,16 +240,18 @@ def test_simple_take_profit_does_not_reach_the_portfolio_judgement():
     assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 980.0)]) == ExitReason.STOP_LOSS
 
 
-def test_flags_default_to_enabled():
-    """기본값은 '적용'이다 — 안전한 쪽이 기본이어야 한다.
+def test_flags_default_to_stop_loss_only():
+    """기본값은 **손절만**이다 (확정 2026-08-12).
 
-    단순익절도 기본 적용이라, 기본 상태의 익절선은 `take_profit_ratio`가 아니라 0이다.
+    익절 두 방식은 모두 기본 해제다 — 실매매 27건을 당일 고가와 대조해 보니 익절이
+    상방을 잘라 순손익을 깎고 있었다 (PRD 5.5-B "익절 기본 해제"). 손절은 계좌를
+    지키는 쪽이라 그대로 기본 적용이다.
     """
     manager = RiskManager()
 
-    assert manager.take_profit_enabled is True
     assert manager.stop_loss_enabled is True
-    assert manager.simple_take_profit_enabled is True
+    assert manager.take_profit_enabled is False
+    assert manager.simple_take_profit_enabled is False
 
 
 def test_record_order_accumulates_realized_loss_only_on_loss():

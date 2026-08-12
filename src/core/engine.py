@@ -503,7 +503,7 @@ class TradingEngine:
             )
             result = self.order_client.send_order(order_request)
             self.risk_manager.record_order(result, avg_price=position.avg_price)
-            self._record_trade(result, avg_price=position.avg_price)
+            self._record_trade(result, avg_price=position.avg_price, exit_reason=reason)
 
             if result.status == OrderStatus.REJECTED:
                 logger.error(
@@ -629,7 +629,9 @@ class TradingEngine:
         sold = [
             _position_summary(position)
             for position in winners
-            if self._execute_exit(position, ExitReason.TAKE_PROFIT)
+            if self._execute_exit(
+                position, ExitReason.TAKE_PROFIT, exit_reason="simple_take_profit"
+            )
         ]
         if sold:
             self.notify(
@@ -664,11 +666,16 @@ class TradingEngine:
                 + "\n".join(sold)
             )
 
-    def _execute_exit(self, position: Position, reason: ExitReason) -> bool:
+    def _execute_exit(
+        self, position: Position, reason: ExitReason, exit_reason: Optional[str] = None
+    ) -> bool:
         """익절/손절 라인 도달 시 전략 신호와 무관하게 즉시 청산한다. 주문이 접수되면 True.
 
         성공 알림은 호출부(`_execute_portfolio_exit` / `_execute_simple_take_profit`)가
         매도한 종목을 묶어 한 번에 보낸다.
+
+        `exit_reason`은 기록에 남길 사유다 — 단순익절과 합산 퍼센트 익절이 둘 다
+        `ExitReason.TAKE_PROFIT`이라, 어느 규칙이 팔았는지는 호출부만 안다.
         """
         summary = _position_summary(position)
         quantity = self._closable_or_skip(position, reason.value)
@@ -686,7 +693,9 @@ class TradingEngine:
         )
         result = self.order_client.send_order(order_request)
         self.risk_manager.record_order(result, avg_price=position.avg_price)
-        self._record_trade(result, avg_price=position.avg_price)
+        self._record_trade(
+            result, avg_price=position.avg_price, exit_reason=exit_reason or reason.value
+        )
 
         if result.status == OrderStatus.REJECTED:
             logger.error(
@@ -756,9 +765,14 @@ class TradingEngine:
             )
         return None
 
-    def _record_trade(self, result: OrderResult, avg_price: Optional[float] = None) -> None:
+    def _record_trade(
+        self,
+        result: OrderResult,
+        avg_price: Optional[float] = None,
+        exit_reason: Optional[str] = None,
+    ) -> None:
         if self.trade_store is not None:
-            self.trade_store.record_fill(result, avg_price=avg_price)
+            self.trade_store.record_fill(result, avg_price=avg_price, exit_reason=exit_reason)
 
     def notify(self, message: str) -> None:
         if self.notifier is not None:

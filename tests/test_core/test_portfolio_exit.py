@@ -35,7 +35,17 @@ class FakeAccount:
         return BalanceSnapshot(cash=self.get_cash(), positions=self.get_positions())
 
 
-def make_engine(positions, simple_take_profit_enabled=False):
+class RecordingStore:
+    """record_fill에 넘어온 청산 사유만 모아 두는 스텁."""
+
+    def __init__(self):
+        self.reasons = []
+
+    def record_fill(self, result, avg_price=None, exit_reason=None):
+        self.reasons.append((result.ticker, exit_reason))
+
+
+def make_engine(positions, simple_take_profit_enabled=False, trade_store=None):
     """비용을 0으로 둔 실물 RiskManager를 붙인 엔진 — 가격 변동률이 곧 순손익률이 된다."""
     orders = []
     alerts = []
@@ -65,11 +75,15 @@ def make_engine(positions, simple_take_profit_enabled=False):
             commission_rate=0.0,
             tax_rate=0.0,
             slippage_rate=0.0,
+            # 퍼센트 익절은 실사용 기본값이 해제지만(2026-08-12) 여기서는 합산 판정 자체를
+            # 검증하므로 켠다 — 끄면 익절 쪽 케이스가 아예 돌지 않는다
+            take_profit_enabled=True,
             # 기본은 끈다 — 대부분의 테스트가 퍼센트 익절선(+0.5%)에서의 전량 매도를 보는데,
             # 단순익절이 켜져 있으면 이익 난 종목이 먼저 개별 매도되어 검증 대상이 달라진다
             simple_take_profit_enabled=simple_take_profit_enabled,
         ),
         notifier=SimpleNamespace(send=alerts.append),
+        trade_store=trade_store,
     )
     engine.start()
     return engine, orders, alerts
@@ -217,3 +231,25 @@ def test_remaining_loser_can_hit_the_stop_loss_after_the_winner_leaves():
     engine.on_market_data(MarketData(ticker="000660", price=970.0, volume=1))
 
     assert [o.ticker for o in orders] == ["005930", "000660"]
+
+
+# ── 청산 사유 기록 (확정 2026-08-12) ────────────────────────────
+def test_stop_loss_is_recorded_with_its_reason():
+    store = RecordingStore()
+    engine, _, _ = make_engine(two_holdings(price_b=940.0), trade_store=store)
+
+    engine.on_market_data(MarketData(ticker="000660", price=940.0, volume=1))
+
+    assert sorted(store.reasons) == [("000660", "stop_loss"), ("005930", "stop_loss")]
+
+
+def test_simple_take_profit_is_recorded_apart_from_the_percent_one():
+    """둘 다 ExitReason.TAKE_PROFIT이라, 사유를 나눠 두지 않으면 어느 규칙이 팔았는지 모른다."""
+    store = RecordingStore()
+    engine, _, _ = make_engine(
+        two_holdings(), simple_take_profit_enabled=True, trade_store=store
+    )
+
+    engine.on_market_data(MarketData(ticker="005930", price=1010.0, volume=1))
+
+    assert store.reasons == [("005930", "simple_take_profit")]

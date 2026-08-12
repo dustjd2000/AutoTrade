@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS trades (
     timestamp TEXT NOT NULL,
     name TEXT,
     commission REAL,
-    tax REAL
+    tax REAL,
+    exit_reason TEXT
 );
 """
 
@@ -37,6 +38,7 @@ MIGRATIONS = (
     ("name", "ALTER TABLE trades ADD COLUMN name TEXT"),
     ("commission", "ALTER TABLE trades ADD COLUMN commission REAL"),
     ("tax", "ALTER TABLE trades ADD COLUMN tax REAL"),
+    ("exit_reason", "ALTER TABLE trades ADD COLUMN exit_reason TEXT"),
 )
 
 # 부분체결도 실제 매매이므로 집계에 포함한다
@@ -164,7 +166,19 @@ class TradeStore:
                 conn.execute(ddl)
                 logger.info("trades 테이블에 %s 컬럼을 추가했습니다.", column)
 
-    def record_fill(self, result: OrderResult, avg_price: Optional[float] = None) -> None:
+    def record_fill(
+        self,
+        result: OrderResult,
+        avg_price: Optional[float] = None,
+        exit_reason: Optional[str] = None,
+    ) -> None:
+        """체결(또는 거부) 결과를 남긴다.
+
+        `exit_reason`은 매도가 어느 경로로 나갔는지다 — `take_profit`/`stop_loss`(실시간
+        감시), `day_end`(15:15 강제청산), `manual`/`manual_selected`(UI 즉시 실행). 매수와
+        전략 신호 매도는 None이다. 없으면 성과를 되짚을 때 규칙이 판 것인지 사람이 판 것인지
+        구분하려고 로그를 파싱해야 한다 (확정 2026-08-12).
+        """
         realized_pnl = None
         if (
             result.side == OrderSide.SELL
@@ -178,8 +192,9 @@ class TradeStore:
             conn.execute(
                 """INSERT INTO trades
                    (order_id, ticker, side, status, quantity, filled_quantity,
-                    filled_price, avg_price, realized_pnl, error_message, timestamp, name)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    filled_price, avg_price, realized_pnl, error_message, timestamp, name,
+                    exit_reason)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     result.order_id,
                     result.ticker,
@@ -193,6 +208,7 @@ class TradeStore:
                     result.error_message,
                     result.timestamp.isoformat(),
                     result.name,
+                    exit_reason,
                 ),
             )
             conn.commit()

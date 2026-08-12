@@ -38,6 +38,24 @@ def test_record_fill_and_daily_summary(tmp_path):
     assert summary.realized_pnl == 200.0
 
 
+def test_record_fill_stores_the_exit_reason(tmp_path):
+    """어느 규칙이 팔았는지를 남긴다 — 없으면 성과 분석 때 로그를 파싱해야 한다."""
+    store = make_store(tmp_path)
+
+    store.record_fill(
+        make_result(OrderSide.SELL, OrderStatus.FILLED, 980.0, datetime(2026, 8, 12, 11, 34)),
+        avg_price=1000.0,
+        exit_reason="stop_loss",
+    )
+    store.record_fill(make_result(OrderSide.BUY, OrderStatus.FILLED, 1000.0, datetime(2026, 8, 12, 9, 0)))
+
+    with sqlite3.connect(store.db_path) as conn:
+        rows = dict(conn.execute("select side, exit_reason from trades").fetchall())
+
+    assert rows["sell"] == "stop_loss"
+    assert rows["buy"] is None, "매수에는 청산 사유가 없다"
+
+
 def test_rejected_orders_excluded_from_summary(tmp_path):
     store = make_store(tmp_path)
     rejected = make_result(OrderSide.BUY, OrderStatus.REJECTED, None, datetime(2026, 7, 27, 9, 0))
