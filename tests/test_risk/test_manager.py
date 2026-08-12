@@ -163,7 +163,7 @@ def test_stop_loss_can_be_disabled_without_affecting_take_profit():
 
 
 def test_both_disabled_leaves_only_the_forced_close():
-    """둘 다 끄면 실시간 청산이 사라진다 — 15:20 강제청산만 남는다 (PRD 5.5-B)."""
+    """둘 다 끄면 실시간 청산이 사라진다 — 15:15 강제청산만 남는다 (PRD 5.5-B)."""
     manager = make_manager(take_profit_enabled=False, stop_loss_enabled=False)
 
     assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 1006.0)]) is None

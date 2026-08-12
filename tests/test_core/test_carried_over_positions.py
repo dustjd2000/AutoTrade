@@ -99,7 +99,7 @@ def test_adopted_position_is_watched_for_stop_loss():
 
 
 def test_adopted_position_is_included_in_the_forced_close():
-    """당일 매수분이 아니어도 15:20 강제청산 대상이어야 한다."""
+    """당일 매수분이 아니어도 15:15 강제청산 대상이어야 한다."""
     runtime, orders = make_runtime(carried_over())
     runtime.engine.start()
     adopt_carried_over_positions(runtime)

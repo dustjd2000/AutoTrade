@@ -46,7 +46,7 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   진입점이고, "▶ 시작" 버튼을 눌러야 `EngineThread`(QThread)가 뜬다. 창을 닫으면 엔진도
   함께 정지한다.
 - `EngineThread`가 자신만의 asyncio 이벤트 루프를 새로 만들어 소유하고, 그 위에서
-  `src/core/runtime.py`의 `TimeScheduler`(시간 기반 08:40/추천 시각/09:00/09:30/15:20/15:30)와
+  `src/core/runtime.py`의 `TimeScheduler`(시간 기반 08:40/추천 시각/09:00/09:30/15:15/15:35)와
   `WebSocketClient` 콜백(실시간 시세 기반)이 함께 돈다. 이 중 LLM 추천 시각만 설정값이고
   (`settings.recommend_time`, UI 콤보박스 08:40~08:55, 기본 08:45) 나머지는 코드 상수다.
 - 데이터 수집·LLM 호출·메일 발송처럼 오래 걸리는 동기 작업은 `runtime._off_loop`로 별도
@@ -70,7 +70,7 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   스케줄에서 `set_recommendations` → `build_buy_plans`를 직접 호출해 트리거한다. 매수는
   LLM이 함께 제시한 **목표 매수가로 지정가** 주문이고, 09:30에 미체결분을 취소하면서
   매수 결과 메일을 보낸다(`cancel_unfilled_buys`). 청산은 `RiskManager.check_portfolio_exit`
-  (실시간 시세 콜백, **보유 종목 합산** 순손익 ±설정값 기준 익절/손절)와 15:20 강제청산이
+  (실시간 시세 콜백, **보유 종목 합산** 순손익 ±설정값 기준 익절/손절)와 15:15 강제청산이
   담당한다.
 - 새 전략을 추가할 때는 `BaseStrategy`를 구현하는 새 모듈만 추가하면 되고, 나머지
   (주문 실행/리스크/로깅)는 그대로 재사용된다 — 단, 시간 기반 전략이라면 1호 전략처럼
@@ -121,7 +121,7 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
 - **판정 단위는 종목이 아니라 보유 목록 전체다** (2026-08-10에 종목별에서 바꿈). 합산
   순손익률(= 전체 손익 ÷ 전체 매입금액)이 라인에 닿으면 `_execute_portfolio_exit`이 보유
   종목을 **전량** 매도한다. 종목별 익절/손절은 없으므로, 한 종목이 크게 무너져도 다른
-  종목이 상쇄하면 15:20 강제청산까지 간다 — 의도된 동작이다 (PRD 5.5-B).
+  종목이 상쇄하면 15:15 강제청산까지 간다 — 의도된 동작이다 (PRD 5.5-B).
 
 ### 이메일이 유일한 알림 채널
 텔레그램은 검토 후 제거됐다. 운영 알림(`AlertNotifier`)과 `notification/templates.py`의

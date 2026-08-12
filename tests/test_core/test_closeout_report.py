@@ -1,4 +1,4 @@
-"""보유 종목 전량 매도 시 결과 리포트 — 15:30을 기다리지 않고 보내고, 15:30은 생략한다."""
+"""보유 종목 전량 매도 시 결과 리포트 — 15:35를 기다리지 않고 보내고, 15:35는 생략한다."""
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
@@ -161,7 +161,7 @@ class FakeEmail:
         self.sent.append((subject, message, html))
 
 
-def make_workflow():
+def make_workflow(unsettled_sells=False):
     email = FakeEmail()
     workflow = DailyWorkflow(
         collector=SimpleNamespace(collect=lambda: []),
@@ -176,6 +176,7 @@ def make_workflow():
         ),
         trade_store=SimpleNamespace(
             apply_fills=lambda fills, day: 0,
+            has_unsettled_sells=lambda day: unsettled_sells,
             daily_summary=lambda day: DailySummary(
                 day=day, buy_count=1, sell_count=1, realized_pnl=1000.0
             ),
@@ -200,7 +201,7 @@ def test_scheduled_report_is_skipped_after_closeout_report():
 
 
 def test_closeout_report_is_skipped_after_scheduled_report():
-    """15:30이 먼저 나갔으면 뒤늦은 청산 트리거가 같은 리포트를 또 보내지 않는다."""
+    """15:35가 먼저 나갔으면 뒤늦은 청산 트리거가 같은 리포트를 또 보내지 않는다."""
     workflow, email = make_workflow()
 
     workflow.send_final_report(REPORT_DAY)
@@ -208,7 +209,40 @@ def test_closeout_report_is_skipped_after_scheduled_report():
 
     assert len(email.sent) == 1
     _, body, _ = email.sent[0]
-    assert "정규장 마감(15:30) 직전 집계" in body
+    assert "전부 매도한 직후 집계" not in body
+
+
+# ── 미체결 매도가 남으면 청산 리포트를 미룬다 (2026-08-12) ───
+def test_closeout_report_is_deferred_while_a_sell_is_unfilled():
+    """접수만 된 매도는 집계에서 빠진다 — 그대로 보내면 판 종목이 '보유중'으로 실린다.
+
+    15:20 강제청산이 장마감 동시호가에 걸려 15:30 종가에 체결된 날, 15:21에 나간 리포트가
+    그 매도를 통째로 누락한 채 확정됐다 (2026-08-12).
+    """
+    workflow, email = make_workflow(unsettled_sells=True)
+
+    workflow.send_final_report(REPORT_DAY, closed_out=True)
+
+    assert email.sent == []
+
+
+def test_deferred_closeout_report_is_sent_by_the_schedule():
+    """보류된 날은 발송 표시가 서지 않아 15:35 정기 발송이 정산된 값으로 보낸다."""
+    workflow, email = make_workflow(unsettled_sells=True)
+    workflow.send_final_report(REPORT_DAY, closed_out=True)
+
+    workflow.send_final_report(REPORT_DAY)  # 15:35 스케줄
+
+    assert len(email.sent) == 1
+
+
+def test_unsettled_sells_do_not_block_the_scheduled_report():
+    """정기 발송은 미루지 않는다 — 그날 마지막 집계이고, 미룰 다음 트리거가 없다."""
+    workflow, email = make_workflow(unsettled_sells=True)
+
+    workflow.send_final_report(REPORT_DAY)
+
+    assert len(email.sent) == 1
 
 
 def test_scheduled_report_is_skipped_after_engine_restart():

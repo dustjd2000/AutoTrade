@@ -319,6 +319,60 @@ def test_manual_fill_is_not_double_counted_on_rerun(tmp_path):
     assert second.fees == first.fees
 
 
+# ── 미체결 매도 판정 (청산 리포트 보류 근거, PRD 5.11) ──────
+UNSETTLED_DAY = date(2026, 8, 12)
+
+
+def record_sell(store, status, timestamp=datetime(2026, 8, 12, 15, 20)):
+    store.record_fill(
+        make_result(OrderSide.SELL, status, None, timestamp), avg_price=15290.0
+    )
+
+
+def test_accepted_sell_without_a_fill_is_unsettled(tmp_path):
+    """접수만 된 매도 — 집계에서 빠지므로 이 상태로 리포트를 확정하면 안 된다."""
+    store = make_store(tmp_path)
+    record_sell(store, OrderStatus.PENDING)
+
+    assert store.has_unsettled_sells(UNSETTLED_DAY) is True
+
+
+def test_filled_sell_is_settled(tmp_path):
+    store = make_store(tmp_path)
+    record_sell(store, OrderStatus.PENDING)
+
+    store.apply_fills(
+        [make_fill("1", "005930", OrderSide.SELL, 10, 15000.0)], UNSETTLED_DAY
+    )
+
+    assert store.has_unsettled_sells(UNSETTLED_DAY) is False
+
+
+def test_rejected_sell_is_settled(tmp_path):
+    """거부된 매도는 체결될 일이 없다 — 기다려도 채워지지 않으므로 리포트를 막지 않는다."""
+    store = make_store(tmp_path)
+    record_sell(store, OrderStatus.REJECTED)
+
+    assert store.has_unsettled_sells(UNSETTLED_DAY) is False
+
+
+def test_pending_buy_does_not_count_as_unsettled(tmp_path):
+    """09:30에 취소된 미체결 매수는 그대로 남는다 — 팔 것이 없으니 리포트를 막을 이유가 없다."""
+    store = make_store(tmp_path)
+    store.record_fill(
+        make_result(OrderSide.BUY, OrderStatus.PENDING, None, datetime(2026, 8, 12, 9, 0))
+    )
+
+    assert store.has_unsettled_sells(UNSETTLED_DAY) is False
+
+
+def test_unsettled_sell_of_another_day_is_ignored(tmp_path):
+    store = make_store(tmp_path)
+    record_sell(store, OrderStatus.PENDING, timestamp=datetime(2026, 8, 11, 15, 20))
+
+    assert store.has_unsettled_sells(UNSETTLED_DAY) is False
+
+
 def test_existing_db_gains_new_columns(tmp_path):
     """name/commission/tax 이전에 만들어진 DB도 열리면서 컬럼이 추가되어야 한다."""
     db_path = tmp_path / "old.db"

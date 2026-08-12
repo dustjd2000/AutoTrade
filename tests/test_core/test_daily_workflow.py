@@ -637,7 +637,7 @@ def test_buy_result_email_survives_an_engine_restart():
 
 
 def test_buy_result_email_is_not_sent_twice():
-    """09:30이 보낸 메일을 15:20 마감 정리가 또 보내면 안 된다."""
+    """09:30이 보낸 메일을 15:15 마감 정리가 또 보내면 안 된다."""
     recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a")]
     workflow, email, order_client, _, strategy = make_workflow(recommendations=recs)
     strategy.set_recommendations(recs)

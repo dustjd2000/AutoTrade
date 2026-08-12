@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 # 최종 리포트를 보낸 날짜를 남기는 마커 파일. 인메모리 필드로 두면 엔진 재시작
 # (설정 저장·앱 재실행)마다 DailyWorkflow가 새로 만들어지면서 표시가 사라져,
-# 오전에 이미 보낸 리포트를 15:30이 다시 보낸다.
+# 오전에 이미 보낸 리포트를 15:35가 다시 보낸다.
 DEFAULT_REPORT_MARK_PATH = Path("data") / "final_report_sent"
 
 # 09:00 매수 결과를 09:30 마무리까지 넘기는 파일. 인메모리 필드로 두면 그 사이 엔진이
@@ -50,8 +50,8 @@ class DailyWorkflow:
     """1호 전략의 하루 흐름을 스케줄러 트리거에 연결한다 (PRD 5.5-B, 5.11).
 
     추천 시각 recommend_and_notify → 09:00 execute_buys → 09:30 cancel_unfilled_buys
-    → 15:30 send_final_report
-    (보유 종목이 그 전에 전량 매도되면 15:30을 기다리지 않고 최종 리포트를 보낸다)
+    → 15:35 send_final_report
+    (보유 종목이 그 전에 전량 매도되고 체결까지 확인되면 15:35를 기다리지 않고 최종 리포트를 보낸다)
     """
 
     def __init__(
@@ -77,7 +77,7 @@ class DailyWorkflow:
         self.trade_store = trade_store
         self.email = email
         self.ws_client = ws_client
-        # 최종 리포트를 보낸 날짜 — 전량 매도 완료와 15:30 스케줄이 중복 발송하지 않도록
+        # 최종 리포트를 보낸 날짜 — 전량 매도 완료와 15:35 스케줄이 중복 발송하지 않도록
         # 공유하는 표시다 (send_final_report). 매수로 보유가 다시 생기면 초기화된다.
         # 엔진 재시작을 견뎌야 하므로 파일에 남긴다 (DEFAULT_REPORT_MARK_PATH 참고).
         self.report_mark_path = Path(
@@ -283,7 +283,7 @@ class DailyWorkflow:
             self.engine.notify("[경고] 매수가 한 건도 접수되지 않았습니다. 로그를 확인하세요.")
         else:
             # 보유가 다시 생겼으므로 앞서 보낸 최종 리포트는 더 이상 최종이 아니다.
-            # 이 보유분이 전량 매도되면 리포트를 다시 보내고, 남으면 15:30이 보낸다.
+            # 이 보유분이 전량 매도되면 리포트를 다시 보내고, 남으면 15:35가 보낸다.
             self._clear_report_mark()
 
         # 접수된 종목만 실시간 시세를 구독한다 — 익절/손절 감시(RiskManager.check_portfolio_exit)의 전제.
@@ -375,7 +375,7 @@ class DailyWorkflow:
         취소 대상은 **당일 체결내역 조회**에서 찾는다. 09:00과 09:30 사이에 설정 저장 등으로
         엔진이 재시작돼도 미체결 주문이 장 마감까지 방치되면 안 되기 때문이다.
 
-        15:20 마감 정리(`runtime.close_out`)가 한 번 더 부른다 — 09:30을 놓친 날의 그물이다.
+        15:15 마감 정리(`runtime.close_out`)가 한 번 더 부른다 — 09:30을 놓친 날의 그물이다.
         메일을 보내고 나면 기록 파일을 지우므로 같은 메일이 두 번 나가지는 않는다.
         """
         state = self._read_buy_records(today or date.today())
@@ -395,7 +395,7 @@ class DailyWorkflow:
                 record.note = "목표 매수가에 닿지 않아 미체결분을 취소했습니다"
 
         # 메일이 실패해도 (_notify_buy_result가 예외를 삼킨다) 기록은 지운다 — 남겨두면
-        # 15:20 마감 정리가 같은 메일을 다시 시도하며 매번 취소 로그까지 되풀이한다.
+        # 15:15 마감 정리가 같은 메일을 다시 시도하며 매번 취소 로그까지 되풀이한다.
         self._clear_buy_records()
         self._notify_buy_result(state.cash, state.amount_per_stock, records, fills_synced)
 
@@ -510,7 +510,7 @@ class DailyWorkflow:
             return None
 
     def _clear_buy_records(self) -> None:
-        """인계가 끝난 기록을 지운다 — 남겨두면 15:20 마감 정리가 같은 메일을 또 보낸다."""
+        """인계가 끝난 기록을 지운다 — 남겨두면 15:15 마감 정리가 같은 메일을 또 보낸다."""
         try:
             self.buy_records_path.unlink(missing_ok=True)
         except OSError:
@@ -593,8 +593,8 @@ class DailyWorkflow:
     def send_final_report(self, today: Optional[date] = None, closed_out: bool = False) -> None:
         """하루의 마지막 결과 리포트 — 어느 트리거가 먼저 오든 한 번만 보낸다.
 
-        15:30 스케줄과 '보유 종목 전량 매도 완료'(runtime.watch_closeout_report)가 이 함수를
-        공유한다. 먼저 온 쪽이 보내고 나머지는 건너뛰므로, 15:30 직전에 청산이 끝나도
+        15:35 스케줄과 '보유 종목 전량 매도 완료'(runtime.watch_closeout_report)가 이 함수를
+        공유한다. 먼저 온 쪽이 보내고 나머지는 건너뛰므로, 15:35 직전에 청산이 끝나도
         같은 리포트가 두 번 나가지 않는다. 발송 표시는 파일에 남아 엔진이 재시작돼도
         유지된다 (DEFAULT_REPORT_MARK_PATH 참고).
 
@@ -602,14 +602,34 @@ class DailyWorkflow:
         ④ 즉시 실행 버튼은 사용자가 직접 누른 것이므로 이 표시와 무관하게 항상 발송한다.
         """
         today = today or date.today()
-        trigger = "전량 매도 완료" if closed_out else "15:30 스케줄"
+        trigger = "전량 매도 완료" if closed_out else "15:35 스케줄"
         if self._report_mark() == today:
             logger.info("최종 리포트를 이미 발송했습니다 — %s 발송을 건너뜁니다.", trigger)
+            return
+
+        if closed_out and not self._sells_settled(today):
+            logger.info(
+                "청산 매도의 체결이 아직 확인되지 않아 최종 리포트를 미룹니다 — 15:35 스케줄에 맡깁니다."
+            )
             return
 
         logger.info("최종 리포트 발송 (%s)", trigger)
         self.send_daily_report(today, closed_out=closed_out)
         self._write_report_mark(today)
+
+    def _sells_settled(self, today: date) -> bool:
+        """당일 매도가 전부 체결(또는 거부)로 확정됐는지 — 청산 즉시 발송의 전제 (PRD 5.11).
+
+        청산은 주문 **접수** 시점에 완료로 표시되므로(`TradingEngine._mark_exited`), 체결이
+        늦으면 그 매도가 pending으로 남아 집계에서 빠진다 — 판 종목이 '보유중'으로, 손익이
+        0으로 나간 채 리포트가 확정된다.
+
+        판단 전에 체결 결과를 한 번 당겨온다. 그러지 않으면 방금 낸 주문이 언제나 pending으로
+        보여 청산 즉시 발송이 영영 걸리지 않는다. 뒤이어 `send_daily_report`가 같은 동기화를
+        한 번 더 하지만, 이 경로는 하루 한 번뿐이라 그대로 둔다.
+        """
+        self._sync_fills(today)
+        return not self.trade_store.has_unsettled_sells(today)
 
     def _report_mark(self) -> Optional[date]:
         """최종 리포트를 마지막으로 보낸 날짜. 마커가 없거나 읽을 수 없으면 None.
@@ -629,7 +649,7 @@ class DailyWorkflow:
             self.report_mark_path.write_text(today.isoformat(), encoding="utf-8")
         except OSError:
             logger.warning(
-                "최종 리포트 발송 표시를 남기지 못했습니다 (%s) — 15:30에 다시 나갈 수 있습니다.",
+                "최종 리포트 발송 표시를 남기지 못했습니다 (%s) — 15:35에 다시 나갈 수 있습니다.",
                 self.report_mark_path,
                 exc_info=True,
             )
@@ -647,7 +667,7 @@ class DailyWorkflow:
             )
 
     def send_daily_report(self, today: Optional[date] = None, closed_out: bool = False) -> None:
-        """당일 매매 결과와 월간 누적 실적을 이메일로 발송 (15:30 또는 전량 매도 직후)."""
+        """당일 매매 결과와 월간 누적 실적을 이메일로 발송 (15:35 또는 전량 매도 직후)."""
         today = today or date.today()
         sync_failed = not self._sync_fills(today)
 

@@ -36,8 +36,11 @@ logger = logging.getLogger(__name__)
 DAILY_RESET_TIME = dt_time(8, 40)   # 일일 손실 한도·매매중지 초기화 (연속 실행 대비)
 BUY_TIME = dt_time(9, 0)            # 자금 산정 → 목표 매수가 지정가 매수
 CANCEL_UNFILLED_TIME = dt_time(9, 30)  # 미체결 매수 취소 → 매수 결과 메일
-FORCE_CLOSE_TIME = dt_time(15, 20)  # 당일 매도 원칙에 따른 미청산 포지션 정리
-REPORT_TIME = dt_time(15, 30)       # 일일/월간 성과 리포트 이메일
+# 청산은 장마감 동시호가(15:20~15:30) '이전'에 내야 한다 — 동시호가에 들어간 시장가 주문은
+# 15:30 종가에야 체결되어, 그 사이에 나간 리포트가 그 매도를 미정산으로 싣는다 (2026-08-12).
+# 리포트는 반대로 마감 뒤로 5분 물려, 마감 동시호가 체결분까지 체결내역에 잡힌 뒤 집계한다.
+FORCE_CLOSE_TIME = dt_time(15, 15)  # 당일 매도 원칙에 따른 미청산 포지션 정리
+REPORT_TIME = dt_time(15, 35)       # 일일/월간 성과 리포트 이메일 (정규장 마감 15:30 이후)
 
 # 시세 끊김 감시 — 익절/손절이 실시간 시세에만 의존하므로(키움 REST 스탑오더 미지원),
 # 보유 종목이 있는데 시세가 끊기면 손절이 조용히 멈춘다. 그 공백을 알린다.
@@ -46,7 +49,7 @@ MARKET_CLOSE_TIME = dt_time(15, 30)
 QUOTE_CHECK_INTERVAL_SECONDS = 60
 QUOTE_STALE_AFTER_SECONDS = 300
 
-# 전량 매도 완료 감시 — 보유 종목이 다 팔렸으면 15:30을 기다리지 않고 결과 리포트를 보낸다.
+# 전량 매도 완료 감시 — 보유 종목이 다 팔렸으면 15:35를 기다리지 않고 결과 리포트를 보낸다.
 CLOSEOUT_CHECK_INTERVAL_SECONDS = 30
 # 매도 체결이 잔고·체결내역에 반영될 시간. 주문 접수 직후에 집계하면 방금 팔린 종목이
 # '보유중'으로 실린다 (DailyWorkflow._fill_buy_prices의 같은 시차 참고).
@@ -186,7 +189,9 @@ def build_runtime(settings: Settings) -> Runtime:
 
 
 def close_out(workflow: DailyWorkflow, engine: TradingEngine) -> Callable[[], None]:
-    """15:20 마감 정리 — 미체결 매수를 먼저 거두고 나서 보유 포지션을 청산한다.
+    """15:15 마감 정리 — 미체결 매수를 먼저 거두고 나서 보유 포지션을 청산한다.
+
+    시각이 15:20이 아닌 이유는 `FORCE_CLOSE_TIME` 주석 참고 (장마감 동시호가 회피).
 
     순서를 뒤집으면 안 된다. 청산 뒤에도 매수 주문이 살아 있으면 그 주문이 장 마감 직전에
     체결되어 오버나이트 포지션이 남고, 당일 매도 원칙이 깨진다.
@@ -277,8 +282,8 @@ def manual_steps(
     }
     # 일괄 실행은 '진입'까지만 — 청산과 리포트는 스케줄에 맡긴다.
     # 청산(③)을 넣으면 매수 직후 곧바로 되팔아 익절/손절 감시 구간이 사라지고 왕복 비용만 남는다.
-    # 당일 매도 원칙은 FORCE_CLOSE_TIME(15:20)이 지키고, 리포트는 당일 매매가 끝난 뒤에야
-    # 의미가 있는 집계이므로 REPORT_TIME(15:30)에 맡긴다. 지금 당장 필요하면 ③·④ 버튼으로 따로 실행한다.
+    # 당일 매도 원칙은 FORCE_CLOSE_TIME(15:15)이 지키고, 리포트는 당일 매매가 끝난 뒤에야
+    # 의미가 있는 집계이므로 REPORT_TIME(15:35)에 맡긴다. 지금 당장 필요하면 ③·④ 버튼으로 따로 실행한다.
     steps["full"] = steps["recommend"] + steps["buy"]
 
     if action not in steps:
@@ -386,11 +391,12 @@ async def watch_closeout_report(
     runtime: Runtime,
     interval_seconds: float = CLOSEOUT_CHECK_INTERVAL_SECONDS,
 ) -> None:
-    """보유 종목이 전부 매도되면 15:30을 기다리지 않고 결과 리포트를 보낸다.
+    """보유 종목이 전부 매도되면 15:35를 기다리지 않고 결과 리포트를 보낸다.
 
-    청산 건당 한 번만 시도한다 — 발송에 실패하면 표시가 서지 않으므로 15:30 스케줄이
-    대신 보낸다 (DailyWorkflow.send_final_report). 매수로 보유가 다시 생기면 엔진이
-    청산 시각을 지우므로, 그 보유분을 또 전량 매도하면 새 시각으로 다시 발송한다.
+    청산 건당 한 번만 시도한다 — 발송에 실패하거나 매도 체결이 아직 확인되지 않아
+    미뤄지면 표시가 서지 않으므로 15:35 스케줄이 대신 보낸다
+    (DailyWorkflow.send_final_report). 매수로 보유가 다시 생기면 엔진이 청산 시각을
+    지우므로, 그 보유분을 또 전량 매도하면 새 시각으로 다시 발송한다.
     """
     reported_at: Optional[datetime] = None
     while True:
@@ -402,7 +408,7 @@ async def watch_closeout_report(
 
         reported_at = closed_at
         logger.info(
-            "보유 종목 전량 매도 완료 (%s) — 15:30을 기다리지 않고 결과 리포트를 발송합니다.",
+            "보유 종목 전량 매도 완료 (%s) — 15:35를 기다리지 않고 결과 리포트를 발송합니다.",
             closed_at.strftime("%H:%M:%S"),
         )
         try:
@@ -411,7 +417,7 @@ async def watch_closeout_report(
                 None, lambda: runtime.workflow.send_final_report(closed_out=True)
             )
         except Exception:
-            logger.exception("전량 매도 결과 리포트 발송 실패 — 15:30 리포트에 맡깁니다.")
+            logger.exception("전량 매도 결과 리포트 발송 실패 — 15:35 리포트에 맡깁니다.")
 
 
 async def watch_cash_refresh(
@@ -435,7 +441,7 @@ def adopt_carried_over_positions(runtime: Runtime) -> List[str]:
     실시간 시세 구독은 당일 매수분(DailyWorkflow.execute_buys)에서만 걸리므로, 이월 포지션만
     남은 날에는 시세가 한 건도 오지 않아 익절/손절 판정(RiskManager.check_portfolio_exit)이
     아예 돌지 않는다 — 판정은 틱을 받은 순간에만 도는 콜백이다.
-    여기서 구독을 걸어야 감시가 시작된다. 15:20 강제청산은 잔고 전체를 읽으므로 자동 포함된다.
+    여기서 구독을 걸어야 감시가 시작된다. 15:15 강제청산은 잔고 전체를 읽으므로 자동 포함된다.
 
     판정은 보유 종목 합산 기준이므로, 이월 포지션도 당일 매수분과 한 덩어리로 묶여 함께
     팔린다. 평단가는 최초 매수 시점 기준이라 이월분의 손실이 그대로 합산에 들어온다.
@@ -448,7 +454,7 @@ def adopt_carried_over_positions(runtime: Runtime) -> List[str]:
     logger.warning("이월 포지션을 매도 감시 대상으로 편입했습니다: %s", held)
     runtime.engine.notify(
         f"[알림] 전일 이월 보유 종목 {len(held)}개를 오늘 매도 대상으로 편입했습니다: {held}. "
-        "익절/손절 감시가 시작되며, 남으면 15:20에 강제청산됩니다."
+        "익절/손절 감시가 시작되며, 남으면 15:15에 강제청산됩니다."
     )
     return held
 

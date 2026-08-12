@@ -35,14 +35,14 @@ def test_due_jobs_refires_on_a_new_day():
 def test_skip_past_due_for_today_does_not_fire_immediately():
     scheduler = TimeScheduler()
     scheduler.add_job(dt_time(8, 45), lambda: None, "recommend")
-    scheduler.add_job(dt_time(15, 20), lambda: None, "force_close")
+    scheduler.add_job(dt_time(15, 15), lambda: None, "force_close")
 
-    startup_time = datetime(2026, 7, 27, 10, 0)  # 08:45은 이미 지났고 15:20은 아직
+    startup_time = datetime(2026, 7, 27, 10, 0)  # 08:45은 이미 지났고 15:15는 아직
     scheduler.skip_past_due_for_today(startup_time)
 
     assert scheduler.due_jobs(startup_time) == []
-    # 15:20이 되면 예정대로 실행되어야 한다
-    assert [j.name for j in scheduler.due_jobs(datetime(2026, 7, 27, 15, 20))] == ["force_close"]
+    # 15:15가 되면 예정대로 실행되어야 한다
+    assert [j.name for j in scheduler.due_jobs(datetime(2026, 7, 27, 15, 15))] == ["force_close"]
 
 
 def test_job_execution_via_run_job(monkeypatch):

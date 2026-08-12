@@ -131,7 +131,7 @@ class TradingEngine:
         self._zero_sellable: Set[str] = set()
         # 오늘 매도하지 못한 종목과 사유 (UI 표시용) — `UnsellableView` 참고
         self._unsellable: Dict[str, UnsellableView] = {}
-        # 보유 목록이 매도로 비워진 시각. 15:30을 기다리지 않고 결과 리포트를 보내는
+        # 보유 목록이 매도로 비워진 시각. 15:35를 기다리지 않고 결과 리포트를 보내는
         # 근거가 된다 (runtime.closeout_report_due).
         self._closed_out_at: Optional[datetime] = None
 
@@ -440,7 +440,8 @@ class TradingEngine:
     def force_close_all_positions(self, reason: str = "day_end") -> None:
         """당일 매도(데이트레이딩) 원칙에 따라 장 마감 전 미청산 포지션을 전량 정리한다.
 
-        스케줄러가 장 마감 직전(예: 15:20)에 호출하는 것을 전제로 한다.
+        스케줄러가 장마감 동시호가 이전(15:15)에 호출하는 것을 전제로 한다
+        (`runtime.FORCE_CLOSE_TIME` 참고 — 동시호가에 들어간 시장가는 종가에야 체결된다).
         """
         # 무엇을 파는지가 곧 결과이므로 캐시를 쓰지 않고 최신 잔고를 읽는다
         positions = self._get_positions(force=True)
@@ -722,7 +723,7 @@ class TradingEngine:
         self._positions = {t: p for t, p in self._positions.items() if t != ticker}
         self._invalidate_positions()
         self._clear_unsellable(ticker)
-        # 마지막 보유 종목까지 팔렸으면 그 시각을 남긴다 — 15:30을 기다리지 않고 결과
+        # 마지막 보유 종목까지 팔렸으면 그 시각을 남긴다 — 15:35를 기다리지 않고 결과
         # 리포트를 보내는 근거다 (runtime.watch_closeout_report). 매도할 수 없어 제외된
         # 종목(_exclude_untradable)은 보유 목록에 없으므로 판단에 끼어들지 않는다.
         if not self._open_tickers:

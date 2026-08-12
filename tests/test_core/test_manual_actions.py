@@ -40,7 +40,7 @@ def test_single_action_runs_matching_step(action, expected):
 
 
 def test_full_action_stops_after_buy():
-    """일괄 실행은 진입까지만 — 청산은 15:20, 리포트는 15:30 스케줄에 맡긴다."""
+    """일괄 실행은 진입까지만 — 청산은 15:15, 리포트는 15:35 스케줄에 맡긴다."""
     calls = []
     for step in manual_steps(make_runtime(calls), "full"):
         step.run()
@@ -108,7 +108,7 @@ def test_tickers_are_ignored_by_other_actions():
     assert calls == ["sell_all:manual"]
 
 
-# ── 15:20 마감 정리 ─────────────────────────────────────────
+# ── 15:15 마감 정리 ─────────────────────────────────────────
 def test_closeout_cancels_unfilled_buys_before_liquidating():
     """순서가 뒤집히면 청산 뒤 살아남은 매수 주문이 체결돼 오버나이트 포지션이 된다."""
     calls = []

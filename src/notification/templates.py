@@ -54,7 +54,7 @@ def recommendation_email(
     if any(_sell_target_line(r) for r in recommendations):
         lines.append(
             "※ 목표 매도가는 LLM의 참고 수치이며 주문에 사용되지 않습니다 — 실제 매도는 "
-            "순손익 기준 익절·손절과 15:20 강제청산이 담당합니다."
+            "순손익 기준 익절·손절과 15:15 강제청산이 담당합니다."
         )
     lines.append("※ 이 추천은 사전 유효성 검증(거래정지·상장폐지 등)을 거치지 않았습니다.")
     return subject, "\n".join(lines)
@@ -95,12 +95,12 @@ def daily_report_email(
     closed_out: bool = False,
     unsellable: Optional[List[UnsellableView]] = None,
 ) -> tuple[str, str, str]:
-    """15:30 일일/월간 성과 리포트 이메일 (PRD 5.11).
+    """15:35 일일/월간 성과 리포트 이메일 (PRD 5.11).
 
     (제목, 평문, HTML)을 돌려준다 — 표는 HTML로 보이고, 평문만 읽는 클라이언트에서도
     같은 내용이 등폭 정렬로 남는다.
 
-    closed_out=True는 보유 종목을 전부 매도해 15:30보다 앞서 보내는 최종 리포트다.
+    closed_out=True는 보유 종목을 전부 매도해 15:35보다 앞서 보내는 최종 리포트다.
     unsellable은 오늘 매도하지 못한 종목 — 메일만 보는 상황에서도 잔여 포지션을 알 수 있어야 한다.
     """
     subject = f"[AutoTrade] {summary.day:%Y-%m-%d} 매매 결과 리포트"
@@ -119,10 +119,10 @@ def _report_notes(
     if closed_out:
         notes = [
             "※ 보유 종목을 전부 매도한 직후 집계입니다 "
-            "(추가 매수가 없으면 15:30 정기 리포트는 생략됩니다)."
+            "(추가 매수가 없으면 15:35 정기 리포트는 생략됩니다)."
         ]
     else:
-        notes = ["※ 정규장 마감(15:30) 직전 집계이므로 마감 체결분이 반영되지 않았을 수 있습니다."]
+        notes = ["※ 체결이 확인된 주문만 집계에 들어갑니다 — 접수 후 체결 대기 중인 주문은 빠집니다."]
     if sync_failed:
         notes.insert(
             0,
@@ -386,7 +386,7 @@ def _buy_notes(execution: BuyExecution) -> List[str]:
     notes.extend(
         [
             "※ 익절/손절 감시는 이 프로그램이 실행 중일 때만 동작합니다 (키움 REST 스탑오더 미지원).",
-            "※ 체결가·수수료·손익은 15:30 리포트에서 확정됩니다.",
+            "※ 체결가·수수료·손익은 15:35 리포트에서 확정됩니다.",
         ]
     )
     return notes

@@ -42,6 +42,10 @@ MIGRATIONS = (
 # 부분체결도 실제 매매이므로 집계에 포함한다
 FILLED_STATUSES = (OrderStatus.FILLED.value, OrderStatus.PARTIALLY_FILLED.value)
 
+# 결과가 확정된 매도 — 체결됐거나(집계에 들어감) 거부·취소로 끝났거나(들어갈 것이 없음).
+# 그 밖의 상태(접수만 된 pending)는 아직 결과를 모르는 주문이다.
+SETTLED_STATUSES = FILLED_STATUSES + (OrderStatus.REJECTED.value, OrderStatus.CANCELLED.value)
+
 
 def _day_range(day: date) -> Tuple[str, str]:
     """하루의 시작/끝 타임스탬프 — timestamp가 ISO 문자열이라 문자열 비교로 걸러진다."""
@@ -132,7 +136,7 @@ class MonthlySummary:
 class TradeStore:
     """매수/매도 체결 내역을 SQLite에 영속 저장한다.
 
-    5.7절 일별 손익 요약, 5.11절 15:30 성과 리포트(일별/월별 누적)의 데이터 원천.
+    5.7절 일별 손익 요약, 5.11절 15:35 성과 리포트(일별/월별 누적)의 데이터 원천.
     개인 프로젝트 규모(파일 하나, 별도 서버 불필요)에 맞춰 파일 로그 대신 SQLite로 결정 (10절 Open Question).
 
     주문 접수 시점에는 체결 여부를 알 수 없어 pending으로 들어가므로, 집계 전에
@@ -256,6 +260,27 @@ class TradeStore:
             )
         logger.info("체결 결과 %d건을 매매 기록에 반영했습니다.", updated + len(external))
         return updated + len(external)
+
+    def has_unsettled_sells(self, day: date) -> bool:
+        """접수만 되고 체결도 거부도 확인되지 않은 당일 매도가 남아 있는지 (PRD 5.11).
+
+        청산 직후 리포트는 이 값이 True면 보내지 않고 미룬다. pending 행은 집계에서
+        통째로 빠지므로(`_build_summary`), 그대로 보내면 방금 판 종목이 '보유중'으로
+        실리고 손익·수수료가 0으로 나간다 (2026-08-12 실제 발생).
+
+        매수는 보지 않는다 — 09:30에 취소된 미체결 매수가 그대로 남아 있어도 팔 것이
+        없으니 리포트를 막을 이유가 없다.
+        """
+        start, end = _day_range(day)
+        placeholders = ", ".join("?" for _ in SETTLED_STATUSES)
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                f"""SELECT 1 FROM trades
+                    WHERE side = ? AND status NOT IN ({placeholders})
+                          AND timestamp BETWEEN ? AND ? LIMIT 1""",
+                (OrderSide.SELL.value, *SETTLED_STATUSES, start, end),
+            ).fetchone()
+        return row is not None
 
     def daily_summary(self, day: date) -> DailySummary:
         start, end = _day_range(day)
