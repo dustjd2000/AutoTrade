@@ -1,10 +1,11 @@
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Callable, Dict, List, Optional
 
 from src.api.client import KiwoomClient
 from src.api.market_data import MarketDataClient
+from src.data.disclosure import DisclosureClient, blocking_disclosure
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,10 @@ DETAIL_REQUEST_INTERVAL_SECONDS = 0.2
 # 전일 거래량 급증 배수 상위만 추린다.
 SHORTLIST_SIZE = 25
 
+# 프롬프트에 실을 종목당 공시 제목 수 (최신순). 정기보고서까지 다 실으면 후보 25종목만으로도
+# 프롬프트가 길어지고, 정작 중요한 재료가 묻힌다.
+MAX_HEADLINES_PER_TICKER = 3
+
 
 @dataclass
 class DailyStockData:
@@ -50,7 +55,8 @@ class DailyStockData:
     recent_high: float = 0.0      # 당일 제외 최근 거래일 중 최고가
     recent_low: float = 0.0       # 당일 제외 최근 거래일 중 최저가
     moving_average: float = 0.0   # 당일 제외 최근 거래일 종가 평균
-    headlines: List[str] = field(default_factory=list)  # 뉴스/공시 헤드라인
+    # DART 공시 제목 (최신순, 최대 MAX_HEADLINES_PER_TICKER건) — 수집은 DisclosureClient가 한다
+    headlines: List[str] = field(default_factory=list)
 
 
 class LargeCapUniverse:
@@ -99,17 +105,6 @@ class LargeCapUniverse:
         return str(row.get("orderWarning", "0")) not in ("0", "")
 
 
-class NewsClient:
-    """종목별 당일 뉴스/공시 헤드라인 수집.
-
-    데이터 소스(DART, 뉴스 API 등)가 아직 확정되지 않아 빈 목록을 반환한다 (PRD 10절).
-    헤드라인이 없어도 전일 등락률·거래량 급증 배수만으로 LLM 추천은 동작한다.
-    """
-
-    def get_headlines(self, ticker: str) -> List[str]:
-        return []
-
-
 class DataCollector:
     """LLM 추천에 사용할 전일 데이터를 종목별로 수집한다 (PRD 5.5-B).
 
@@ -117,6 +112,10 @@ class DataCollector:
     돌려주므로 전일 종가·고가·저가·등락률·거래량과 급증 배수가 모두 여기서 나온다.
     당일 기본정보(ka10001)는 조회하지 않는다: 09:00 이전에는 값이 전부 0이고(PRD 10절),
     매수 수량도 목표 매수가 기준으로 산정해 현재가가 필요 없다.
+
+    여기에 DART 공시를 하루치 일괄로 덧붙인다 — 악재 공시가 뜬 종목을 후보에서 빼고, 나머지
+    공시 제목은 프롬프트에 싣는다. 배제를 쇼트리스트보다 **앞에** 두는 이유는 뒤에 두면 후보가
+    그만큼 줄어들기 때문이다 (앞에 두면 빈자리를 다음 후보가 채운다).
 
     개별 종목 수집이 실패해도 전체 수집을 중단하지 않고 건너뛴다 — 일부 종목의
     일시적 조회 실패로 당일 추천 전체가 스킵되는 것을 방지한다.
@@ -126,15 +125,17 @@ class DataCollector:
         self,
         market_data: MarketDataClient,
         universe: LargeCapUniverse,
-        news_client: NewsClient,
+        disclosures: DisclosureClient,
         request_interval: float = DETAIL_REQUEST_INTERVAL_SECONDS,
         shortlist_size: int = SHORTLIST_SIZE,
+        notify: Optional[Callable[[str], None]] = None,
     ):
         self.market_data = market_data
         self.universe = universe
-        self.news_client = news_client
+        self.disclosures = disclosures
         self.request_interval = request_interval
         self.shortlist_size = shortlist_size
+        self.notify = notify
 
     def collect(self) -> List[DailyStockData]:
         try:
@@ -146,9 +147,38 @@ class DataCollector:
         collected = self._collect_previous_day(rows)
         logger.info("전일 데이터 수집 완료: %d/%d 종목", len(collected), len(rows))
 
-        shortlist = self._shortlist(collected)
+        shortlist = self._shortlist(self._apply_disclosures(collected))
         self._log_candidates(shortlist)
         return shortlist
+
+    def _apply_disclosures(self, candidates: List[DailyStockData]) -> List[DailyStockData]:
+        """악재 공시가 뜬 종목을 빼고, 나머지 종목에 공시 제목을 붙인다 (PRD 5.5-B).
+
+        조회가 실패하면 후보를 그대로 돌려준다 — 공시 하나 때문에 그날 추천 전체가 멈추는
+        편보다 낫다. 대신 배제가 빠진 채로 돌았다는 사실을 알림으로 알린다.
+        """
+        if not candidates:
+            # 전일 지표 수집이 통째로 실패한 날 — 붙일 곳이 없는데 코스피 공시를 다 받아올 필요가 없다
+            return candidates
+
+        try:
+            by_ticker = self.disclosures.fetch([data.ticker for data in candidates])
+        except Exception:
+            logger.exception("DART 공시 조회에 실패했습니다. 공시 없이 진행합니다.")
+            if self.notify:
+                self.notify("[경고] DART 공시 조회 실패 — 악재 공시 배제 없이 추천을 진행합니다.")
+            return candidates
+
+        remaining: List[DailyStockData] = []
+        for data in candidates:
+            titles = by_ticker.get(data.ticker, [])
+            blocking = blocking_disclosure(titles)
+            if blocking:
+                logger.info("악재 공시로 후보 제외: %s %s | %s", data.ticker, data.name, blocking)
+                continue
+            data.headlines = titles[:MAX_HEADLINES_PER_TICKER]
+            remaining.append(data)
+        return remaining
 
     def _collect_previous_day(self, rows: List[dict]) -> List[DailyStockData]:
         """유니버스 전 종목의 전일 지표를 모은다 (종목당 일봉 1회)."""
@@ -221,5 +251,4 @@ class DataCollector:
             recent_high=metrics.recent_high,
             recent_low=metrics.recent_low,
             moving_average=metrics.moving_average,
-            headlines=self.news_client.get_headlines(ticker),
         )

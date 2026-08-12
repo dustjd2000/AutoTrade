@@ -1,7 +1,8 @@
 from types import SimpleNamespace
 
 from src.api.market_data import PreviousDayMetrics
-from src.data.collector import DataCollector, LargeCapUniverse, NewsClient
+from src.data.collector import DataCollector, LargeCapUniverse
+from src.data.disclosure import DisclosureClient
 
 
 def make_universe(rows):
@@ -39,9 +40,23 @@ def metrics(ticker, change_rate=1.5, volume_surge=1.0, close=10000.0, volume=500
     )
 
 
-def collect(universe, market_data, **kwargs):
-    """request_interval=0으로 테스트에서 대기하지 않는다."""
-    return DataCollector(market_data, universe, NewsClient(), request_interval=0, **kwargs).collect()
+def fake_disclosures(by_ticker):
+    return SimpleNamespace(fetch=lambda tickers: by_ticker)
+
+
+def collect(universe, market_data, disclosures=None, **kwargs):
+    """request_interval=0으로 테스트에서 대기하지 않는다.
+
+    공시 클라이언트를 넘기지 않으면 키 없는 DisclosureClient가 들어가 빈 결과를 돌려준다
+    — 조회도 배제도 일어나지 않아 공시 도입 전과 같은 경로가 된다.
+    """
+    return DataCollector(
+        market_data,
+        universe,
+        disclosures or DisclosureClient(""),
+        request_interval=0,
+        **kwargs,
+    ).collect()
 
 
 def test_universe_keeps_only_large_cap_kospi_stocks():
@@ -169,3 +184,70 @@ def test_collector_carries_the_recent_price_band_to_the_prompt_data():
     assert result[0].recent_high == 11000.0
     assert result[0].recent_low == 9000.0
     assert result[0].moving_average == 9500.0
+
+
+# ── 공시 (PRD 5.5-B '공시 수집과 악재 배제') ─────────────────
+
+
+def test_collector_drops_stocks_with_a_blocking_disclosure():
+    universe = make_universe([row("005930", "삼성전자"), row("000660", "SK하이닉스")])
+    disclosures = fake_disclosures({"000660": ["주요사항보고서(유상증자결정)"]})
+
+    result = collect(universe, fake_market_data(metrics), disclosures)
+
+    assert [d.ticker for d in result] == ["005930"]
+
+
+def test_collector_carries_disclosure_titles_into_the_prompt_data():
+    universe = make_universe([row("005930", "삼성전자")])
+    disclosures = fake_disclosures({"005930": ["단일판매ㆍ공급계약체결", "분기보고서"]})
+
+    result = collect(universe, fake_market_data(metrics), disclosures)
+
+    assert result[0].headlines == ["단일판매ㆍ공급계약체결", "분기보고서"]
+
+
+def test_collector_keeps_only_the_latest_headlines():
+    universe = make_universe([row("005930", "삼성전자")])
+    disclosures = fake_disclosures({"005930": [f"공시{n}" for n in range(6)]})
+
+    result = collect(universe, fake_market_data(metrics), disclosures)
+
+    assert result[0].headlines == ["공시0", "공시1", "공시2"]
+
+
+def test_collector_excludes_before_shortlisting_so_the_slot_is_refilled():
+    """배제된 종목의 자리는 다음 후보가 채운다 — 쇼트리스트 뒤에 배제하면 정원이 준다."""
+    universe = make_universe([row(code) for code in ("100000", "200000", "300000")])
+    surges = {"100000": 5.0, "200000": 3.0, "300000": 1.0}
+    disclosures = fake_disclosures({"200000": ["주요사항보고서(유상증자결정)"]})
+
+    result = collect(
+        universe,
+        fake_market_data(lambda t: metrics(t, volume_surge=surges[t])),
+        disclosures,
+        shortlist_size=2,
+    )
+
+    assert [d.ticker for d in result] == ["100000", "300000"]
+
+
+def test_collector_continues_without_disclosures_when_the_lookup_fails():
+    """공시 하나 때문에 그날 추천 전체가 멈추지 않는다. 대신 알림을 남긴다."""
+    universe = make_universe([row("005930", "삼성전자")])
+
+    def boom(tickers):
+        raise RuntimeError("DART 조회 실패")
+
+    alerts = []
+    result = DataCollector(
+        fake_market_data(metrics),
+        universe,
+        SimpleNamespace(fetch=boom),
+        request_interval=0,
+        notify=alerts.append,
+    ).collect()
+
+    assert [d.ticker for d in result] == ["005930"]
+    assert result[0].headlines == []
+    assert len(alerts) == 1 and "DART" in alerts[0]

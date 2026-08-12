@@ -19,7 +19,8 @@ from src.api.order import OrderClient
 from src.api.websocket_client import WebSocketClient
 from src.core.daily_workflow import DailyWorkflow
 from src.core.engine import TradingEngine
-from src.data.collector import DataCollector, LargeCapUniverse, NewsClient
+from src.data.collector import DataCollector, LargeCapUniverse
+from src.data.disclosure import DisclosureClient
 from src.llm.recommender import LLMRecommender
 from src.logger.trade_store import TradeStore
 from src.notification.alert import AlertNotifier
@@ -152,7 +153,10 @@ def build_runtime(settings: Settings) -> Runtime:
 
     workflow = DailyWorkflow(
         collector=DataCollector(
-            market_data, LargeCapUniverse(KiwoomClient(settings, auth)), NewsClient()
+            market_data,
+            LargeCapUniverse(KiwoomClient(settings, auth)),
+            DisclosureClient(settings.dart_api_key),
+            notify=engine.notify,
         ),
         recommender=LLMRecommender(settings),
         strategy=strategy,
