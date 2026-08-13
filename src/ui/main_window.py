@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, time as dt_time
 from pathlib import Path
 from typing import Optional
 
@@ -58,15 +57,6 @@ COLOR_TEXT_DIM = "#6c7086"
 # 국내 관행에 맞춰 수익은 빨강, 손실은 파랑으로 표기한다
 COLOR_PROFIT = "#ff5555"
 COLOR_LOSS = "#6ba3ff"
-
-# 익절/손절/단순익절 적용 체크박스를 매일 기본값(손절만)으로 되돌리는 시각과 감시 주기
-# (PRD 5.5-B). 엔진 스케줄러가 아니라 UI 타이머가 맡는다 — 엔진이 꺼져 있는 날에도
-# 원복되어야 어제 바꾼 상태가 남은 채로 오늘 매매에 들어가는 일이 없다.
-# 08:45가 아니라 08:00인 것은, 추천 시각이 설정값(08:40~08:55)이라 08:45 원복이 그날의
-# 추천·매수 판단보다 뒤로 밀릴 수 있고, 장 준비 중에 끈 라인이 25분 만에 되켜지기
-# 때문이다 (확정 2026-08-12).
-EXIT_FLAG_RESET_TIME = dt_time(8, 0)
-EXIT_FLAG_RESET_CHECK_MS = 60_000
 
 # 보유 종목 표 갱신 주기 — 캐시값만 읽으므로 API 호출이 발생하지 않는다
 HOLDINGS_REFRESH_MS = 2000
@@ -168,9 +158,6 @@ class MainWindow(QMainWindow):
         self._restart_pending = False
         # 보유 종목 표를 만드는 도중에도 갱신이 한 번 돌기 때문에, 아직 없을 수 있음을 표시해 둔다
         self._unsellable_box: Optional[QGroupBox] = None
-        # 익절/손절/단순익절 적용 체크박스를 마지막으로 원복한 날
-        # (None이면 아직 이번 실행에서 원복 전)
-        self._exit_flags_reset_on: Optional[date] = None
         # 배타 처리로 반대쪽 체크박스를 끄는 동안 True — 그때 딸려오는 toggled는 무시한다
         # (안 그러면 같은 상태로 엔진 반영과 로그가 두 번 나간다)
         self._syncing_exit_flags = False
@@ -185,12 +172,6 @@ class MainWindow(QMainWindow):
         # 체크박스 초기값은 연결 전에 setChecked로 넣어 toggled가 울리지 않는다 — 입력란
         # 활성/비활성 같은 연동 상태를 여기서 한 번 맞춰 준다 (엔진은 아직 없으므로 반영은 생략됨)
         self._on_exit_flag_toggled()
-
-        # 엔진과 무관하게 항상 돈다 — 엔진이 꺼진 날에도 원복은 이뤄져야 한다
-        self._exit_flag_timer = QTimer(self)
-        self._exit_flag_timer.setInterval(EXIT_FLAG_RESET_CHECK_MS)
-        self._exit_flag_timer.timeout.connect(self._reset_exit_flags_daily)
-        self._exit_flag_timer.start()
 
         if auto_start:
             # 창이 완전히 뜬 뒤 "▶ 시작" 버튼을 누른 것과 동일하게 동작해야 하므로
@@ -416,9 +397,9 @@ class MainWindow(QMainWindow):
 
         # 적용 여부 체크박스 — 끄면 그 라인은 감시하지 않는다. `.env`에 저장하지 않고
         # 엔진을 재시작하지도 않는다(끄고 싶은 순간에 감시 공백이 생기면 안 된다).
-        # **기본은 손절만이다** — 익절 두 방식 모두 기본 해제다 (확정 2026-08-12, PRD 5.5-B
-        # "익절 기본 해제"). 실매매 27건을 당일 고가와 대조해 보니 익절이 상방을 잘라
-        # 순손익을 깎고 있었다.
+        # **기본은 손절 + 단순익절이다** (확정 2026-08-13, PRD 5.5-B "단순익절 기본 적용").
+        # 합산 퍼센트 익절만 기본 해제로 남는다 — 실매매 27건을 당일 고가와 대조해 보니
+        # 익절이 상방을 잘라 순손익을 깎고 있었고(2026-08-12), 그중 단순익절만 되돌렸다.
         self._take_profit_enabled = QCheckBox("적용")
         self._take_profit_enabled.setChecked(False)
         self._stop_loss_enabled = QCheckBox("적용")
@@ -426,7 +407,7 @@ class MainWindow(QMainWindow):
         # 단순익절 — 익절선을 입력값(%)이 아니라 0으로 두고 종목별로 판정한다. 위 '적용'
         # (합산 퍼센트 익절)과는 배타적이라 한쪽을 켜면 다른 쪽이 꺼진다. 둘 다 끄면 익절 없음.
         self._simple_take_profit_enabled = QCheckBox("단순익절적용")
-        self._simple_take_profit_enabled.setChecked(False)
+        self._simple_take_profit_enabled.setChecked(True)
         self._simple_take_profit_enabled.setToolTip(
             "종목마다 따로 봅니다 — 그 종목의 순손익이 0을 넘으면(비용을 빼고 조금이라도 "
             "이익이면) 그 종목만 즉시 매도하고 나머지는 계속 보유합니다."
@@ -463,8 +444,8 @@ class MainWindow(QMainWindow):
             "입력란은 쓰이지 않습니다. 익절 '적용'과 '단순익절적용'은 둘 중 하나만 켜지고, "
             "둘 다 끄면 익절이 없습니다. 이익 난 종목이 먼저 빠지면 남은 종목의 손실을 상쇄할 "
             "것이 없어져 합산 손절이 더 쉽게 걸립니다. "
-            "기본값은 익절 없이 손절만이며, 익절은 그날 하루만 켜는 쪽입니다 — "
-            f"매일 {EXIT_FLAG_RESET_TIME:%H:%M}에 손절만 켜진 상태로 되돌아갑니다)"
+            "기본값은 손절 + 단순익절이며, 여기서 바꾼 상태는 프로그램을 끌 때까지 "
+            "유지됩니다 — 다시 시작하면 기본값으로 돌아갑니다)"
         )
         exit_hint.setWordWrap(True)
         exit_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
@@ -904,8 +885,8 @@ class MainWindow(QMainWindow):
     def _on_exit_flag_toggled(self) -> None:
         """체크박스 상태를 돌고 있는 엔진에 그대로 밀어 넣는다 (재시작하지 않는다).
 
-        `.env`에 저장하지 않으므로 앱을 다시 켜면 항상 기본값(손절만)으로 돌아간다
-        — 매일 08:00 원복과 같은 방향이다.
+        `.env`에 저장하지 않으므로 앱을 다시 켜면 항상 기본값(손절 + 단순익절)으로
+        돌아간다 — 바꾼 상태를 되돌리는 경로는 이 재시작 하나뿐이다.
         """
         if self._syncing_exit_flags:
             return
@@ -1012,36 +993,6 @@ class MainWindow(QMainWindow):
             else "그 라인에 닿아도 매도하지 않습니다."
         )
         self._exit_flag_hint.setText(f"⚠ {' / '.join(disabled)} 적용 해제됨 — {tail}")
-
-    def _reset_exit_flags_daily(self) -> None:
-        """매일 EXIT_FLAG_RESET_TIME(08:00)에 체크박스를 기본 상태로 되돌린다 (PRD 5.5-B).
-
-        변경은 그날 하루짜리 판단이라는 전제다 — 어제 끈 손절이 오늘까지 꺼진 채로 남으면
-        감시가 빠진 줄 모르고 매매에 들어간다. 엔진이 꺼져 있어도 원복되도록 UI가 맡는다.
-
-        기본 상태는 **손절만**이다 (확정 2026-08-12). 익절은 두 방식 모두 꺼 둔다 — 켜는
-        것이 그날 하루짜리 판단이 된다.
-        """
-        now = datetime.now()
-        if now.date() == self._exit_flags_reset_on or now.time() < EXIT_FLAG_RESET_TIME:
-            return
-
-        self._exit_flags_reset_on = now.date()
-        defaults = (
-            (self._stop_loss_enabled, True),
-            (self._take_profit_enabled, False),
-            (self._simple_take_profit_enabled, False),
-        )
-        if all(toggle.isChecked() == state for toggle, state in defaults):
-            return  # 이미 기본 상태면 되돌릴 것이 없다
-
-        logger.info(
-            "%s — 청산 조건을 기본값(손절만, 익절 없음)으로 되돌립니다.",
-            f"{EXIT_FLAG_RESET_TIME:%H:%M}",
-        )
-        # setChecked가 toggled를 발생시켜 배타 처리·엔진 반영·문구 갱신까지 이어진다
-        for toggle, state in defaults:
-            toggle.setChecked(state)
 
     # ── 설정 저장/불러오기 ───────────────────────────────────
     def _load_settings(self) -> None:
