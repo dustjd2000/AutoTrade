@@ -7,7 +7,7 @@ from src.llm.recommender import (
     LLMRecommender,
     StockRecommendation,
     apply_price_guardrail,
-    attach_prev_close,
+    attach_reference_prices,
     build_system_prompt,
     build_user_prompt,
     drop_unknown_tickers,
@@ -157,22 +157,35 @@ def test_apply_price_guardrail_uses_matching_stock():
     assert recommendations[0].target_price == 73_500
 
 
-def test_attach_prev_close_carries_the_gap_down_reference():
-    """09:00 갭 하락 판정이 쓸 전일 종가를 추천에 실어 준다 (PRD 5.5-B)."""
+def test_attach_reference_prices_carries_today_price():
+    """09:10 갭 하락 판정 기준가는 추천 시각의 현재가다 (PRD 5.5-B)."""
     recommendations = [StockRecommendation("005930", "삼성전자", 70_000, "수급")]
 
-    attach_prev_close(recommendations, [stock(prev_close=70_000.0)])
+    attach_reference_prices(
+        recommendations, [stock(prev_close=70_000.0, today_price=71_400.0)]
+    )
 
+    assert recommendations[0].recommend_price == 71_400.0
     assert recommendations[0].prev_close == 70_000.0
 
 
-def test_attach_prev_close_leaves_zero_for_unknown_tickers():
+def test_attach_reference_prices_leaves_zero_when_today_price_unknown():
+    """현재가를 못 받았으면 0으로 둔다 — 0은 '모름'이고 갭 판정이 꺼진다."""
+    recommendations = [StockRecommendation("005930", "삼성전자", 70_000, "수급")]
+
+    attach_reference_prices(recommendations, [stock(today_price=0.0)])
+
+    assert recommendations[0].recommend_price == 0.0
+
+
+def test_attach_reference_prices_leaves_zero_for_unknown_tickers():
     """찾지 못하면 0(모름) — 갭 하락 판정이 건너뛰어져 매수를 막지 않는다."""
     recommendations = [StockRecommendation("000660", "SK하이닉스", 250_000, "HBM")]
 
-    attach_prev_close(recommendations, [stock(ticker="005930")])
+    attach_reference_prices(recommendations, [stock(ticker="005930")])
 
     assert recommendations[0].prev_close == 0.0
+    assert recommendations[0].recommend_price == 0.0
 
 
 # ── recommend()의 방어 로직 ──────────────────────────────────

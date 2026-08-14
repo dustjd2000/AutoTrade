@@ -418,15 +418,15 @@ def test_gap_skip_is_reported_in_the_buy_result_email():
     assert "갭" in body
 
 
-# ── 갭 하락 판정 (PRD 5.5-B, 확정 2026-08-11) ──────────────
-def gap_down_setup(current_price, prev_close=1000.0, target_price=1000):
+# ── 갭 하락 판정 (PRD 5.5-B, 확정 2026-08-11, 기준값 변경 2026-08-14) ──────────────
+def gap_down_setup(current_price, recommend_price=1000.0, target_price=1000):
     recs = [
         StockRecommendation(
             ticker="005930",
             name="삼성전자",
             target_price=target_price,
             reason="a",
-            prev_close=prev_close,
+            recommend_price=recommend_price,
         )
     ]
     workflow, email, order_client, _, strategy = make_workflow(recommendations=recs)
@@ -437,8 +437,8 @@ def gap_down_setup(current_price, prev_close=1000.0, target_price=1000):
     return workflow, email, order_client
 
 
-def test_buy_is_skipped_when_the_open_gaps_below_the_previous_close():
-    """전일 강세가 이어진다는 전제가 깨진 날은 참여하지 않는다 (허용치 1% → 990원 미만)."""
+def test_buy_is_skipped_when_the_price_gaps_below_the_recommend_price():
+    """추천한 뒤 무너진 종목은 사지 않는다 (허용치 1% → 990원 미만)."""
     workflow, _, order_client = gap_down_setup(current_price=989.0)
 
     workflow.execute_buys()
@@ -454,14 +454,15 @@ def test_buy_proceeds_inside_the_gap_down_tolerance():
     assert len(order_client.orders) == 1
 
 
-def test_gap_down_is_measured_against_the_previous_close_not_the_target():
-    """2026-08-11 포스코퓨처엠 회귀 — 목표가 기준으로는 걸리지 않고 전일 종가 기준으로만 걸린다.
+def test_gap_down_is_measured_against_the_reference_not_the_target():
+    """2026-08-11 포스코퓨처엠 회귀 — 목표가 기준으로는 걸리지 않고 기준가로만 걸린다.
 
-    시가 163,300원은 목표가 163,500원 대비 -0.12%라 목표가 기준 ±2% 밴드에는 안 걸리지만,
-    전일 종가 165,500원 대비로는 -1.33%다. 이 종목은 이날 158,800원까지 밀려 손절됐다.
+    163,300원은 목표가 163,500원 대비 -0.12%라 목표가 기준 ±2% 밴드에는 안 걸리지만,
+    기준가 165,500원 대비로는 -1.33%다. 이 종목은 이날 158,800원까지 밀려 손절됐다.
+    목표 매수가 자체가 눌림을 노려 기준가보다 낮게 잡히므로 목표가는 기준이 될 수 없다.
     """
     workflow, _, order_client = gap_down_setup(
-        current_price=163_300.0, prev_close=165_500.0, target_price=163_500
+        current_price=163_300.0, recommend_price=165_500.0, target_price=163_500
     )
 
     workflow.execute_buys()
@@ -479,9 +480,9 @@ def test_gap_down_check_is_off_when_the_tolerance_is_zero():
     assert len(order_client.orders) == 1
 
 
-def test_gap_down_check_is_skipped_when_the_previous_close_is_unknown():
-    """전일 종가를 모르면 판정할 수 없다 — 시세 조회 실패와 같이 매수를 막지 않는다."""
-    workflow, _, order_client = gap_down_setup(current_price=800.0, prev_close=0.0)
+def test_gap_down_check_is_skipped_when_the_reference_price_is_unknown():
+    """기준가를 모르면 판정할 수 없다 — 시세 조회 실패와 같이 매수를 막지 않는다."""
+    workflow, _, order_client = gap_down_setup(current_price=800.0, recommend_price=0.0)
 
     workflow.execute_buys()
 
@@ -838,3 +839,18 @@ def test_filled_order_present_in_fills_is_not_cancelled_again():
     _, order_client, _ = run_buys(recs, fills=fills)
 
     assert order_client.cancelled == []
+
+
+def test_gap_down_ignores_the_previous_close():
+    """전일 종가 대비 판정은 09:05 후보 선정이 맡는다 — 주문 직전은 추천 시점만 본다.
+
+    전일 종가 10,000 / 추천 시점 10,500 / 현재가 10,300이면 전일 종가 기준으로는 +3%라
+    통과하지만, 추천 시점 기준으로는 -1.9%라 걸러야 한다.
+    """
+    workflow, _, order_client = gap_down_setup(
+        current_price=10_300.0, recommend_price=10_500.0, target_price=10_400
+    )
+
+    workflow.execute_buys()
+
+    assert order_client.orders == []

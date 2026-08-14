@@ -143,7 +143,7 @@ class DailyWorkflow:
             try:
                 price = float(plan.target_price)
 
-                gap_note = self._gap_note(plan.ticker, label, price, plan.prev_close)
+                gap_note = self._gap_note(plan.ticker, label, price, plan.recommend_price)
                 if gap_note is not None:
                     skipped.append(plan.ticker)
                     records.append(
@@ -308,23 +308,25 @@ class DailyWorkflow:
         self._write_buy_records(cash, plans[0].amount, records)
 
     def _gap_note(
-        self, ticker: str, label: str, target_price: float, prev_close: float = 0.0
+        self, ticker: str, label: str, target_price: float, reference_price: float = 0.0
     ) -> Optional[str]:
         """갭으로 이 종목을 건너뛰어야 하면 사유 문구를, 그대로 매수하면 None을 돌려준다.
 
         위아래 두 방향을 본다 (PRD 5.5-B '주문 방식').
 
-        - **갭 상승** (확정 2026-08-07): 목표 매수가는 전일 종가를 근거로 잡은 값이다. 시가가
-          그보다 크게 높으면 그 전제가 이미 깨진 것이므로 그날은 참여하지 않는다. 지정가라
-          목표가보다 비싸게 체결되는 일 자체는 없다 — 이 판정이 막는 것은 갭 상승 뒤 목표가까지
-          되밀린 종목을 받아내는 경우다.
-        - **갭 하락** (확정 2026-08-11): 기준이 목표가가 아니라 **전일 종가**다. 목표가 자체가
-          눌림을 노려 전일 종가보다 낮게 잡히므로, 목표가 기준으로 하한을 두면 얼마나 낮게
-          출발했는지를 잡지 못한다. 지정가 매수는 가격이 목표가까지 내려온 종목만 잡는 역선택이
-          있어(오르는 종목은 미체결) 이 판정이 없으면 갭 하락 종목만 남는다.
+        - **갭 상승** (확정 2026-08-07): 목표 매수가는 추천 시점 가격을 근거로 잡은 값이다.
+          현재가가 그보다 크게 높으면 그 전제가 이미 깨진 것이므로 그날은 참여하지 않는다.
+          지정가라 목표가보다 비싸게 체결되는 일 자체는 없다 — 이 판정이 막는 것은 갭 상승 뒤
+          목표가까지 되밀린 종목을 받아내는 경우다.
+        - **갭 하락** (확정 2026-08-11, 기준값 변경 2026-08-14): 기준이 목표가가 아니라
+          **추천 시점(09:05)의 현재가**다. 목표가 자체가 눌림을 노려 기준가보다 낮게 잡히므로,
+          목표가 기준으로 하한을 두면 얼마나 낮게 출발했는지를 잡지 못한다. 전일 종가 대비
+          판정은 09:05 후보 선정이 이미 맡았고(PRD 5.5-B '당일 지표 병행 수집'), 여기서는
+          추천한 뒤 무너진 종목을 잡는다. 지정가 매수는 가격이 목표가까지 내려온 종목만 잡는
+          역선택이 있어(오르는 종목은 미체결) 이 판정이 없으면 갭 하락 종목만 남는다.
 
         시세 조회에 실패하면 매수를 막지 않고 그대로 진행한다: 가격 상한은 지정가가 이미
-        지키고 있다. 전일 종가를 모르면(0 이하) 갭 하락 판정만 건너뛴다.
+        지키고 있다. 기준가를 모르면(0 이하) 갭 하락 판정만 건너뛴다.
         """
         try:
             current = self.engine.market_data.get_current_price(ticker).price
@@ -350,22 +352,22 @@ class DailyWorkflow:
             )
 
         # 허용치 0은 '끔'이다 — 갭 상승 쪽(0 = 가장 엄격)과 반대 규약이라 PRD 5.5-B에 명시했다
-        if self.gap_down_tolerance_ratio <= 0 or prev_close <= 0:
+        if self.gap_down_tolerance_ratio <= 0 or reference_price <= 0:
             return None
 
-        floor = prev_close * (1 - self.gap_down_tolerance_ratio)
+        floor = reference_price * (1 - self.gap_down_tolerance_ratio)
         if current >= floor:
             return None
 
         logger.info(
-            "매수 건너뜀: %s — 현재가 %s원이 전일 종가 %s원의 허용 하한 %s원을 밑돕니다.",
+            "매수 건너뜀: %s — 현재가 %s원이 추천 시점 %s원의 허용 하한 %s원을 밑돕니다.",
             label,
             f"{current:,.0f}",
-            f"{prev_close:,.0f}",
+            f"{reference_price:,.0f}",
             f"{floor:,.0f}",
         )
         return (
-            f"갭 하락 — 현재가 {current:,.0f}원이 전일 종가 {prev_close:,.0f}원 대비 "
+            f"갭 하락 — 현재가 {current:,.0f}원이 추천 시점 {reference_price:,.0f}원 대비 "
             f"허용치 {self.gap_down_tolerance_ratio * 100:.1f}%를 초과 하락"
         )
 
