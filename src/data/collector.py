@@ -257,7 +257,9 @@ class DataCollector:
         갭 하락 판정과 같은 `GAP_DOWN_TOLERANCE_PERCENT`를 재사용한다 — 판정 내용이 같아
         설정을 둘로 나눌 이유가 없다. 허용치 0은 '끔'이다.
         """
-        if self.gap_down_tolerance_ratio <= 0:
+        # 거를 후보 자체가 없으면 조용히 지나간다 — 여기서 알리면 수집 실패 하나에 메일이
+        # 두 통 나가고, 먼저 오는 쪽이 원인을 필터로 잘못 지목한다 (_apply_disclosures와 같은 가드)
+        if not candidates or self.gap_down_tolerance_ratio <= 0:
             return candidates
 
         floor = -self.gap_down_tolerance_ratio * 100

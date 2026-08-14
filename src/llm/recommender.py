@@ -165,12 +165,12 @@ class StockRecommendation:
     # 목표 매도가 — 추천 메일에 참고로 싣기만 하고 주문에는 쓰지 않는다 (PRD 5.5-B '목표 매도가').
     # 0은 '산출 안 됨'이며(거래량 급증 배수와 같은 규약), 그 경우 메일에서 줄이 통째로 빠진다.
     target_sell_price: int = 0
-    # 전일 종가 — 목표가 가드레일의 폴백 기준이다 (당일 현재가를 못 받은 종목에만 쓰인다).
-    # 추천 시각에 이미 수집해 둔 값을 실어 나르는 것이라 09:10에 일봉을 다시 조회하지 않는다.
-    prev_close: float = 0.0
     # 추천 시각(09:05)의 현재가 — 09:10 갭 하락 판정의 기준값이다 (PRD 5.5-B '갭 하락한
     # 종목도 건너뛴다', 기준값 변경 2026-08-14). 전일 종가 대비 판정은 09:05 후보 선정이
     # 이미 맡았고, 여기서는 '추천한 뒤 무너진 종목'을 잡는다. 0은 '모름'이며 판정을 건너뛴다.
+    #
+    # 전일 종가는 여기까지 실어 나르지 않는다 (2026-08-14) — 목표가 가드레일은 추천 산출
+    # 시점에 `DailyStockData`를 직접 보고 끝나므로, 09:10까지 넘길 이유가 없다.
     recommend_price: float = 0.0
 
 
@@ -331,23 +331,18 @@ def apply_price_guardrail(
             )
 
 
-def attach_reference_prices(
+def attach_recommend_price(
     recommendations: List[StockRecommendation], daily_data: List[DailyStockData]
 ) -> None:
-    """수집 단계의 가격을 추천에 실어 09:10 판정까지 넘긴다 (제자리 수정, PRD 5.5-B).
+    """추천 시각의 현재가를 추천에 실어 09:10 갭 판정까지 넘긴다 (제자리 수정, PRD 5.5-B).
 
-    09:10에 일봉이나 기준가를 다시 조회하지 않기 위해서다 (API 호출을 늘리지 않는다).
-    `recommend_price`는 갭 하락 판정의 기준값이고, `prev_close`는 목표가 가드레일의
-    폴백이다. 후보 밖 종목은 `drop_unknown_tickers`가 이미 걸러낸 뒤라 정상적으로는 전부
-    채워지지만, 못 찾으면 0(모름)으로 두어 판정을 건너뛰게 한다.
+    09:10에 기준가를 다시 조회하지 않기 위해서다 (API 호출을 늘리지 않는다). 후보 밖
+    종목은 `drop_unknown_tickers`가 이미 걸러낸 뒤라 정상적으로는 전부 채워지지만, 못
+    찾으면 0(모름)으로 두어 판정을 건너뛰게 한다.
     """
-    by_ticker = {data.ticker: data for data in daily_data}
+    today_price = {data.ticker: data.today_price for data in daily_data}
     for rec in recommendations:
-        data = by_ticker.get(rec.ticker)
-        if data is None:
-            continue
-        rec.prev_close = data.prev_close
-        rec.recommend_price = data.today_price
+        rec.recommend_price = today_price.get(rec.ticker, 0.0)
 
 
 def warn_invalid_sell_targets(recommendations: List[StockRecommendation]) -> None:
@@ -448,7 +443,7 @@ class LLMRecommender:
             return None
 
         apply_price_guardrail(recommendations, daily_data)
-        attach_reference_prices(recommendations, daily_data)
+        attach_recommend_price(recommendations, daily_data)
         warn_invalid_sell_targets(recommendations)
         # 매수가와 매도가를 함께 남긴다 — 나중에 실제 고가와 대조해 목표 매도가가
         # 쓸 만했는지 되짚을 유일한 근거다 (DB에는 남지 않는다)

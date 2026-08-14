@@ -16,7 +16,6 @@ class BuyPlan:
     amount: float        # 종목당 배정액
     target_price: int    # 지정가 매수 가격 (LLM 제시 → 호가 단위·가드레일 보정 완료)
     reason: str
-    prev_close: float = 0.0  # 목표가 가드레일 폴백용 (0 = 모름)
     recommend_price: float = 0.0  # 09:10 갭 하락 판정의 기준값 (0 = 모름 → 판정 건너뜀)
 
 
@@ -59,7 +58,6 @@ class LLMMomentumStrategy(BaseStrategy):
                 amount=amount_per_stock,
                 target_price=r.target_price,
                 reason=r.reason,
-                prev_close=r.prev_close,
                 recommend_price=r.recommend_price,
             )
             for r in self._recommendations[: self.target_stock_count]

@@ -61,8 +61,8 @@ def test_custom_ratio_and_count_change_allocation():
     assert sum(p.amount for p in plans) == 8_000_000
 
 
-def test_buy_plan_carries_the_previous_close_for_the_gap_down_check():
-    """09:00 갭 하락 판정 기준값이 추천 → 계획으로 넘어와야 한다 (PRD 5.5-B)."""
+def test_buy_plan_carries_the_recommend_price_for_the_gap_down_check():
+    """09:10 갭 하락 판정 기준값이 추천 → 계획으로 넘어와야 한다 (PRD 5.5-B)."""
     strategy = LLMMomentumStrategy()
     strategy.set_recommendations(
         [
@@ -71,11 +71,11 @@ def test_buy_plan_carries_the_previous_close_for_the_gap_down_check():
                 name="포스코퓨처엠",
                 target_price=163_500,
                 reason="사유",
-                prev_close=165_500.0,
+                recommend_price=165_500.0,
             )
         ]
     )
 
     plans = strategy.build_buy_plans(cash=12_000_000)
 
-    assert plans[0].prev_close == 165_500.0
+    assert plans[0].recommend_price == 165_500.0

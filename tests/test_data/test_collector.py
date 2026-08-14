@@ -396,3 +396,20 @@ def test_prescreen_limits_quote_calls():
     collect(universe, md, gap_down_tolerance_ratio=0.01, prescreen_size=40)
 
     assert len(asked) == 40
+
+
+def test_no_alert_when_there_is_nothing_to_filter():
+    """수집이 통째로 실패한 날 — 거를 후보 자체가 없으면 필터는 조용히 지나간다.
+
+    이 자리에서 알리면 한 장애에 메일이 두 통 나가고(수집 실패 알림이 뒤따른다),
+    먼저 오는 쪽이 원인을 필터로 잘못 지목한다. 공시 배제(_apply_disclosures)가
+    같은 이유로 두고 있는 가드와 같다.
+    """
+    universe = make_universe([])
+    md = fake_market_data_with_quotes(lambda t: metrics(t), lambda t: quote(10000.0))
+    alerts = []
+
+    result = collect(universe, md, gap_down_tolerance_ratio=0.01, notify=alerts.append)
+
+    assert result == []
+    assert alerts == []
