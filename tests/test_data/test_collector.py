@@ -42,6 +42,28 @@ def metrics(ticker, change_rate=1.5, volume_surge=1.0, close=10000.0, volume=500
     )
 
 
+def fake_market_data_with_quotes(metrics_fn, quote_fn):
+    """당일 현재가까지 주는 가짜 클라이언트.
+
+    quote_fn(ticker)가 None을 돌려주면 조회 실패로 본다 (예외를 던지는 경우와 같은 경로).
+    """
+
+    def get_current_price(ticker):
+        result = quote_fn(ticker)
+        if result is None:
+            raise RuntimeError("조회 실패")
+        return result
+
+    return SimpleNamespace(
+        get_previous_day_metrics=metrics_fn,
+        get_current_price=get_current_price,
+    )
+
+
+def quote(price, volume=1000):
+    return SimpleNamespace(price=price, volume=volume)
+
+
 def fake_disclosures(by_ticker):
     return SimpleNamespace(fetch=lambda tickers: by_ticker)
 
@@ -274,3 +296,103 @@ def test_today_fields_default_to_zero():
     assert result[0].today_price == 0.0
     assert result[0].today_change_rate == 0.0
     assert result[0].today_volume == 0
+
+
+# ── 당일 지표 (PRD 5.5-B '당일 지표 병행 수집') ─────────────────
+
+
+def test_today_metrics_calculated_from_current_price():
+    """당일 등락률은 키움 필드가 아니라 현재가와 전일 종가로 직접 계산한다."""
+    universe = make_universe([row("005930")])
+    md = fake_market_data_with_quotes(
+        lambda t: metrics(t, close=10000.0),
+        lambda t: quote(10200.0, volume=5000),
+    )
+    result = collect(universe, md, gap_down_tolerance_ratio=0.01)
+
+    assert result[0].today_price == 10200.0
+    assert result[0].today_volume == 5000
+    assert result[0].today_change_rate == pytest.approx(2.0)
+
+
+def test_gap_down_stock_dropped_from_candidates():
+    """당일 -1% 미만으로 출발한 종목은 후보에서 뺀다."""
+    universe = make_universe([row(f"{i:06d}") for i in range(10)])
+    md = fake_market_data_with_quotes(
+        lambda t: metrics(t, close=10000.0),
+        # 000000만 -2%, 나머지는 +1%
+        lambda t: quote(9800.0 if t == "000000" else 10100.0),
+    )
+    result = collect(universe, md, gap_down_tolerance_ratio=0.01)
+
+    assert "000000" not in [d.ticker for d in result]
+    assert len(result) == 9
+
+
+def test_small_gap_down_within_tolerance_is_kept():
+    """-1% '이상'이면 통과한다 — 경계값에서 잘라내지 않는다."""
+    universe = make_universe([row("005930")])
+    md = fake_market_data_with_quotes(
+        lambda t: metrics(t, close=10000.0),
+        lambda t: quote(9900.0),  # 정확히 -1.0%
+    )
+    result = collect(universe, md, gap_down_tolerance_ratio=0.01)
+
+    assert [d.ticker for d in result] == ["005930"]
+
+
+def test_quote_failure_does_not_drop_candidate():
+    """현재가 조회 실패로 멀쩡한 종목을 잃지 않는다 — 필터를 통과시킨다."""
+    universe = make_universe([row("005930")])
+    md = fake_market_data_with_quotes(
+        lambda t: metrics(t, close=10000.0),
+        lambda t: None,
+    )
+    result = collect(universe, md, gap_down_tolerance_ratio=0.01)
+
+    assert [d.ticker for d in result] == ["005930"]
+    assert result[0].today_price == 0.0
+
+
+def test_filter_lifted_when_too_few_survive():
+    """지수가 통째로 갭 하락한 날 — 필터를 걷고 진행하며 운영 알림을 보낸다."""
+    universe = make_universe([row(f"{i:06d}") for i in range(10)])
+    md = fake_market_data_with_quotes(
+        lambda t: metrics(t, close=10000.0),
+        lambda t: quote(9500.0),  # 전 종목 -5%
+    )
+    alerts = []
+    result = collect(universe, md, gap_down_tolerance_ratio=0.01, notify=alerts.append)
+
+    assert len(result) == 10  # 하한(5) 미만이라 필터를 걷었다
+    assert any("필터" in message for message in alerts)
+
+
+def test_filter_disabled_when_tolerance_zero():
+    """허용치 0은 '끔'이다 — 갭 하락 판정과 같은 규약."""
+    universe = make_universe([row("005930")])
+    md = fake_market_data_with_quotes(
+        lambda t: metrics(t, close=10000.0),
+        lambda t: quote(5000.0),  # -50%
+    )
+    result = collect(universe, md, gap_down_tolerance_ratio=0.0)
+
+    assert [d.ticker for d in result] == ["005930"]
+
+
+def test_prescreen_limits_quote_calls():
+    """현재가 조회는 급증 배수 상위 PRESCREEN_SIZE 종목에만 돈다."""
+    universe = make_universe([row(f"{i:06d}") for i in range(60)])
+    asked = []
+
+    def quote_fn(ticker):
+        asked.append(ticker)
+        return quote(10100.0)
+
+    md = fake_market_data_with_quotes(
+        lambda t: metrics(t, close=10000.0, volume_surge=float(t)),
+        quote_fn,
+    )
+    collect(universe, md, gap_down_tolerance_ratio=0.01, prescreen_size=40)
+
+    assert len(asked) == 40

@@ -156,6 +156,7 @@ def build_runtime(settings: Settings) -> Runtime:
             market_data,
             LargeCapUniverse(KiwoomClient(settings, auth)),
             DisclosureClient(settings.dart_api_key),
+            gap_down_tolerance_ratio=settings.gap_down_tolerance_ratio,
             notify=engine.notify,
         ),
         recommender=LLMRecommender(settings),

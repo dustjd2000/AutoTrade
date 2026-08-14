@@ -30,6 +30,16 @@ DETAIL_REQUEST_INTERVAL_SECONDS = 0.2
 # 전일 거래량 급증 배수 상위만 추린다.
 SHORTLIST_SIZE = 25
 
+# 당일 현재가(ka10001)를 조회할 종목 수 — 전일 급증 배수 상위부터 자른다.
+# 최종 후보가 25종목이라 40이면 당일 필터로 빠진 자리를 채우고도 남고, 유니버스 98종목
+# 전부에 돌리면 20초가 더 드는데 그중 3분의 2는 어차피 후보에 못 든다 (PRD 5.5-B).
+PRESCREEN_SIZE = 40
+
+# 당일 필터를 통과한 종목이 이 수보다 적으면 필터를 통째로 걷는다. 지수가 함께 갭 하락한
+# 날에 후보가 비어 추천이 스킵되는 것을 막는 하한선이다 — 2026-08-06에 필터 하나로
+# 후보 0종목 → 매수 0건이 된 실패를 되풀이하지 않기 위함이다 (PRD 5.5-B).
+MIN_CANDIDATES_AFTER_FILTER = 5
+
 # 프롬프트에 실을 종목당 공시 제목 수 (최신순). 정기보고서까지 다 실으면 후보 25종목만으로도
 # 프롬프트가 길어지고, 정작 중요한 재료가 묻힌다.
 MAX_HEADLINES_PER_TICKER = 3
@@ -117,10 +127,11 @@ class LargeCapUniverse:
 class DataCollector:
     """LLM 추천에 사용할 전일 데이터를 종목별로 수집한다 (PRD 5.5-B).
 
-    유니버스 전 종목에 일봉(ka10086)을 한 번씩 조회하는 것이 전부다 — 한 호출이 20거래일치를
+    유니버스 전 종목에 일봉(ka10086)을 한 번씩 조회해 뼈대를 만든다 — 한 호출이 20거래일치를
     돌려주므로 전일 종가·고가·저가·등락률·거래량과 급증 배수가 모두 여기서 나온다.
-    당일 기본정보(ka10001)는 조회하지 않는다: 09:00 이전에는 값이 전부 0이고(PRD 10절),
-    매수 수량도 목표 매수가 기준으로 산정해 현재가가 필요 없다.
+    그 다음 급증 배수 상위 PRESCREEN_SIZE 종목에만 현재가(ka10001)를 조회해 당일 등락률을
+    계산하고, 당일 하락 출발한 종목을 쇼트리스트 이전에 뺀다 (2026-08-14, 추천이 09:05로
+    옮겨지며 추가됨 — 공시 배제와 같은 자리다).
 
     여기에 DART 공시를 하루치 일괄로 덧붙인다 — 악재 공시가 뜬 종목을 후보에서 빼고, 나머지
     공시 제목은 프롬프트에 싣는다. 배제를 쇼트리스트보다 **앞에** 두는 이유는 뒤에 두면 후보가
@@ -137,6 +148,9 @@ class DataCollector:
         disclosures: DisclosureClient,
         request_interval: float = DETAIL_REQUEST_INTERVAL_SECONDS,
         shortlist_size: int = SHORTLIST_SIZE,
+        prescreen_size: int = PRESCREEN_SIZE,
+        gap_down_tolerance_ratio: float = 0.0,
+        min_candidates_after_filter: int = MIN_CANDIDATES_AFTER_FILTER,
         notify: Optional[Callable[[str], None]] = None,
     ):
         self.market_data = market_data
@@ -144,6 +158,9 @@ class DataCollector:
         self.disclosures = disclosures
         self.request_interval = request_interval
         self.shortlist_size = shortlist_size
+        self.prescreen_size = prescreen_size
+        self.gap_down_tolerance_ratio = gap_down_tolerance_ratio
+        self.min_candidates_after_filter = min_candidates_after_filter
         self.notify = notify
 
     def collect(self) -> List[DailyStockData]:
@@ -156,7 +173,10 @@ class DataCollector:
         collected = self._collect_previous_day(rows)
         logger.info("전일 데이터 수집 완료: %d/%d 종목", len(collected), len(rows))
 
-        shortlist = self._shortlist(self._apply_disclosures(collected))
+        candidates = self._apply_disclosures(collected)
+        prescreened = self._prescreen(candidates)
+        self._collect_today(prescreened)
+        shortlist = self._shortlist(self._filter_by_today(prescreened))
         self._log_candidates(shortlist)
         return shortlist
 
@@ -188,6 +208,87 @@ class DataCollector:
             data.headlines = titles[:MAX_HEADLINES_PER_TICKER]
             remaining.append(data)
         return remaining
+
+    def _prescreen(self, candidates: List[DailyStockData]) -> List[DailyStockData]:
+        """당일 현재가를 조회할 종목만 급증 배수 상위로 미리 자른다 (PRD 5.5-B).
+
+        최종 쇼트리스트(25종목)보다 넉넉히 잡아, 당일 필터로 빠진 자리를 다음 후보가 채우게 한다.
+        """
+        by_surge = sorted(candidates, key=lambda data: data.volume_surge, reverse=True)
+        return by_surge[: self.prescreen_size]
+
+    def _collect_today(self, candidates: List[DailyStockData]) -> None:
+        """추천 시각의 현재가로 당일 지표를 채운다 (제자리 수정, PRD 5.5-B).
+
+        키움이 주는 등락률·시가갭 필드를 쓰지 않고 현재가에서 직접 계산한다 — 2026-08-06에
+        무너진 것은 그 필드였지 가격 자체가 아니었다 (PRD 10절 '장 전 당일 지표 부재').
+
+        조회에 실패한 종목은 당일 지표를 0으로 남긴다. 0은 '산출 안 됨'이고, 그 종목은
+        아래 필터를 그대로 통과한다 — 일시적 조회 실패로 멀쩡한 종목을 잃지 않기 위함이다.
+        """
+        for index, data in enumerate(candidates):
+            # 마지막 뒤가 아니라 '첫 요청 앞'에서만 건너뛴다 — 조회가 실패해 다음으로
+            # 넘어가는 경우에도 요청 간격이 유지되어야 유량 제한에 걸리지 않는다
+            if self.request_interval and index > 0:
+                time.sleep(self.request_interval)
+            try:
+                quote = self.market_data.get_current_price(data.ticker)
+            except Exception:
+                logger.warning(
+                    "당일 현재가 조회 실패 — 당일 지표 없이 진행합니다: %s %s",
+                    data.ticker,
+                    data.name,
+                )
+                continue
+            if quote.price <= 0 or data.prev_close <= 0:
+                continue
+            data.today_price = quote.price
+            data.today_volume = quote.volume
+            data.today_change_rate = (
+                (quote.price - data.prev_close) / data.prev_close * 100
+            )
+
+    def _filter_by_today(self, candidates: List[DailyStockData]) -> List[DailyStockData]:
+        """당일 하락 출발한 종목을 후보에서 뺀다 (PRD 5.5-B '당일 지표 병행 수집').
+
+        '전일 강세가 오늘 이어진다'는 전략 전제가 이미 깨졌는지를 본다. 임계값은 주문 직전
+        갭 하락 판정과 같은 `GAP_DOWN_TOLERANCE_PERCENT`를 재사용한다 — 판정 내용이 같아
+        설정을 둘로 나눌 이유가 없다. 허용치 0은 '끔'이다.
+        """
+        if self.gap_down_tolerance_ratio <= 0:
+            return candidates
+
+        floor = -self.gap_down_tolerance_ratio * 100
+        kept, dropped = [], []
+        for data in candidates:
+            # 조회 실패(0)는 떨어뜨리지 않는다 — '모름'이지 '하락'이 아니다
+            if data.today_price <= 0 or data.today_change_rate >= floor:
+                kept.append(data)
+            else:
+                dropped.append(data)
+
+        if dropped:
+            logger.info(
+                "당일 하락 출발로 후보 제외 %d종목: %s",
+                len(dropped),
+                ", ".join(
+                    f"{d.ticker} {d.name} {d.today_change_rate:+.2f}%" for d in dropped
+                ),
+            )
+
+        if len(kept) < self.min_candidates_after_filter:
+            logger.warning(
+                "당일 필터 통과 %d종목 — 하한 %d종목 미만이라 필터를 걷고 진행합니다.",
+                len(kept),
+                self.min_candidates_after_filter,
+            )
+            if self.notify:
+                self.notify(
+                    f"[경고] 당일 하락 출발 필터 통과 {len(kept)}종목 — "
+                    "필터를 해제하고 추천을 진행합니다."
+                )
+            return candidates
+        return kept
 
     def _collect_previous_day(self, rows: List[dict]) -> List[DailyStockData]:
         """유니버스 전 종목의 전일 지표를 모은다 (종목당 일봉 1회)."""
@@ -229,18 +330,24 @@ class DataCollector:
     def _log_candidates(self, shortlist: List[DailyStockData]) -> None:
         """LLM에 넘길 후보를 그대로 남긴다 — 나중에 추천이 타당했는지 되짚을 유일한 근거다."""
         logger.info(
-            "LLM 후보 %d종목 (종목 | 전일 등락률 | 전일 거래량 | 평균대비 | 전일 종가):",
+            "LLM 후보 %d종목 (종목 | 전일 등락률 | 당일 등락률 | 전일 거래량 | 평균대비 | "
+            "전일 변동폭 | 전일 종가):",
             len(shortlist),
         )
         for data in shortlist:
             surge = f"{data.volume_surge:.2f}배" if data.volume_surge else "판단불가"
+            today = (
+                f"{data.today_change_rate:+.2f}%" if data.today_price > 0 else "조회실패"
+            )
             logger.info(
-                "  %s %s | %+.2f%% | %s | %s | %s원",
+                "  %s %s | %+.2f%% | %s | %s | %s | %.2f%% | %s원",
                 data.ticker,
                 data.name,
                 data.prev_change_rate,
+                today,
                 f"{data.prev_volume:,}",
                 surge,
+                data.prev_range_pct,
                 f"{data.prev_close:,.0f}",
             )
 
