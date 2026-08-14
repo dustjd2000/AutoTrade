@@ -341,10 +341,11 @@ class MainWindow(QMainWindow):
         fund_form.setSpacing(8)
         fund_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # 09:00 매수보다 앞서야 하므로 08:40~08:55 안에서만 고를 수 있다
+        # 개장(09:00) 후여야 당일 지표가 오고, 매수(09:10)보다 앞서야 하므로
+        # 09:00~09:20 안에서만 고를 수 있다 (PRD 5.5-B '추천 시각 설정')
         self._recommend_time = QComboBox()
-        for minute in range(40, 56, 5):
-            label = f"08:{minute:02d}"
+        for minute in range(0, 21, 5):
+            label = f"09:{minute:02d}"
             self._recommend_time.addItem(label, label)
         self._recommend_time.setCurrentIndex(
             self._recommend_time.findData(DEFAULT_RECOMMEND_TIME_HHMM)
@@ -386,11 +387,11 @@ class MainWindow(QMainWindow):
         self._stop_loss = QLineEdit()
         self._stop_loss.setPlaceholderText("예: 2 (합산 순손익 -2%)")
         self._stop_loss.setValidator(QDoubleValidator(0.0, 100.0, 2))
-        # 09:00 시가가 목표 매수가보다 이만큼 넘게 높으면 그 종목을 건너뛴다
+        # 09:10 현재가가 목표 매수가보다 이만큼 넘게 높으면 그 종목을 건너뛴다
         self._buy_price_tolerance = QLineEdit()
         self._buy_price_tolerance.setPlaceholderText("예: 2 (목표가 +2% 초과 시 매수 안 함)")
         self._buy_price_tolerance.setValidator(QDoubleValidator(0.0, 100.0, 2))
-        # 09:00 시가가 전일 종가보다 이만큼 넘게 낮으면 건너뛴다. 위와 달리 0이 '끔'이다
+        # 09:10 현재가가 추천 시점 가격보다 이만큼 넘게 낮으면 건너뛴다. 위와 달리 0이 '끔'이다
         self._gap_down_tolerance = QLineEdit()
         self._gap_down_tolerance.setPlaceholderText("예: 1 (전일 종가 -1% 미만 시 매수 안 함, 0=끔)")
         self._gap_down_tolerance.setValidator(QDoubleValidator(0.0, 100.0, 2))
@@ -456,7 +457,7 @@ class MainWindow(QMainWindow):
         # 이름만으로는 무엇에 대한 허용치인지 알 수 없다 — 익절/손절과 달리 '팔 때'가 아니라
         # '사기 전'을 보는 값이라는 점이 특히 드러나야 한다
         gap_hint = QLabel(
-            "(09:00 현재가가 목표 매수가보다 이 비율을 넘게 높으면 갭 상승으로 보고 "
+            "(09:10 현재가가 목표 매수가보다 이 비율을 넘게 높으면 갭 상승으로 보고 "
             "그 종목은 매수하지 않습니다)"
         )
         gap_hint.setWordWrap(True)
@@ -468,7 +469,7 @@ class MainWindow(QMainWindow):
         # 위 '갭 허용치'와 기준이 다르다(목표가가 아니라 전일 종가). 0의 의미도 반대라서
         # 둘 다 적어 두지 않으면 같은 규약으로 읽는다 (PRD 5.5-B)
         gap_down_hint = QLabel(
-            "(09:00 현재가가 전일 종가보다 이 비율을 넘게 낮으면 갭 하락으로 보고 "
+            "(09:10 현재가가 추천 시점 가격보다 이 비율을 넘게 낮으면 갭 하락으로 보고 "
             "그 종목은 매수하지 않습니다. 0을 넣으면 이 판정을 끕니다)"
         )
         gap_down_hint.setWordWrap(True)
@@ -545,12 +546,12 @@ class MainWindow(QMainWindow):
         run_layout.setSpacing(8)
 
         run_hint = QLabel(
-            "스케줄(추천 시각 / 09:00 / 09:30 / 15:15 / 15:35)과 무관하게 지금 바로 실행합니다. "
+            "스케줄(추천 시각 / 09:10 / 09:40 / 15:15 / 15:35)과 무관하게 지금 바로 실행합니다. "
             "엔진이 실행 중일 때만 동작하며, 장 시간 외에는 주문이 거부될 수 있습니다.\n"
             "일괄 수행은 ①② (추천→지정가 매수)만 돌립니다. 매수 후에는 합산 순손익 기준 "
             "익절/손절이 자동 감시되며, "
-            "미체결 취소·매수 결과 메일(09:30), 청산(15:15), 리포트(15:35)는 스케줄에 맡깁니다.\n"
-            "엔진을 09:30 이후에 켠 날은 그 취소가 스케줄에서 빠지므로 ③을 직접 눌러야 합니다 "
+            "미체결 취소·매수 결과 메일(09:40), 청산(15:15), 리포트(15:35)는 스케줄에 맡깁니다.\n"
+            "엔진을 09:40 이후에 켠 날은 그 취소가 스케줄에서 빠지므로 ③을 직접 눌러야 합니다 "
             "(누르지 않아도 15:15 청산 직전에 한 번 더 거둡니다)."
         )
         run_hint.setWordWrap(True)
