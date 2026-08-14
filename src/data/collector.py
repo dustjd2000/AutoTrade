@@ -55,6 +55,15 @@ class DailyStockData:
     recent_high: float = 0.0      # 당일 제외 최근 거래일 중 최고가
     recent_low: float = 0.0       # 당일 제외 최근 거래일 중 최저가
     moving_average: float = 0.0   # 당일 제외 최근 거래일 종가 평균
+    # 전일 변동폭 (%) = (전일 고가 − 전일 저가) ÷ 전일 종가 × 100 (확정 2026-08-14).
+    # 후보를 거르는 데는 쓰지 않고 프롬프트에만 싣는다 — 2026-08-14 실측 분포에서 변동폭이
+    # 큰 종목이 곧 손실 종목이 아니었다 (PRD 5.5-B '당일 지표 병행 수집'의 변동폭 항목).
+    prev_range_pct: float = 0.0
+    # 당일 지표 — 추천 시각(09:05)에 현재가로 계산한다. 0은 '산출 안 됨'이며(급증 배수와
+    # 같은 규약), 조회에 실패한 종목이 여기 해당한다 (PRD 5.5-B '당일 지표 병행 수집').
+    today_price: float = 0.0        # 추천 시각 현재가
+    today_change_rate: float = 0.0  # (현재가 − 전일 종가) ÷ 전일 종가 × 100
+    today_volume: int = 0           # 추천 시각까지의 당일 누적 거래량
     # DART 공시 제목 (최신순, 최대 MAX_HEADLINES_PER_TICKER건) — 수집은 DisclosureClient가 한다
     headlines: List[str] = field(default_factory=list)
 
@@ -251,4 +260,9 @@ class DataCollector:
             recent_high=metrics.recent_high,
             recent_low=metrics.recent_low,
             moving_average=metrics.moving_average,
+            prev_range_pct=(
+                (metrics.high - metrics.low) / metrics.close * 100
+                if metrics.close > 0 and metrics.high > 0 and metrics.low > 0
+                else 0.0
+            ),
         )

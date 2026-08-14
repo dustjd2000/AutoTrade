@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from src.api.market_data import PreviousDayMetrics
 from src.data.collector import DataCollector, LargeCapUniverse
 from src.data.disclosure import DisclosureClient
@@ -251,3 +253,24 @@ def test_collector_continues_without_disclosures_when_the_lookup_fails():
     assert [d.ticker for d in result] == ["005930"]
     assert result[0].headlines == []
     assert len(alerts) == 1 and "DART" in alerts[0]
+
+
+def test_prev_range_pct_from_previous_day_high_low():
+    """전일 변동폭 = (고가 − 저가) ÷ 종가 × 100. 프롬프트용 값이라 거르지는 않는다."""
+    universe = make_universe([row("005930")])
+    md = fake_market_data(lambda t: metrics(t, close=10000.0))
+    result = collect(universe, md)
+
+    # metrics()의 고가 10200 / 저가 9800 → (10200 - 9800) / 10000 * 100 = 4.0
+    assert result[0].prev_range_pct == pytest.approx(4.0)
+
+
+def test_today_fields_default_to_zero():
+    """당일 지표는 수집 전에는 0이다 — 0은 '산출 안 됨'이라는 기존 규약을 따른다."""
+    universe = make_universe([row("005930")])
+    md = fake_market_data(lambda t: metrics(t))
+    result = collect(universe, md)
+
+    assert result[0].today_price == 0.0
+    assert result[0].today_change_rate == 0.0
+    assert result[0].today_volume == 0
