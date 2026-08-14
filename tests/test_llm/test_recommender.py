@@ -26,6 +26,10 @@ def stock(ticker="005930", name="삼성전자", **kwargs):
         prev_change_rate=1.5,
         prev_volume=1_000_000,
         volume_surge=0.0,
+        prev_range_pct=2.86,
+        today_price=0.0,
+        today_change_rate=0.0,
+        today_volume=0,
         headlines=[],
     )
     defaults.update(kwargs)
@@ -123,26 +127,26 @@ def test_tick_size_by_price_band(price, expected):
 
 def test_normalize_rounds_down_to_tick():
     """호가 단위에 맞지 않는 가격은 주문이 거부된다 — 매수에 불리하지 않은 내림으로 맞춘다."""
-    assert normalize_target_price(70_050, prev_close=70_000) == 70_000
+    assert normalize_target_price(70_050, reference_price=70_000) == 70_000
 
 
 def test_normalize_clamps_price_above_guardrail():
-    # 전일 종가 70,000원 → 상한 73,500원 → 호가 단위(100원) 내림
-    assert normalize_target_price(90_000, prev_close=70_000) == 73_500
+    # 기준가 70,000원 → 상한 73,500원 → 호가 단위(100원) 내림
+    assert normalize_target_price(90_000, reference_price=70_000) == 73_500
 
 
 def test_normalize_clamps_price_below_guardrail():
     # 하한 66,500원
-    assert normalize_target_price(10_000, prev_close=70_000) == 66_500
+    assert normalize_target_price(10_000, reference_price=70_000) == 66_500
 
 
 def test_normalize_leaves_price_inside_guardrail_alone():
-    assert normalize_target_price(69_000, prev_close=70_000) == 69_000
+    assert normalize_target_price(69_000, reference_price=70_000) == 69_000
 
 
-def test_normalize_without_prev_close_only_fixes_tick():
-    """전일 종가를 모르면 가드레일 없이 호가 단위만 맞춘다."""
-    assert normalize_target_price(70_050, prev_close=0.0) == 70_000
+def test_normalize_without_reference_price_only_fixes_tick():
+    """기준가를 모르면 가드레일 없이 호가 단위만 맞춘다."""
+    assert normalize_target_price(70_050, reference_price=0.0) == 70_000
 
 
 def test_apply_price_guardrail_uses_matching_stock():
@@ -348,12 +352,17 @@ def test_build_system_prompt_reflects_target_count():
     assert "5종목을 채우십시오" in prompt
 
 
-def test_build_system_prompt_states_previous_day_basis():
-    """당일 지표를 쓰지 않는다는 사실이 프롬프트에 드러나야 한다 (PRD 10절)."""
+def test_build_system_prompt_states_both_day_basis():
+    """전일 지표와 당일 지표를 함께 쓴다는 사실이 프롬프트에 드러나야 한다 (프롬프트 v9).
+
+    2026-08-14 이전에는 '전일 데이터만' 쓴다고 알렸다 — 추천이 장 전이라 당일 지표가
+    존재하지 않았기 때문이다 (PRD 10절 '개장 후 추천으로 이동').
+    """
     prompt = build_system_prompt(target_count=3)
 
     assert "전일" in prompt
-    assert "09:30" in prompt  # 미체결 취소 규칙을 알려야 목표가를 현실적으로 잡는다
+    assert "당일" in prompt
+    assert "09:40" in prompt  # 미체결 취소 규칙을 알려야 목표가를 현실적으로 잡는다
 
 
 # ── 목표 매도가 (참고용, v7) ─────────────────────────────────
@@ -407,3 +416,59 @@ def test_build_system_prompt_asks_for_a_sell_target():
 
     assert "목표 매도가" in prompt
     assert "target_sell_price" in prompt
+
+
+# ── 당일 지표 (PRD 5.5-B '당일 지표 병행 수집', 프롬프트 v9) ─────────────────
+
+
+def test_guardrail_uses_today_price_when_available():
+    """가드레일 기준은 당일 현재가다 — 갭이 큰 날 정상적인 목표가가 잘리지 않게 한다."""
+    recommendations = [StockRecommendation("005930", "삼성전자", 76_000, "테스트")]
+    # 전일 종가 70,000 / 당일 현재가 77,000 → ±5% 밴드는 73,150 ~ 80,850
+    apply_price_guardrail(
+        recommendations, [stock(prev_close=70_000.0, today_price=77_000.0)]
+    )
+
+    assert recommendations[0].target_price == 76_000  # 전일 종가 기준이면 73,500으로 잘렸다
+
+
+def test_guardrail_falls_back_to_prev_close_without_today_price():
+    """당일 현재가를 모르면 전일 종가로 돌아간다."""
+    recommendations = [StockRecommendation("005930", "삼성전자", 90_000, "테스트")]
+    apply_price_guardrail(recommendations, [stock(prev_close=70_000.0, today_price=0.0)])
+
+    assert recommendations[0].target_price == 73_500
+
+
+def test_user_prompt_includes_today_metrics():
+    """프롬프트에 당일 등락률·현재가·전일 변동폭이 실린다."""
+    prompt = build_user_prompt(
+        [
+            stock(
+                today_price=71_400.0,
+                today_change_rate=2.0,
+                today_volume=123_456,
+                prev_range_pct=2.86,
+            )
+        ]
+    )
+
+    assert "당일 등락률 +2.00%" in prompt
+    assert "현재가 71,400원" in prompt
+    assert "당일 거래량 123,456" in prompt
+    assert "전일 변동폭 2.86%" in prompt
+
+
+def test_user_prompt_marks_missing_today_metrics():
+    """당일 지표를 못 받은 종목은 '당일 지표 없음'으로 적는다 — 0을 근거로 삼지 않게 한다."""
+    prompt = build_user_prompt([stock(today_price=0.0)])
+
+    assert "당일 지표 없음" in prompt
+    assert "당일 등락률" not in prompt
+
+
+def test_user_prompt_drops_premarket_disclaimer():
+    """'장 시작 전에는 당일 지표가 없다'는 전제는 더 이상 사실이 아니다."""
+    prompt = build_user_prompt([stock(today_price=71_400.0)])
+
+    assert "장 시작 전" not in prompt
