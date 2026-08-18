@@ -86,9 +86,9 @@ class RiskManager:
         commission_rate: float = 0.00015,     # 매매수수료 (매수·매도 동일 적용)
         tax_rate: float = 0.0018,             # 증권거래세+농특세 (매도 시만)
         slippage_rate: float = 0.001,         # 시장가 청산 슬리피지 추정치
-        take_profit_enabled: bool = False,    # 익절 적용 여부 (UI 체크박스, 기본 해제)
+        take_profit_enabled: bool = True,     # 합산 퍼센트 익절 적용 여부 (UI 체크박스, 기본 적용)
         stop_loss_enabled: bool = True,       # 손절 적용 여부 (UI 체크박스)
-        simple_take_profit_enabled: bool = True,  # 단순익절 적용 여부 (UI 체크박스, 기본 적용)
+        simple_take_profit_enabled: bool = False,  # 단순익절 적용 여부 (UI 체크박스, 기본 해제)
     ):
         self.max_position_ratio = max_position_ratio
         self.max_daily_loss_ratio = max_daily_loss_ratio
@@ -100,15 +100,16 @@ class RiskManager:
         self.slippage_rate = slippage_rate
         # 다른 설정과 달리 이 둘은 엔진이 도는 중에도 UI가 그대로 바꾼다 (PRD 5.5-B
         # "익절/손절 적용 여부"). `.env`에 저장하지 않으므로 재시작하면 항상 기본값
-        # (손절 + 단순익절)으로 돌아간다 — 감시 공백을 만들지 않으려면 끄고 켜는 데 엔진
-        # 재시작이 끼어들면 안 된다.
+        # (손절 + 합산 퍼센트 익절)으로 돌아간다 — 감시 공백을 만들지 않으려면 끄고 켜는
+        # 데 엔진 재시작이 끼어들면 안 된다.
         self.take_profit_enabled = take_profit_enabled
         self.stop_loss_enabled = stop_loss_enabled
         # 익절선을 `take_profit_ratio` 대신 0으로 두고 **종목별로** 판정하는 모드
         # (PRD 5.5-B "단순익절"). 위 둘과 같이 `.env`에 저장하지 않고 앱을 다시 켜야
-        # '적용'으로 되돌아간다 — 평소 익절은 이쪽이 맡는다 (확정 2026-08-13, PRD 5.5-B
-        # "단순익절 기본 적용"). UI에서는 `take_profit_enabled`와 배타적이지만, 여기서는
-        # 서로 독립으로 다룬다 — 둘 다 켜져 있으면 합산 판정이 먼저 돈다(엔진 호출 순서).
+        # 기본값(해제)으로 되돌아간다 — 평소 익절은 합산 퍼센트 쪽이 맡는다 (확정
+        # 2026-08-18, PRD 5.5-B "퍼센트 익절 기본 적용"). UI에서는 `take_profit_enabled`와
+        # 배타적이지만, 여기서는 서로 독립으로 다룬다 — 둘 다 켜져 있으면 합산 판정이
+        # 먼저 돈다(엔진 호출 순서).
         self.simple_take_profit_enabled = simple_take_profit_enabled
 
         self._initial_asset: float = 0.0

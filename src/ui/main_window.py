@@ -398,17 +398,17 @@ class MainWindow(QMainWindow):
 
         # 적용 여부 체크박스 — 끄면 그 라인은 감시하지 않는다. `.env`에 저장하지 않고
         # 엔진을 재시작하지도 않는다(끄고 싶은 순간에 감시 공백이 생기면 안 된다).
-        # **기본은 손절 + 단순익절이다** (확정 2026-08-13, PRD 5.5-B "단순익절 기본 적용").
-        # 합산 퍼센트 익절만 기본 해제로 남는다 — 실매매 27건을 당일 고가와 대조해 보니
-        # 익절이 상방을 잘라 순손익을 깎고 있었고(2026-08-12), 그중 단순익절만 되돌렸다.
+        # **기본은 손절 + 합산 퍼센트 익절이다** (확정 2026-08-18, PRD 5.5-B "퍼센트 익절
+        # 기본 적용"). 단순익절이 기본 해제로 바뀌었다 — 익절선이 0(비용 제외 후 이익이면
+        # 즉시)이라 상방을 너무 이르게 잘랐고, 익절(%) 입력값으로 폭을 정하는 쪽을 택했다.
         self._take_profit_enabled = QCheckBox("적용")
-        self._take_profit_enabled.setChecked(False)
+        self._take_profit_enabled.setChecked(True)
         self._stop_loss_enabled = QCheckBox("적용")
         self._stop_loss_enabled.setChecked(True)
         # 단순익절 — 익절선을 입력값(%)이 아니라 0으로 두고 종목별로 판정한다. 위 '적용'
         # (합산 퍼센트 익절)과는 배타적이라 한쪽을 켜면 다른 쪽이 꺼진다. 둘 다 끄면 익절 없음.
         self._simple_take_profit_enabled = QCheckBox("단순익절적용")
-        self._simple_take_profit_enabled.setChecked(True)
+        self._simple_take_profit_enabled.setChecked(False)
         self._simple_take_profit_enabled.setToolTip(
             "종목마다 따로 봅니다 — 그 종목의 순손익이 0을 넘으면(비용을 빼고 조금이라도 "
             "이익이면) 그 종목만 즉시 매도하고 나머지는 계속 보유합니다."
@@ -445,7 +445,7 @@ class MainWindow(QMainWindow):
             "입력란은 쓰이지 않습니다. 익절 '적용'과 '단순익절적용'은 둘 중 하나만 켜지고, "
             "둘 다 끄면 익절이 없습니다. 이익 난 종목이 먼저 빠지면 남은 종목의 손실을 상쇄할 "
             "것이 없어져 합산 손절이 더 쉽게 걸립니다. "
-            "기본값은 손절 + 단순익절이며, 여기서 바꾼 상태는 프로그램을 끌 때까지 "
+            "기본값은 손절 + 익절(%)이며, 여기서 바꾼 상태는 프로그램을 끌 때까지 "
             "유지됩니다 — 다시 시작하면 기본값으로 돌아갑니다)"
         )
         exit_hint.setWordWrap(True)
@@ -886,7 +886,7 @@ class MainWindow(QMainWindow):
     def _on_exit_flag_toggled(self) -> None:
         """체크박스 상태를 돌고 있는 엔진에 그대로 밀어 넣는다 (재시작하지 않는다).
 
-        `.env`에 저장하지 않으므로 앱을 다시 켜면 항상 기본값(손절 + 단순익절)으로
+        `.env`에 저장하지 않으므로 앱을 다시 켜면 항상 기본값(손절 + 익절(%))으로
         돌아간다 — 바꾼 상태를 되돌리는 경로는 이 재시작 하나뿐이다.
         """
         if self._syncing_exit_flags:
