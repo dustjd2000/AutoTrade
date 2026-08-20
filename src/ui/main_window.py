@@ -357,6 +357,7 @@ class MainWindow(QMainWindow):
         for count in range(1, 11):
             self._target_stock_count.addItem(f"{count}", count)
         self._target_stock_count.setCurrentIndex(self._target_stock_count.findData(3))
+        self._target_stock_count.currentIndexChanged.connect(self._refresh_investable_amount)
 
         fund_form.addRow("매매 시각", self._schedule_times)
         fund_form.addRow("예수금 투입 비율 (%)", self._investable_ratio)
@@ -731,7 +732,11 @@ class MainWindow(QMainWindow):
         self._refresh_investable_amount()
 
     def _refresh_investable_amount(self) -> None:
-        """예수금 캐시 × 투입 비율로 총 매수가능 금액을 표시한다 (API 호출 없음).
+        """예수금 캐시 × 투입 비율로 총 매수가능 금액과 종목당 배정액을 표시한다 (API 호출 없음).
+
+        종목당 배정액은 추천 개수가 아니라 **추천 종목 수 설정**으로 나눈다 — 매수 실행과 같은
+        식이다(`LLMMomentumStrategy.build_buy_plans`). 추천이 설정 개수보다 적게 나온 날은 모자란
+        몫이 현금으로 남을 뿐, 남은 종목에 더 실리지 않는다.
 
         엔진이 꺼져 있으면 계좌를 아직 모르므로 라벨 자체를 숨긴다.
         """
@@ -747,8 +752,10 @@ class MainWindow(QMainWindow):
 
         ratio = self._investable_ratio.currentData() / 100
         amount = cash * ratio
+        count = self._target_stock_count.currentData()
         self._investable_amount.setText(
             f"{amount:,.0f}원 (예수금 {cash:,.0f}원 × {ratio * 100:.0f}%)"
+            f"  ·  종목당 {amount / count:,.0f}원 × {count}종목"
         )
 
     def _holdings_summary(self, rows: list) -> str:
