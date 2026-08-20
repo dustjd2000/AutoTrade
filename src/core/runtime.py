@@ -32,18 +32,17 @@ from src.strategy.llm_momentum import LLMMomentumStrategy
 logger = logging.getLogger(__name__)
 
 # 1호 전략 하루 흐름 트리거 시각 (PRD 5.5-B, 5.11)
-# 데이터 수집 → LLM 추천 → 이메일 발송 시각만 설정값이다 (`settings.recommend_time`,
-# UI 콤보박스 09:00~09:20). 나머지는 장 운영 시간에 맞춰 고정한다.
+# **추천(`settings.recommend_time`)과 매수(`settings.buy_time`)만 설정값이다** — 둘 다
+# `.env`로만 바꾸고 UI는 값을 보여주기만 한다 (확정 2026-08-20). 두 시각의 순서와 최소
+# 간격은 `Settings.validate`가 강제한다. 나머지는 장 운영 시간에 맞춰 고정한다.
+# 매수를 개장 후로 옮긴 이력: 2026-08-14에 09:00 → 09:10, 2026-08-20에 09:10 → 09:08
+# (기본값은 `config/settings.py`의 `DEFAULT_BUY_TIME_HHMM`, 근거는 PRD 10절
+# "개장 후 추천으로 이동"·"매수 타이밍 조정").
 DAILY_RESET_TIME = dt_time(8, 40)   # 일일 손실 한도·매매중지 초기화 (연속 실행 대비)
-# 개장 후로 옮겼다 (2026-08-14: 09:00 → 09:10). 추천이 09:05로 옮겨지며 당일 지표를 보게
-# 됐고, 그 값을 근거로 낸 목표가에 주문한다 (PRD 10절 "개장 후 추천으로 이동").
-# 2026-08-20에 추천과의 간격을 5분 → 3분으로 좁혔다 (09:10 → 09:08). 그 5분이 하루 중 가장
-# 험한 구간이라 갭 판정의 허용 창을 번번이 벗어났다 (PRD 10절 "매수 타이밍 조정").
-# **09:05 추천보다 3분 뒤여야 한다** — 수집 약 40초 + LLM 타임아웃 상한 120초를 더한
-# 최악의 경우가 09:07:35이라, 이보다 앞당기면 추천이 아직 없는 채로 매수가 돈다.
-BUY_TIME = dt_time(9, 8)            # 자금 산정 → 목표 매수가 지정가 매수
-# 눌림을 기다리는 목표가가 닿을 시간을 30분 더 줬다 (2026-08-20: 10:10 → 10:10).
-CANCEL_UNFILLED_TIME = dt_time(10, 10)  # 미체결 매수 취소 → 매수 결과 메일 (매수 +62분)
+# 눌림을 기다리는 목표가가 닿을 시간을 30분 더 줬다 (2026-08-20: 09:40 → 10:10).
+# 매수 시각이 설정값이 된 뒤로는 '매수 +N분'이 아니라 고정 시각이다 — 매수를 늦출수록
+# 미체결을 기다리는 시간이 그만큼 짧아진다.
+CANCEL_UNFILLED_TIME = dt_time(10, 10)  # 미체결 매수 취소 → 매수 결과 메일
 # 청산은 장마감 동시호가(15:20~15:30) '이전'에 내야 한다 — 동시호가에 들어간 시장가 주문은
 # 15:30 종가에야 체결되어, 그 사이에 나간 리포트가 그 매도를 미정산으로 싣는다 (2026-08-12).
 # 리포트는 반대로 마감 뒤로 5분 물려, 마감 동시호가 체결분까지 체결내역에 잡힌 뒤 집계한다.
@@ -184,7 +183,7 @@ def build_runtime(settings: Settings) -> Runtime:
     for trigger_time, job, name in (
         (DAILY_RESET_TIME, engine.reset_for_new_day, "daily_reset"),
         (settings.recommend_time, _off_loop(workflow.recommend_and_notify), "llm_recommend"),
-        (BUY_TIME, workflow.execute_buys, "execute_buys"),
+        (settings.buy_time, workflow.execute_buys, "execute_buys"),
         (CANCEL_UNFILLED_TIME, workflow.cancel_unfilled_buys, "cancel_unfilled_buys"),
         (FORCE_CLOSE_TIME, close_out(workflow, engine), "close_out"),
         (REPORT_TIME, _off_loop(workflow.send_final_report), "daily_report"),

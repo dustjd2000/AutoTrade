@@ -46,9 +46,11 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   진입점이고, "▶ 시작" 버튼을 눌러야 `EngineThread`(QThread)가 뜬다. 창을 닫으면 엔진도
   함께 정지한다.
 - `EngineThread`가 자신만의 asyncio 이벤트 루프를 새로 만들어 소유하고, 그 위에서
-  `src/core/runtime.py`의 `TimeScheduler`(시간 기반 08:40/추천 시각/09:08/10:10/15:15/15:35)와
-  `WebSocketClient` 콜백(실시간 시세 기반)이 함께 돈다. 이 중 LLM 추천 시각만 설정값이고
-  (`settings.recommend_time`, UI 콤보박스 09:00~09:05, 기본 09:05) 나머지는 코드 상수다.
+  `src/core/runtime.py`의 `TimeScheduler`(시간 기반 08:40/추천 시각/매수 시각/10:10/15:15/15:35)와
+  `WebSocketClient` 콜백(실시간 시세 기반)이 함께 돈다. 이 중 **추천 시각과 매수 시각만 설정값**이고
+  (`settings.recommend_time`/`buy_time`, `.env`의 `RECOMMEND_TIME`·`BUY_TIME`, 기본 09:05·09:08)
+  나머지는 코드 상수다. 두 값은 UI에서 고를 수 없고 라벨로 보여주기만 하며, "추천은 개장 후,
+  매수는 추천 +3분 이상"을 `Settings.validate()`가 엔진 시작 단계에서 강제한다.
 - 데이터 수집·LLM 호출·메일 발송처럼 오래 걸리는 동기 작업은 `runtime._off_loop`로 별도
   스레드에 넘긴다 — 안 그러면 그 시간 동안 WebSocket PING에 응답하지 못해 서버가 연결을
   끊는다.
@@ -87,8 +89,8 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   감시 공백을 알리고 확인을 받는다.
 - 퍼센트 단위 설정(`STOP_LOSS_PERCENT` 등)은 `_percent` 필드(원값, `.env`에 저장)와
   `_ratio` 프로퍼티(0~1 환산, 계산에 사용) 쌍으로 두는 패턴을 따른다 — 새 설정을 추가할
-  때도 이 패턴을 따른다. 시각 설정(`RECOMMEND_TIME`)도 같은 꼴로 `recommend_time_hhmm`
-  필드(`"HH:MM"` 원값)와 `recommend_time` 프로퍼티(`datetime.time` 환산) 쌍이다.
+  때도 이 패턴을 따른다. 시각 설정(`RECOMMEND_TIME`·`BUY_TIME`)도 같은 꼴로 `_hhmm`
+  필드(`"HH:MM"` 원값)와 프로퍼티(`datetime.time` 환산) 쌍이며, 환산은 `_parse_hhmm`이 맡는다.
 - `mode`(`paper`/`live`)에 따라 `api_base_url`/`websocket_url`이 자동 분기된다. 실전
   전환은 `.env`에 `LIVE_TRADE_CONFIRMED=YES_I_UNDERSTAND`가 없으면 `Settings.validate()`가
   막는다.

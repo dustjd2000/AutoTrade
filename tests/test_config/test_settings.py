@@ -6,9 +6,10 @@ from config.settings import DEFAULT_RECOMMEND_TIME_HHMM, Settings
 
 
 @pytest.fixture(autouse=True)
-def clear_recommend_time(monkeypatch):
+def clear_schedule_times(monkeypatch):
     """다른 테스트나 실제 .env가 남긴 값이 섞이지 않도록 매번 비운 상태에서 시작한다."""
     monkeypatch.delenv("RECOMMEND_TIME", raising=False)
+    monkeypatch.delenv("BUY_TIME", raising=False)
 
 
 def test_recommend_time_defaults_to_0905():
@@ -68,19 +69,32 @@ def test_gap_down_tolerance_zero_means_off(monkeypatch):
 
 def test_recommend_time_is_between_market_open_and_buy():
     """추천은 개장 후, 매수 전이어야 한다 (PRD 10절 '개장 후 추천으로 이동')."""
-    from src.core.runtime import BUY_TIME, MARKET_OPEN_TIME
+    from src.core.runtime import MARKET_OPEN_TIME
 
     settings = Settings()
 
     assert settings.recommend_time >= MARKET_OPEN_TIME
-    assert settings.recommend_time < BUY_TIME
+    assert settings.recommend_time < settings.buy_time
 
 
-def test_buy_and_cancel_times_moved_after_open():
-    from src.core.runtime import BUY_TIME, CANCEL_UNFILLED_TIME
+def test_buy_time_defaults_to_0908(monkeypatch):
+    from src.core.runtime import CANCEL_UNFILLED_TIME
 
-    assert BUY_TIME == dt_time(9, 8)
+    assert Settings().buy_time == dt_time(9, 8)
     assert CANCEL_UNFILLED_TIME == dt_time(10, 10)
+
+
+def test_buy_time_reads_env_value(monkeypatch):
+    monkeypatch.setenv("BUY_TIME", "09:15")
+
+    assert Settings().buy_time == dt_time(9, 15)
+
+
+def test_buy_time_falls_back_when_value_is_broken(monkeypatch):
+    """오타 하나로 엔진이 뜨지 않는 것보다 기본값으로 도는 편이 낫다 (Settings.buy_time)."""
+    monkeypatch.setenv("BUY_TIME", "구시")
+
+    assert Settings().buy_time == dt_time(9, 8)
 
 
 def test_buy_leaves_room_for_the_recommendation_to_finish():
@@ -89,11 +103,41 @@ def test_buy_leaves_room_for_the_recommendation_to_finish():
     추천은 수집 약 40초 + LLM 타임아웃 상한 120초라 최악의 경우 2분 35초가 걸린다.
     이보다 매수를 앞당기면 추천이 없는 채로 주문이 돌아 그날이 통째로 빈다.
     """
-    from src.core.runtime import BUY_TIME
-
     settings = Settings()
-    gap_minutes = (
-        BUY_TIME.hour * 60 + BUY_TIME.minute
-    ) - (settings.recommend_time.hour * 60 + settings.recommend_time.minute)
+    gap_minutes = (settings.buy_time.hour * 60 + settings.buy_time.minute) - (
+        settings.recommend_time.hour * 60 + settings.recommend_time.minute
+    )
 
     assert gap_minutes >= 3
+
+
+def _valid_settings(monkeypatch) -> Settings:
+    """validate가 시각 외의 이유로 걸리지 않도록 필수 값만 채운 설정."""
+    monkeypatch.setenv("KIWOOM_APP_KEY", "key")
+    monkeypatch.setenv("KIWOOM_APP_SECRET", "secret")
+    monkeypatch.setenv("TRADE_MODE", "paper")
+    return Settings()
+
+
+def test_validate_rejects_buy_time_too_close_to_recommendation(monkeypatch):
+    """순서가 뒤집히면 추천 없이 매수가 돌아 그날이 조용히 빈다 — 시작 자체를 막는다."""
+    monkeypatch.setenv("RECOMMEND_TIME", "09:05")
+    monkeypatch.setenv("BUY_TIME", "09:07")
+
+    with pytest.raises(ValueError, match="BUY_TIME"):
+        _valid_settings(monkeypatch).validate()
+
+
+def test_validate_rejects_recommend_time_before_open(monkeypatch):
+    """개장 전에는 당일 지표가 오지 않아 후보 선정이 성립하지 않는다."""
+    monkeypatch.setenv("RECOMMEND_TIME", "08:45")
+
+    with pytest.raises(ValueError, match="RECOMMEND_TIME"):
+        _valid_settings(monkeypatch).validate()
+
+
+def test_validate_accepts_a_later_pair(monkeypatch):
+    monkeypatch.setenv("RECOMMEND_TIME", "09:05")
+    monkeypatch.setenv("BUY_TIME", "09:20")
+
+    _valid_settings(monkeypatch).validate()

@@ -5,12 +5,37 @@ from datetime import time as dt_time
 
 logger = logging.getLogger(__name__)
 
-# 1호 전략 LLM 추천 시각의 기본값 — UI 콤보박스 선택 범위는 09:00~09:20(5분 단위)다.
-# 하한 09:00은 개장 시각이다: 그보다 앞서면 당일 지표가 오지 않아 후보 선정이 성립하지
-# 않는다. 상한 09:20은 매수(추천 +5분)가 개장 30분 안에 들어오게 하는 선이다.
-# 2026-08-14 이전 범위는 08:40~08:55(기본 08:45)였다 — 장 전 추천이라 당일 지표가
-# 존재하지 않았다 (PRD 10절 "개장 후 추천으로 이동").
+# 1호 전략의 추천·매수 시각 기본값 — 둘 다 `.env`로만 바꾼다 (확정 2026-08-20, UI에서는
+# 값을 보여주기만 한다). 개장(09:00)보다 앞서면 당일 지표가 오지 않아 후보 선정이 성립하지
+# 않는다. 2026-08-14 이전 추천 시각은 08:45였다 — 장 전이라 당일 지표가 존재하지 않았다
+# (PRD 10절 "개장 후 추천으로 이동").
 DEFAULT_RECOMMEND_TIME_HHMM = "09:05"
+# 매수는 추천보다 최소 `MIN_RECOMMEND_TO_BUY_MINUTES`분 뒤여야 한다 — 수집 약 40초 +
+# LLM 타임아웃 상한 120초라, 그보다 앞당기면 추천이 아직 없는 채로 매수가 돌아 그날이
+# 통째로 빈다. 간격을 넓히면 그만큼 추천 시점 가격과 주문 시점 가격이 벌어져 갭 판정에
+# 걸리기 쉬워진다 (PRD 10절 "매수 타이밍 조정").
+DEFAULT_BUY_TIME_HHMM = "09:08"
+MIN_RECOMMEND_TO_BUY_MINUTES = 3
+MARKET_OPEN_HHMM = "09:00"
+
+
+def _parse_hhmm(raw: str, default: str, name: str) -> dt_time:
+    """"HH:MM" 문자열을 `datetime.time`으로 바꾼다. 깨져 있으면 기본값으로 돌린다.
+
+    엔진 자체를 막지 않는 것은 의도한 것이다 — .env 한 줄 오타로 그날 매매가 통째로
+    중단되는 편보다 낫다. 대신 경고를 남겨 넘어간 사실을 알린다.
+    """
+    try:
+        hour, minute = (int(part) for part in raw.split(":"))
+        return dt_time(hour, minute)
+    except (AttributeError, ValueError):
+        logger.warning("%s 값이 올바르지 않아 기본값 %s를 사용합니다: %r", name, default, raw)
+        hour, minute = (int(part) for part in default.split(":"))
+        return dt_time(hour, minute)
+
+
+def _minutes(value: dt_time) -> int:
+    return value.hour * 60 + value.minute
 
 
 @dataclass
@@ -74,30 +99,26 @@ class Settings:
     def investable_ratio(self) -> float:
         return self.investable_ratio_percent / 100
 
-    # 1호 전략 LLM 추천 시각 — .env/UI에는 "HH:MM" 문자열로 저장, 스케줄러가 쓰는
-    # datetime.time은 프로퍼티로 환산한다 (확정 2026-08-04)
+    # 1호 전략의 추천·매수 시각 — .env에는 "HH:MM" 문자열로 두고, 스케줄러가 쓰는
+    # datetime.time은 프로퍼티로 환산한다 (확정 2026-08-04, 매수 시각 추가 2026-08-20)
     recommend_time_hhmm: str = field(
         default_factory=lambda: os.getenv("RECOMMEND_TIME", DEFAULT_RECOMMEND_TIME_HHMM)
+    )
+    buy_time_hhmm: str = field(
+        default_factory=lambda: os.getenv("BUY_TIME", DEFAULT_BUY_TIME_HHMM)
     )
 
     @property
     def recommend_time(self) -> dt_time:
-        """스케줄러에 넘길 추천 시각.
+        """스케줄러에 넘길 추천 시각 (데이터 수집 → LLM 추천 → 추천 메일)."""
+        return _parse_hhmm(
+            self.recommend_time_hhmm, DEFAULT_RECOMMEND_TIME_HHMM, "RECOMMEND_TIME"
+        )
 
-        값이 깨져 있으면 엔진 자체를 막지 않고 기본값으로 돌린다 — .env 한 줄 오타로
-        그날 매매가 통째로 중단되는 편보다 낫다. 대신 경고를 남겨 넘어간 사실을 알린다.
-        """
-        try:
-            hour, minute = (int(part) for part in self.recommend_time_hhmm.split(":"))
-            return dt_time(hour, minute)
-        except (AttributeError, ValueError):
-            logger.warning(
-                "RECOMMEND_TIME 값이 올바르지 않아 기본값 %s를 사용합니다: %r",
-                DEFAULT_RECOMMEND_TIME_HHMM,
-                self.recommend_time_hhmm,
-            )
-            hour, minute = (int(part) for part in DEFAULT_RECOMMEND_TIME_HHMM.split(":"))
-            return dt_time(hour, minute)
+    @property
+    def buy_time(self) -> dt_time:
+        """스케줄러에 넘길 매수 시각 (자금 산정 → 목표 매수가 지정가 주문)."""
+        return _parse_hhmm(self.buy_time_hhmm, DEFAULT_BUY_TIME_HHMM, "BUY_TIME")
 
     # 익절/손절 라인 — UI/환경변수에는 %(예: 0.5)로 저장, 내부 계산은 비율(0.005)로 환산.
     # 둘 다 수수료·세금·슬리피지를 뺀 순손익률 기준이다 (PRD 5.5-B).
@@ -155,6 +176,19 @@ class Settings:
     def validate(self) -> None:
         if self.mode not in ("live", "paper"):
             raise ValueError(f"TRADE_MODE must be 'live' or 'paper', got: {self.mode}")
+        # 시각 두 개의 관계는 여기서 막는다 — 값이 깨진 경우(기본값 폴백)와 달리, 순서가
+        # 뒤집히면 추천이 없는 채로 매수가 돌아 그날 매매가 조용히 통째로 빈다.
+        open_time = _parse_hhmm(MARKET_OPEN_HHMM, MARKET_OPEN_HHMM, "MARKET_OPEN")
+        if _minutes(self.recommend_time) < _minutes(open_time):
+            raise ValueError(
+                f"RECOMMEND_TIME은 개장({MARKET_OPEN_HHMM}) 이후여야 합니다: {self.recommend_time_hhmm}"
+            )
+        gap = _minutes(self.buy_time) - _minutes(self.recommend_time)
+        if gap < MIN_RECOMMEND_TO_BUY_MINUTES:
+            raise ValueError(
+                f"BUY_TIME은 RECOMMEND_TIME보다 {MIN_RECOMMEND_TO_BUY_MINUTES}분 이상 뒤여야 "
+                f"합니다: 추천 {self.recommend_time_hhmm} / 매수 {self.buy_time_hhmm}"
+            )
         if not self.app_key or not self.app_secret:
             raise ValueError("KIWOOM_APP_KEY and KIWOOM_APP_SECRET must be set")
         if self.mode == "live":

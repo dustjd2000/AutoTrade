@@ -35,7 +35,7 @@ from PyQt6.QtWidgets import (
 
 from dotenv import load_dotenv
 
-from config.settings import DEFAULT_RECOMMEND_TIME_HHMM, Settings
+from config.settings import DEFAULT_BUY_TIME_HHMM, DEFAULT_RECOMMEND_TIME_HHMM, Settings
 from src.core.runtime import MANUAL_ACTIONS, ORDER_ACTIONS
 from src.ui.engine_thread import EngineThread
 from src.ui.env_store import load_env, save_env
@@ -341,16 +341,11 @@ class MainWindow(QMainWindow):
         fund_form.setSpacing(8)
         fund_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # 개장(09:00) 후여야 당일 지표가 오고, 매수(09:08)보다 3분 이상 앞서야 하므로
-        # 09:00~09:05 안에서만 고를 수 있다 (PRD 5.5-B '추천 시각 설정').
-        # 상한이 09:20이었을 때는 추천이 매수보다 뒤로 갈 수 있었다 (2026-08-20에 좁힘)
-        self._recommend_time = QComboBox()
-        for minute in range(0, 6, 5):
-            label = f"09:{minute:02d}"
-            self._recommend_time.addItem(label, label)
-        self._recommend_time.setCurrentIndex(
-            self._recommend_time.findData(DEFAULT_RECOMMEND_TIME_HHMM)
-        )
+        # 추천·매수 시각은 `.env`로만 바꾼다 — 여기서는 현재 값을 보여주기만 한다
+        # (확정 2026-08-20, PRD 5.5-B '추천·매수 시각 설정'). 고를 수 있게 두면 개장 전이나
+        # 추천보다 앞선 매수처럼 성립하지 않는 조합이 UI에서 만들어진다.
+        self._schedule_times = QLabel()
+        self._schedule_times.setWordWrap(True)
 
         self._investable_ratio = QComboBox()
         for percent in range(10, 101, 10):
@@ -363,7 +358,7 @@ class MainWindow(QMainWindow):
             self._target_stock_count.addItem(f"{count}", count)
         self._target_stock_count.setCurrentIndex(self._target_stock_count.findData(3))
 
-        fund_form.addRow("LLM 추천 시각", self._recommend_time)
+        fund_form.addRow("매매 시각", self._schedule_times)
         fund_form.addRow("예수금 투입 비율 (%)", self._investable_ratio)
         fund_form.addRow("추천 종목 수 (개)", self._target_stock_count)
 
@@ -1010,8 +1005,11 @@ class MainWindow(QMainWindow):
         self._gap_down_tolerance.setText(env.get("GAP_DOWN_TOLERANCE_PERCENT", "1"))
         self._select_combo_value(self._investable_ratio, env.get("INVESTABLE_RATIO_PERCENT"), default=50)
         self._select_combo_value(self._target_stock_count, env.get("TARGET_STOCK_COUNT"), default=3)
-        self._select_combo_text(
-            self._recommend_time, env.get("RECOMMEND_TIME"), default=DEFAULT_RECOMMEND_TIME_HHMM
+        self._schedule_times.setText(
+            f"추천 {env.get('RECOMMEND_TIME', DEFAULT_RECOMMEND_TIME_HHMM)}"
+            f" → 매수 {env.get('BUY_TIME', DEFAULT_BUY_TIME_HHMM)}"
+            "  ·  미체결 취소 10:10  ·  청산 15:15"
+            "  —  추천·매수 시각은 .env에서 바꾸고 다시 시작해야 반영됩니다"
         )
         mode = env.get("TRADE_MODE", "paper")
         if mode == "live":
@@ -1028,11 +1026,6 @@ class MainWindow(QMainWindow):
         except ValueError:
             value = default
         index = combo.findData(value)
-        combo.setCurrentIndex(index if index >= 0 else combo.findData(default))
-
-    def _select_combo_text(self, combo: QComboBox, raw_value: Optional[str], default: str) -> None:
-        """문자열 값을 다루는 콤보박스용 — 숫자로 바꾸지 않는다는 점만 위와 다르다."""
-        index = combo.findData(raw_value) if raw_value else -1
         combo.setCurrentIndex(index if index >= 0 else combo.findData(default))
 
     def _save_settings(self, show_popup: bool = False) -> dict:
@@ -1058,7 +1051,6 @@ class MainWindow(QMainWindow):
             "GAP_DOWN_TOLERANCE_PERCENT": self._gap_down_tolerance.text().strip() or "1",
             "INVESTABLE_RATIO_PERCENT": str(self._investable_ratio.currentData()),
             "TARGET_STOCK_COUNT": str(self._target_stock_count.currentData()),
-            "RECOMMEND_TIME": str(self._recommend_time.currentData()),
         }
         if mode == "live":
             values["LIVE_TRADE_CONFIRMED"] = "YES_I_UNDERSTAND"
