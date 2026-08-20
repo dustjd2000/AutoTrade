@@ -10,6 +10,7 @@ from src.llm.recommender import (
     attach_recommend_price,
     build_system_prompt,
     build_user_prompt,
+    drop_other_setups,
     drop_unknown_tickers,
     normalize_target_price,
     parse_recommendations,
@@ -234,7 +235,7 @@ def test_recommend_returns_none_on_empty_recommendations():
 def test_recommend_parses_successful_response():
     text = (
         '{"recommendations": [{"ticker": "068270", "name": "셀트리온",'
-        ' "target_price": 180000, "reason": "수급"}]}'
+        ' "target_price": 180000, "reason": "수급", "setup": "rebound"}]}'
     )
     response = _response("end_turn", [SimpleNamespace(type="text", text=text)])
     result = _fake_recommender(response).recommend([stock(ticker="068270", prev_close=180_000.0)])
@@ -248,7 +249,7 @@ def test_recommend_applies_guardrail_to_target_price():
     """LLM이 자릿수를 틀려도 전일 종가 ±5% 밖으로는 주문하지 않는다."""
     text = (
         '{"recommendations": [{"ticker": "068270", "name": "셀트리온",'
-        ' "target_price": 1800000, "reason": "수급"}]}'
+        ' "target_price": 1800000, "reason": "수급", "setup": "rebound"}]}'
     )
     response = _response("end_turn", [SimpleNamespace(type="text", text=text)])
     result = _fake_recommender(response).recommend([stock(ticker="068270", prev_close=180_000.0)])
@@ -260,8 +261,10 @@ def test_recommend_drops_stock_missing_from_candidates():
     """후보 밖 종목은 전일 종가를 몰라 ±5% 가드레일이 꺼진다 — 주문 전에 걸러낸다."""
     text = (
         '{"recommendations": ['
-        '{"ticker": "068270", "name": "셀트리온", "target_price": 180000, "reason": "수급"},'
-        '{"ticker": "999999", "name": "없는종목", "target_price": 5000, "reason": "환각"}]}'
+        '{"ticker": "068270", "name": "셀트리온", "target_price": 180000, "reason": "수급",'
+        ' "setup": "rebound"},'
+        '{"ticker": "999999", "name": "없는종목", "target_price": 5000, "reason": "환각",'
+        ' "setup": "rebound"}]}'
     )
     response = _response("end_turn", [SimpleNamespace(type="text", text=text)])
     result = _fake_recommender(response).recommend([stock(ticker="068270", prev_close=180_000.0)])
@@ -273,8 +276,10 @@ def test_recommend_keeps_going_when_fewer_than_target_count_remain():
     """모자란 몫은 현금으로 남긴다 — 기존 정책(PRD 10절)과 같게 유지한다."""
     text = (
         '{"recommendations": ['
-        '{"ticker": "068270", "name": "셀트리온", "target_price": 180000, "reason": "수급"},'
-        '{"ticker": "999999", "name": "없는종목", "target_price": 5000, "reason": "환각"}]}'
+        '{"ticker": "068270", "name": "셀트리온", "target_price": 180000, "reason": "수급",'
+        ' "setup": "rebound"},'
+        '{"ticker": "999999", "name": "없는종목", "target_price": 5000, "reason": "환각",'
+        ' "setup": "rebound"}]}'
     )
     response = _response("end_turn", [SimpleNamespace(type="text", text=text)])
     recommender = _fake_recommender(response)  # target_stock_count=3
@@ -304,6 +309,66 @@ def test_drop_unknown_tickers_keeps_only_candidates():
     kept = drop_unknown_tickers(recommendations, [stock(ticker="005930")])
 
     assert [r.ticker for r in kept] == ["005930"]
+
+
+# ── 추천 유형 (낙폭 되돌림) ─────────────────────────────────
+def test_drop_other_setups_keeps_only_rebound():
+    recommendations = [
+        StockRecommendation("005930", "삼성전자", 70_000, "낙폭 되돌림", setup="rebound"),
+        StockRecommendation("000660", "SK하이닉스", 250_000, "신고가 돌파", setup="breakout"),
+        StockRecommendation("035420", "NAVER", 200_000, "흐름 지속", setup="momentum"),
+    ]
+
+    kept = drop_other_setups(recommendations)
+
+    assert [r.ticker for r in kept] == ["005930"]
+
+
+def test_drop_other_setups_drops_missing_setup():
+    """유형을 밝히지 않은 추천은 통과시키지 않는다 — 통과시키면 필터가 조용히 꺼진다."""
+    assert drop_other_setups([StockRecommendation("005930", "삼성전자", 70_000, "수급")]) == []
+
+
+def test_recommend_returns_none_when_no_rebound_stock():
+    """낙폭 되돌림 종목이 없는 날은 정원을 채우지 않고 그날 매수를 스킵한다."""
+    text = (
+        '{"recommendations": [{"ticker": "068270", "name": "셀트리온",'
+        ' "target_price": 180000, "reason": "돌파", "setup": "breakout"}]}'
+    )
+    response = _response("end_turn", [SimpleNamespace(type="text", text=text)])
+
+    assert _fake_recommender(response).recommend([stock(ticker="068270")]) is None
+
+
+def test_recommend_keeps_rebound_and_drops_the_rest():
+    text = (
+        '{"recommendations": ['
+        '{"ticker": "068270", "name": "셀트리온", "target_price": 180000, "reason": "되돌림",'
+        ' "setup": "rebound"},'
+        '{"ticker": "005930", "name": "삼성전자", "target_price": 70000, "reason": "돌파",'
+        ' "setup": "breakout"}]}'
+    )
+    response = _response("end_turn", [SimpleNamespace(type="text", text=text)])
+    result = _fake_recommender(response).recommend(
+        [stock(ticker="068270", prev_close=180_000.0), stock(ticker="005930")]
+    )
+
+    assert [r.ticker for r in result] == ["068270"]
+
+
+def test_parse_reads_setup():
+    raw = (
+        '[{"ticker": "005930", "name": "삼성전자", "target_price": 70000,'
+        ' "reason": "되돌림", "setup": "rebound"}]'
+    )
+    assert parse_recommendations(raw)[0].setup == "rebound"
+
+
+def test_build_system_prompt_restricts_to_rebound():
+    prompt = build_system_prompt(3)
+
+    assert "낙폭을 되돌리는 구간" in prompt
+    assert "rebound" in prompt and "breakout" in prompt
 
 
 # ── 프롬프트 ────────────────────────────────────────────────
@@ -395,7 +460,8 @@ def test_recommend_leaves_the_sell_target_untouched():
     """매수가는 ±5%로 잘려도 매도가는 손대지 않는다 — 보정하면 관찰 데이터가 오염된다."""
     text = (
         '{"recommendations": [{"ticker": "068270", "name": "셀트리온",'
-        ' "target_price": 1800000, "target_sell_price": 195000, "reason": "수급"}]}'
+        ' "target_price": 1800000, "target_sell_price": 195000, "reason": "수급",'
+        ' "setup": "rebound"}]}'
     )
     response = _response("end_turn", [SimpleNamespace(type="text", text=text)])
     result = _fake_recommender(response).recommend([stock(ticker="068270", prev_close=180_000.0)])
