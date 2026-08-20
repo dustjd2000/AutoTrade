@@ -49,7 +49,7 @@ def recommendation_email(
         )
         lines.append("")
 
-    lines.append("※ 09:10에 위 목표 매수가로 지정가 주문을 넣고, 09:40까지 체결되지 않으면 취소합니다.")
+    lines.append("※ 09:08에 위 목표 매수가로 지정가 주문을 넣고, 10:10까지 체결되지 않으면 취소합니다.")
     # 매도가를 한 줄도 싣지 못했으면 이 주석도 뺀다 — 메일에 없는 값을 설명하는 꼴이 된다
     if any(_sell_target_line(r) for r in recommendations):
         lines.append(
@@ -73,7 +73,7 @@ def _sell_target_line(r: StockRecommendation) -> str:
 
 
 def buy_result_email(execution: BuyExecution) -> tuple[str, str, str]:
-    """09:10 매수 실행 직후 결과 이메일 (PRD 5.5-B 5·6단계).
+    """09:08 매수 실행 직후 결과 이메일 (PRD 5.5-B 5·6단계).
 
     (제목, 평문, HTML)을 돌려준다 — 일일 리포트와 같은 형식이다.
     주문 접수 직후라 체결가가 아직 없을 수 있으므로 상태 열로 구분해 표기한다.
@@ -340,7 +340,7 @@ def _report_html(
     return "".join(parts)
 
 
-# ── 09:10 매수 알림 ─────────────────────────────────────────
+# ── 09:08 매수 알림 ─────────────────────────────────────────
 BUY_HEADERS = ("종목", "상태", "수량", "단가", "투입금액", "익절가", "손절가")
 
 BUY_OUTCOME_LABELS = {
@@ -364,7 +364,7 @@ def _buy_notes(execution: BuyExecution) -> List[str]:
         )
     if any(r.outcome == BuyOutcome.CANCELLED for r in execution.records):
         notes.append(
-            "※ '미체결 취소'는 09:40까지 목표 매수가에 닿지 않아 주문을 거둔 종목입니다 — "
+            "※ '미체결 취소'는 10:10까지 목표 매수가에 닿지 않아 주문을 거둔 종목입니다 — "
             "그날 그 종목은 매수하지 않습니다."
         )
     notes.append(

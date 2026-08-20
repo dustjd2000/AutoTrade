@@ -62,7 +62,7 @@ def test_custom_ratio_and_count_change_allocation():
 
 
 def test_buy_plan_carries_the_recommend_price_for_the_gap_down_check():
-    """09:10 갭 하락 판정 기준값이 추천 → 계획으로 넘어와야 한다 (PRD 5.5-B)."""
+    """09:08 갭 하락 판정 기준값이 추천 → 계획으로 넘어와야 한다 (PRD 5.5-B)."""
     strategy = LLMMomentumStrategy()
     strategy.set_recommendations(
         [

@@ -79,5 +79,21 @@ def test_recommend_time_is_between_market_open_and_buy():
 def test_buy_and_cancel_times_moved_after_open():
     from src.core.runtime import BUY_TIME, CANCEL_UNFILLED_TIME
 
-    assert BUY_TIME == dt_time(9, 10)
-    assert CANCEL_UNFILLED_TIME == dt_time(9, 40)
+    assert BUY_TIME == dt_time(9, 8)
+    assert CANCEL_UNFILLED_TIME == dt_time(10, 10)
+
+
+def test_buy_leaves_room_for_the_recommendation_to_finish():
+    """매수는 추천 시각 +3분 이상이어야 한다 (PRD 10절 '매수 타이밍 조정').
+
+    추천은 수집 약 40초 + LLM 타임아웃 상한 120초라 최악의 경우 2분 35초가 걸린다.
+    이보다 매수를 앞당기면 추천이 없는 채로 주문이 돌아 그날이 통째로 빈다.
+    """
+    from src.core.runtime import BUY_TIME
+
+    settings = Settings()
+    gap_minutes = (
+        BUY_TIME.hour * 60 + BUY_TIME.minute
+    ) - (settings.recommend_time.hour * 60 + settings.recommend_time.minute)
+
+    assert gap_minutes >= 3

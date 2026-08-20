@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # 오전에 이미 보낸 리포트를 15:35가 다시 보낸다.
 DEFAULT_REPORT_MARK_PATH = Path("data") / "final_report_sent"
 
-# 09:10 매수 결과를 09:40 마무리까지 넘기는 파일. 인메모리 필드로 두면 그 사이 엔진이
+# 09:08 매수 결과를 10:10 마무리까지 넘기는 파일. 인메모리 필드로 두면 그 사이 엔진이
 # 재시작될 때(설정 저장 등) 기록이 사라져, 취소는 체결내역 조회로 살아나도 매수 결과
 # 메일만 조용히 빠진다 — 사용자는 미체결인지 장애인지 구분할 수 없다.
 DEFAULT_BUY_RECORDS_PATH = Path("data") / "buy_records.json"
@@ -39,7 +39,7 @@ DEFAULT_BUY_RECORDS_PATH = Path("data") / "buy_records.json"
 
 @dataclass
 class BuyRecordState:
-    """09:10이 남기고 09:40이 집어 가는 매수 실행 상태 (`DEFAULT_BUY_RECORDS_PATH`)."""
+    """09:08이 남기고 10:10이 집어 가는 매수 실행 상태 (`DEFAULT_BUY_RECORDS_PATH`)."""
 
     cash: float                # 매수 산정에 쓴 예수금
     amount_per_stock: float    # 종목당 배정액
@@ -49,7 +49,7 @@ class BuyRecordState:
 class DailyWorkflow:
     """1호 전략의 하루 흐름을 스케줄러 트리거에 연결한다 (PRD 5.5-B, 5.11).
 
-    추천 시각 recommend_and_notify → 09:10 execute_buys → 09:40 cancel_unfilled_buys
+    추천 시각 recommend_and_notify → 09:08 execute_buys → 10:10 cancel_unfilled_buys
     → 15:35 send_final_report
     (보유 종목이 그 전에 전량 매도되고 체결까지 확인되면 15:35를 기다리지 않고 최종 리포트를 보낸다)
     """
@@ -83,15 +83,15 @@ class DailyWorkflow:
         self.report_mark_path = Path(
             report_mark_path if report_mark_path is not None else DEFAULT_REPORT_MARK_PATH
         )
-        # 09:10 매수 결과를 09:40 마무리(cancel_unfilled_buys)까지 넘기는 파일 — 지정가
+        # 09:08 매수 결과를 10:10 마무리(cancel_unfilled_buys)까지 넘기는 파일 — 지정가
         # 주문은 접수 시점에 체결 여부를 알 수 없어, 결과 메일을 그때 보내야 확정된 값이 실린다.
         # 인메모리가 아니라 파일인 이유는 DEFAULT_BUY_RECORDS_PATH 주석 참고.
         self.buy_records_path = Path(
             buy_records_path if buy_records_path is not None else DEFAULT_BUY_RECORDS_PATH
         )
-        # 09:10 현재가가 목표 매수가보다 이만큼 넘게 높으면 그 종목은 건너뛴다 (_gap_note 참고)
+        # 09:08 현재가가 목표 매수가보다 이만큼 넘게 높으면 그 종목은 건너뛴다 (_gap_note 참고)
         self.buy_price_tolerance_ratio = buy_price_tolerance_ratio
-        # 09:10 현재가가 추천 시점 가격보다 이만큼 넘게 낮으면 건너뛴다. 0이면 끈다 (_gap_note 참고)
+        # 09:08 현재가가 추천 시점 가격보다 이만큼 넘게 낮으면 건너뛴다. 0이면 끈다 (_gap_note 참고)
         self.gap_down_tolerance_ratio = gap_down_tolerance_ratio
 
     def recommend_and_notify(self, today: Optional[date] = None) -> None:
@@ -117,10 +117,10 @@ class DailyWorkflow:
         logger.info("Recommendation email sent for %s", today)
 
     def execute_buys(self) -> None:
-        """09:10 — 예수금 기준으로 자금을 배분해 추천 종목을 목표 매수가에 지정가 매수.
+        """09:08 — 예수금 기준으로 자금을 배분해 추천 종목을 목표 매수가에 지정가 매수.
 
         체결 확인과 결과 메일은 여기서 하지 않는다 — 지정가 주문은 접수 직후에 체결 여부를
-        알 수 없어, 09:40 `cancel_unfilled_buys`가 미체결분을 정리한 뒤에 알린다.
+        알 수 없어, 10:10 `cancel_unfilled_buys`가 미체결분을 정리한 뒤에 알린다.
         """
         cash = self.account.get_cash()
         plans = self.strategy.build_buy_plans(cash)
@@ -304,7 +304,7 @@ class DailyWorkflow:
                     f"대상: {ordered}"
                 )
 
-        # 결과 메일은 09:40 cancel_unfilled_buys가 보낸다 — 지정가라 지금은 체결 여부를 모른다
+        # 결과 메일은 10:10 cancel_unfilled_buys가 보낸다 — 지정가라 지금은 체결 여부를 모른다
         self._write_buy_records(cash, plans[0].amount, records)
 
     def _gap_note(
@@ -372,12 +372,12 @@ class DailyWorkflow:
         )
 
     def cancel_unfilled_buys(self, today: Optional[date] = None) -> None:
-        """09:40 — 목표가에 닿지 않은 매수 주문을 취소하고 매수 결과를 알린다 (PRD 5.5-B 6단계).
+        """10:10 — 목표가에 닿지 않은 매수 주문을 취소하고 매수 결과를 알린다 (PRD 5.5-B 6단계).
 
-        취소 대상은 **당일 체결내역 조회**에서 찾는다. 09:10과 09:40 사이에 설정 저장 등으로
+        취소 대상은 **당일 체결내역 조회**에서 찾는다. 09:08과 10:10 사이에 설정 저장 등으로
         엔진이 재시작돼도 미체결 주문이 장 마감까지 방치되면 안 되기 때문이다.
 
-        15:15 마감 정리(`runtime.close_out`)가 한 번 더 부른다 — 09:40을 놓친 날의 그물이다.
+        15:15 마감 정리(`runtime.close_out`)가 한 번 더 부른다 — 10:10을 놓친 날의 그물이다.
         메일을 보내고 나면 기록 파일을 지우므로 같은 메일이 두 번 나가지는 않는다.
         """
         state = self._read_buy_records(today or date.today())
@@ -456,7 +456,7 @@ class DailyWorkflow:
         )
         return targets
 
-    # ── 매수 기록 파일 (09:10 → 09:40 인계) ────────────────────
+    # ── 매수 기록 파일 (09:08 → 10:10 인계) ────────────────────
     def _write_buy_records(
         self, cash: float, amount_per_stock: float, records: List[BuyRecord]
     ) -> None:

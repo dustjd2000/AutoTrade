@@ -159,7 +159,7 @@ def test_apply_price_guardrail_uses_matching_stock():
 
 
 def test_attach_recommend_price_carries_today_price():
-    """09:10 갭 하락 판정 기준가는 추천 시각의 현재가다 (PRD 5.5-B)."""
+    """09:08 갭 하락 판정 기준가는 추천 시각의 현재가다 (PRD 5.5-B)."""
     recommendations = [StockRecommendation("005930", "삼성전자", 70_000, "수급")]
 
     attach_recommend_price(
@@ -438,7 +438,7 @@ def test_build_system_prompt_states_both_day_basis():
 
     assert "전일" in prompt
     assert "당일" in prompt
-    assert "09:40" in prompt  # 미체결 취소 규칙을 알려야 목표가를 현실적으로 잡는다
+    assert "10:10" in prompt  # 미체결 취소 규칙을 알려야 목표가를 현실적으로 잡는다
 
 
 # ── 목표 매도가 (참고용, v7) ─────────────────────────────────
