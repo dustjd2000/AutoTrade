@@ -115,9 +115,9 @@ def _separator() -> QFrame:
 
 
 def _with_toggle(field: QLineEdit, *toggles: QCheckBox) -> QWidget:
-    """입력란 오른쪽에 적용 여부 체크박스를 붙여 폼의 한 줄로 만든다 (익절/손절).
+    """입력란 오른쪽에 적용 여부 체크박스를 붙여 폼의 한 줄로 만든다.
 
-    익절 행은 '적용'과 '단순익절적용' 두 개를 단다.
+    익절/손절은 입력란을 공유하는 한 행이라 체크박스 세 개를 나란히 단다.
     """
     row = QWidget()
     layout = QHBoxLayout(row)
@@ -376,14 +376,15 @@ class MainWindow(QMainWindow):
         risk_form.setSpacing(8)
         risk_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # 익절·손절 두 값은 수수료·세금·슬리피지를 뺀 '순손익률' 기준이며, 보유 종목을
-        # 합산한 값으로 판정한다 (PRD 5.5-B). 종목별 판정은 단순익절 하나뿐이다.
-        self._take_profit = QLineEdit()
-        self._take_profit.setPlaceholderText("예: 0.5 (합산 순손익 +0.5%)")
-        self._take_profit.setValidator(QDoubleValidator(0.0, 100.0, 2))
-        self._stop_loss = QLineEdit()
-        self._stop_loss.setPlaceholderText("예: 2 (합산 순손익 -2%)")
-        self._stop_loss.setValidator(QDoubleValidator(0.0, 100.0, 2))
+        # 익절과 손절은 **입력란 하나를 공유한다** (확정 2026-08-21, PRD 5.5-B "익절·손절
+        # 폭 통합"). 한 칸의 값이 익절 +N%·손절 -N%로 동시에 쓰이고, 저장할 때 `.env`의
+        # `TAKE_PROFIT_PERCENT`/`STOP_LOSS_PERCENT` 두 키에 같은 값으로 들어간다 —
+        # 엔진은 종전대로 두 비율을 따로 받으며, 그 두 값이 항상 같아질 뿐이다.
+        # 수수료·세금·슬리피지를 뺀 '순손익률' 기준이며, 보유 종목을 합산한 값으로
+        # 판정한다. 종목별 판정은 단순익절 하나뿐이다.
+        self._exit_percent = QLineEdit()
+        self._exit_percent.setPlaceholderText("예: 2 (합산 순손익 +2%면 익절 / -2%면 손절)")
+        self._exit_percent.setValidator(QDoubleValidator(0.0, 100.0, 2))
         # 09:08 현재가가 목표 매수가보다 이만큼 넘게 높으면 그 종목을 건너뛴다
         self._buy_price_tolerance = QLineEdit()
         self._buy_price_tolerance.setPlaceholderText("예: 2 (목표가 +2% 초과 시 매수 안 함)")
@@ -398,9 +399,9 @@ class MainWindow(QMainWindow):
         # **기본은 손절 + 합산 퍼센트 익절이다** (확정 2026-08-18, PRD 5.5-B "퍼센트 익절
         # 기본 적용"). 단순익절이 기본 해제로 바뀌었다 — 익절선이 0(비용 제외 후 이익이면
         # 즉시)이라 상방을 너무 이르게 잘랐고, 익절(%) 입력값으로 폭을 정하는 쪽을 택했다.
-        self._take_profit_enabled = QCheckBox("적용")
+        self._take_profit_enabled = QCheckBox("익절")
         self._take_profit_enabled.setChecked(True)
-        self._stop_loss_enabled = QCheckBox("적용")
+        self._stop_loss_enabled = QCheckBox("손절")
         self._stop_loss_enabled.setChecked(True)
         # 단순익절 — 익절선을 입력값(%)이 아니라 0으로 두고 종목별로 판정한다. 위 '적용'
         # (합산 퍼센트 익절)과는 배타적이라 한쪽을 켜면 다른 쪽이 꺼진다. 둘 다 끄면 익절 없음.
@@ -411,19 +412,24 @@ class MainWindow(QMainWindow):
             "이익이면) 그 종목만 즉시 매도하고 나머지는 계속 보유합니다."
         )
         self._take_profit_enabled.setToolTip(
-            "보유 종목을 합산한 순손익이 익절(%)에 닿으면 전량 매도합니다."
+            "보유 종목을 합산한 순손익이 +입력값(%)에 닿으면 전량 매도합니다."
+        )
+        self._stop_loss_enabled.setToolTip(
+            "보유 종목을 합산한 순손익이 -입력값(%)에 닿으면 전량 매도합니다."
         )
         self._take_profit_enabled.toggled.connect(self._on_take_profit_toggled)
         self._simple_take_profit_enabled.toggled.connect(self._on_simple_take_profit_toggled)
         self._stop_loss_enabled.toggled.connect(self._on_exit_flag_toggled)
 
         risk_form.addRow(
-            "익절 (%)",
+            "익절/손절 (%)",
             _with_toggle(
-                self._take_profit, self._take_profit_enabled, self._simple_take_profit_enabled
+                self._exit_percent,
+                self._take_profit_enabled,
+                self._stop_loss_enabled,
+                self._simple_take_profit_enabled,
             ),
         )
-        risk_form.addRow("손절 (%)", _with_toggle(self._stop_loss, self._stop_loss_enabled))
 
         # 해제된 라인이 있으면 그 사실을 입력란 바로 아래에 띄운다 — 체크박스만으로는
         # 눈에 잘 띄지 않는데, 손절이 꺼진 줄 모르는 것이 이 화면에서 가장 위험한 오해다
@@ -436,13 +442,15 @@ class MainWindow(QMainWindow):
         # 종목별 판정이 아니라는 점을 입력란 바로 아래에서 알려야 한다 — 한 종목이 크게
         # 무너져도 다른 종목이 상쇄하면 매도가 나가지 않는다 (PRD 5.5-B, 확정 2026-08-10)
         exit_hint = QLabel(
-            "(손절과 익절(%)은 보유 종목을 합산한 순손익 기준이며, 닿으면 보유 종목을 전량 "
+            "(입력값 하나가 익절선(+)과 손절선(-)을 함께 정합니다 — 2를 넣으면 익절 +2% / "
+            "손절 -2%입니다. 폭은 같아도 켜고 끄는 것은 따로라, '익절'만 꺼서 손절만 남길 수 "
+            "있습니다. 둘 다 보유 종목을 합산한 순손익 기준이며, 닿으면 보유 종목을 전량 "
             "매도합니다. '단순익절적용'만 종목별입니다 — 그 종목의 순손익이 0을 넘으면 비용을 "
-            "빼고 조금이라도 이익인 것이므로 그 종목만 팔고 나머지는 계속 보유하며, 익절(%) "
-            "입력란은 쓰이지 않습니다. 익절 '적용'과 '단순익절적용'은 둘 중 하나만 켜지고, "
-            "둘 다 끄면 익절이 없습니다. 이익 난 종목이 먼저 빠지면 남은 종목의 손실을 상쇄할 "
-            "것이 없어져 합산 손절이 더 쉽게 걸립니다. "
-            "기본값은 손절 + 익절(%)이며, 여기서 바꾼 상태는 프로그램을 끌 때까지 "
+            "빼고 조금이라도 이익인 것이므로 그 종목만 팔고 나머지는 계속 보유합니다. 이때 "
+            "익절선은 입력값이 아니라 0이 되고, 입력값은 손절선에만 쓰입니다. '익절'과 "
+            "'단순익절적용'은 둘 중 하나만 켜지고, 둘 다 끄면 익절이 없습니다. 이익 난 종목이 "
+            "먼저 빠지면 남은 종목의 손실을 상쇄할 것이 없어져 합산 손절이 더 쉽게 걸립니다. "
+            "기본은 익절 + 손절이며, 여기서 바꾼 상태는 프로그램을 끌 때까지 "
             "유지됩니다 — 다시 시작하면 기본값으로 돌아갑니다)"
         )
         exit_hint.setWordWrap(True)
@@ -785,7 +793,7 @@ class MainWindow(QMainWindow):
             line = self._take_profit_label() if self._take_profit_watched() else "익절 해제"
         else:
             line = (
-                f"손절 -{self._stop_loss.text().strip() or '2'}%"
+                f"손절 -{self._exit_percent.text().strip() or '2'}%"
                 if self._stop_loss_enabled.isChecked()
                 else "손절 해제"
             )
@@ -899,8 +907,8 @@ class MainWindow(QMainWindow):
         stop_loss = self._stop_loss_enabled.isChecked()
         simple_take_profit = self._simple_take_profit_enabled.isChecked()
 
-        # 단순익절은 익절선을 0으로 보므로 입력값(%)이 쓰이지 않는다
-        self._take_profit.setEnabled(not simple_take_profit)
+        # 입력란은 늘 열어 둔다 — 단순익절이 켜지면 익절선은 0이 되지만, 같은 칸이
+        # 손절선도 정하므로 잠그면 손절 폭을 못 고치게 된다 (PRD 5.5-B "익절·손절 폭 통합")
         self._refresh_exit_flag_hint()
 
         thread = self._engine_thread
@@ -937,7 +945,7 @@ class MainWindow(QMainWindow):
         """
         if self._simple_take_profit_enabled.isChecked():
             return "단순익절(종목별) 0% 초과"
-        return f"익절 +{self._take_profit.text().strip() or '0.5'}%"
+        return f"익절 +{self._exit_percent.text().strip() or '2'}%"
 
     def _take_profit_watched(self) -> bool:
         """익절이 어떤 방식으로든 감시되고 있는지 — 두 체크박스는 배타적이다."""
@@ -952,7 +960,7 @@ class MainWindow(QMainWindow):
         if self._take_profit_watched():
             lines.append(self._take_profit_label())
         if self._stop_loss_enabled.isChecked():
-            lines.append(f"손절 -{self._stop_loss.text().strip() or '2'}%")
+            lines.append(f"손절 -{self._exit_percent.text().strip() or '2'}%")
 
         if not lines:
             return (
@@ -1006,8 +1014,9 @@ class MainWindow(QMainWindow):
         self._account.setText(env.get("KIWOOM_ACCOUNT", ""))
         self._email_from.setText(env.get("EMAIL_FROM", ""))
         self._email_to.setText(env.get("EMAIL_TO", ""))
-        self._take_profit.setText(env.get("TAKE_PROFIT_PERCENT", "0.5"))
-        self._stop_loss.setText(env.get("STOP_LOSS_PERCENT", "2"))
+        # 두 키를 한 칸으로 읽는다 — 손으로 서로 다르게 적어 두면 익절 쪽 값이 보이고,
+        # 저장하는 순간 손절 값도 그 값으로 덮인다 (PRD 5.5-B "익절·손절 폭 통합")
+        self._exit_percent.setText(env.get("TAKE_PROFIT_PERCENT", "2"))
         self._buy_price_tolerance.setText(env.get("BUY_PRICE_TOLERANCE_PERCENT", "2"))
         self._gap_down_tolerance.setText(env.get("GAP_DOWN_TOLERANCE_PERCENT", "1"))
         self._select_combo_value(self._investable_ratio, env.get("INVESTABLE_RATIO_PERCENT"), default=50)
@@ -1052,8 +1061,8 @@ class MainWindow(QMainWindow):
             "SMTP_USER": self._email_from.text().strip(),  # 로그인 계정 = 발송 주소
             "EMAIL_FROM": self._email_from.text().strip(),
             "EMAIL_TO": self._email_to.text().strip(),
-            "TAKE_PROFIT_PERCENT": self._take_profit.text().strip() or "0.5",
-            "STOP_LOSS_PERCENT": self._stop_loss.text().strip() or "2",
+            "TAKE_PROFIT_PERCENT": self._exit_percent.text().strip() or "2",
+            "STOP_LOSS_PERCENT": self._exit_percent.text().strip() or "2",
             "BUY_PRICE_TOLERANCE_PERCENT": self._buy_price_tolerance.text().strip() or "2",
             "GAP_DOWN_TOLERANCE_PERCENT": self._gap_down_tolerance.text().strip() or "1",
             "INVESTABLE_RATIO_PERCENT": str(self._investable_ratio.currentData()),
