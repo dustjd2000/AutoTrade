@@ -135,6 +135,15 @@ class MonthlySummary:
         return self.net_pnl / self.base_asset * 100 if self.base_asset else 0.0
 
 
+@dataclass
+class DailyPoint:
+    """월 누적 꺾은선 그래프의 한 점 — 매매가 있었던 하루."""
+
+    day: date
+    net_pnl: float      # 그날의 순손익 (실현손익 - 수수료·세금)
+    cumulative: float   # 월초부터 그날까지 누적 순손익
+
+
 class TradeStore:
     """매수/매도 체결 내역을 SQLite에 영속 저장한다.
 
@@ -331,6 +340,39 @@ class TradeStore:
                 (*FILLED_STATUSES, start, end),
             ).fetchone()
         return MonthlySummary(realized_pnl=row[0] or 0.0, fees=row[1] or 0.0)
+
+    def monthly_cumulative_series(
+        self, year: int, month: int, up_to: date
+    ) -> List[DailyPoint]:
+        """월초부터 up_to까지 날짜별 누적 순손익 — 리포트 메일의 꺾은선 그래프 입력.
+
+        매매가 없던 날은 점을 만들지 않는다 (휴장일까지 평평하게 이어 붙이면 실제
+        거래일 간격이 왜곡된다). 수수료·세금 기준은 monthly_summary와 같아서,
+        마지막 점의 누적값은 리포트에 적히는 '누적 순손익'과 일치한다.
+        """
+        start = datetime(year, month, 1).isoformat()
+        end = datetime.combine(up_to, datetime.max.time()).isoformat()
+        placeholders = ", ".join("?" for _ in FILLED_STATUSES)
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""SELECT date(timestamp) AS d,
+                           COALESCE(SUM(realized_pnl), 0),
+                           COALESCE(SUM(COALESCE(commission, 0) + COALESCE(tax, 0)), 0)
+                    FROM trades
+                    WHERE status IN ({placeholders}) AND timestamp BETWEEN ? AND ?
+                    GROUP BY d ORDER BY d""",
+                (*FILLED_STATUSES, start, end),
+            ).fetchall()
+
+        points: List[DailyPoint] = []
+        running = 0.0
+        for day_text, realized, fees in rows:
+            net = (realized or 0.0) - (fees or 0.0)
+            running += net
+            points.append(
+                DailyPoint(day=date.fromisoformat(day_text), net_pnl=net, cumulative=running)
+            )
+        return points
 
 
 def _same_day_buy_price(

@@ -41,6 +41,7 @@ def render(
     sync_failed=False,
     closed_out=False,
     unsellable=None,
+    chart_cid=None,
 ):
     return templates.daily_report_email(
         summary or make_summary(),
@@ -49,6 +50,7 @@ def render(
         sync_failed=sync_failed,
         closed_out=closed_out,
         unsellable=unsellable,
+        chart_cid=chart_cid,
     )
 
 
@@ -416,3 +418,14 @@ def test_recommendation_email_omits_the_sell_target_when_unavailable():
     )
 
     assert "목표 매도가" not in body
+
+
+def test_monthly_chart_is_embedded_only_when_given():
+    """그래프 PNG는 CID 인라인 첨부로 붙는다 — Gmail이 본문 <svg>는 지운다."""
+    _, text, html = render(chart_cid="monthly-cumulative")
+
+    assert 'src="cid:monthly-cumulative"' in html
+    assert "cid:" not in text, "평문 파트에는 그래프가 없다"
+
+    _, _, without = render()
+    assert "<img" not in without

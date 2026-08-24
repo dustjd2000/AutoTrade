@@ -40,7 +40,7 @@ class FakeEmail:
     def __init__(self):
         self.sent = []
 
-    def send(self, subject, message, html=None):
+    def send(self, subject, message, html=None, images=None):
         self.sent.append((subject, message, html))
 
 
@@ -186,6 +186,7 @@ def make_report_workflow(fill_error=None):
         monthly_summary=lambda year, month, up_to: MonthlySummary(
             realized_pnl=12340.0, fees=1258.0
         ),
+        monthly_cumulative_series=lambda year, month, up_to: [],
     )
 
     def get_today_fills():

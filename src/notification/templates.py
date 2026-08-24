@@ -12,6 +12,7 @@ from src.core.events import (
 )
 from src.llm.recommender import StockRecommendation
 from src.logger.trade_store import DailySummary, MonthlySummary, TradeRow
+from src.notification import chart
 from src.risk.manager import exit_trigger_price
 
 # 이익은 빨강, 손실은 파랑 (국내 증권 관례)
@@ -94,6 +95,7 @@ def daily_report_email(
     sync_failed: bool = False,
     closed_out: bool = False,
     unsellable: Optional[List[UnsellableView]] = None,
+    chart_cid: Optional[str] = None,
 ) -> tuple[str, str, str]:
     """15:35 일일/월간 성과 리포트 이메일 (PRD 5.11).
 
@@ -102,6 +104,7 @@ def daily_report_email(
 
     closed_out=True는 보유 종목을 전부 매도해 15:35보다 앞서 보내는 최종 리포트다.
     unsellable은 오늘 매도하지 못한 종목 — 메일만 보는 상황에서도 잔여 포지션을 알 수 있어야 한다.
+    chart_cid를 주면 월 누적 꺾은선 PNG를 그 CID로 HTML에 끼워 넣는다 (평문에는 없다).
     """
     subject = f"[AutoTrade] {summary.day:%Y-%m-%d} 매매 결과 리포트"
     notes = _report_notes(summary, sync_failed, closed_out)
@@ -109,7 +112,7 @@ def daily_report_email(
     return (
         subject,
         _report_text(summary, monthly, cash, notes, unsellable),
-        _report_html(summary, monthly, cash, notes, unsellable),
+        _report_html(summary, monthly, cash, notes, unsellable, chart_cid),
     )
 
 
@@ -245,6 +248,8 @@ def _report_text(
 
 
 # ── HTML ────────────────────────────────────────────────────
+CHART_WIDTH_PX = chart.WIDTH_PX
+
 _TH = "padding:6px 10px; border-bottom:2px solid #cccccc; font-weight:600; text-align:right;"
 _TD = "padding:6px 10px; border-bottom:1px solid #eeeeee; text-align:right;"
 
@@ -255,6 +260,7 @@ def _report_html(
     cash: float,
     notes: List[str],
     unsellable: List[UnsellableView],
+    chart_cid: Optional[str] = None,
 ) -> str:
     parts = [
         '<div style="font-family:-apple-system,\'Malgun Gothic\',sans-serif; font-size:14px; color:#222222;">',
@@ -316,6 +322,13 @@ def _report_html(
             "</ul>",
         ]
     )
+
+    if chart_cid:
+        # width 속성은 Outlook용 — style만 주면 원본 크기로 벌어진다
+        parts.append(
+            f'<img src="cid:{escape(chart_cid)}" width="{CHART_WIDTH_PX}" alt="이번 달 누적 순손익 추이" '
+            f'style="display:block; width:100%; max-width:{CHART_WIDTH_PX}px; height:auto; margin:10px 0 0;">'
+        )
 
     if unsellable:
         parts.append(

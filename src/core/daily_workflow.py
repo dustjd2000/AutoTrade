@@ -22,7 +22,7 @@ from src.data.collector import DataCollector
 from src.llm.recommender import LLMRecommender
 from src.logger.trade_store import TradeStore
 from src.notification.email import EmailNotifier
-from src.notification import templates
+from src.notification import chart, templates
 from src.risk.manager import exit_trigger_price
 from src.strategy.llm_momentum import LLMMomentumStrategy
 
@@ -42,6 +42,9 @@ DEFAULT_BUY_RECORDS_PATH = Path("data") / "buy_records.json"
 # 주문 이후의 문구는 매수 결과 메일과 같은 것을 쓴다 (templates.BUY_OUTCOME_LABELS) —
 # 화면과 메일이 서로 다른 말을 쓰면 대조가 안 된다.
 BUY_PENDING_STATUS = "매수 대기"
+
+# 리포트 메일에 인라인 첨부되는 월 누적 그래프의 Content-ID.
+MONTHLY_CHART_CID = "monthly-cumulative"
 
 
 @dataclass
@@ -758,6 +761,11 @@ class DailyWorkflow:
         # 금액이므로 실현손익이 아니라 순손익을 되돌려야 월초 시점 자산에 맞는다.
         monthly.base_asset = snapshot.total_asset - monthly.net_pnl
 
+        # 그래프는 못 그려도(거래일 1일 이하 등) 리포트는 그대로 나간다
+        chart_png = chart.render_monthly_cumulative(
+            self.trade_store.monthly_cumulative_series(today.year, today.month, up_to=today)
+        )
+
         subject, body, html = templates.daily_report_email(
             summary,
             monthly,
@@ -766,8 +774,11 @@ class DailyWorkflow:
             closed_out=closed_out,
             # 메일만 보는 상황에서도 매도되지 않고 남은 종목을 알 수 있어야 한다
             unsellable=self.engine.unsellable_snapshot(),
+            chart_cid=MONTHLY_CHART_CID if chart_png else None,
         )
-        self.email.send(subject, body, html)
+        self.email.send(
+            subject, body, html, images={MONTHLY_CHART_CID: chart_png} if chart_png else None
+        )
         logger.info("Daily report email sent for %s", today)
 
     def _sync_fills(self, today: date) -> bool:

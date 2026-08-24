@@ -157,7 +157,7 @@ class FakeEmail:
     def __init__(self):
         self.sent = []
 
-    def send(self, subject, message, html=None):
+    def send(self, subject, message, html=None, images=None):
         self.sent.append((subject, message, html))
 
 
@@ -183,6 +183,7 @@ def make_workflow(unsettled_sells=False):
             monthly_summary=lambda year, month, up_to: MonthlySummary(
                 realized_pnl=1000.0, fees=100.0
             ),
+            monthly_cumulative_series=lambda year, month, up_to: [],
         ),
         email=email,
     )
@@ -265,7 +266,7 @@ def test_failed_send_leaves_report_pending():
     workflow, email = make_workflow()
     calls = []
 
-    def flaky(subject, message, html=None):
+    def flaky(subject, message, html=None, images=None):
         calls.append(subject)
         if len(calls) == 1:
             raise RuntimeError("SMTP 실패")

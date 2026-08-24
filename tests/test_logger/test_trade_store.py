@@ -419,3 +419,46 @@ def test_existing_db_gains_new_columns(tmp_path):
     assert summary.realized_pnl == 3500.0
     assert summary.fees == 389.0
     assert summary.trades[0].name == "카카오"
+
+
+# ── 월 누적 꺾은선 그래프 입력 ──────────────────────────────
+def test_monthly_cumulative_series_accumulates_by_trading_day(tmp_path):
+    """매매가 있었던 날만 한 점씩, 월초부터의 누적 순손익으로 쌓인다."""
+    store = make_store(tmp_path)
+
+    store.record_fill(
+        make_result(OrderSide.SELL, OrderStatus.FILLED, 1020.0, datetime(2026, 7, 10, 9, 30)),
+        avg_price=1000.0,
+    )  # +200
+    store.record_fill(
+        make_result(OrderSide.SELL, OrderStatus.FILLED, 980.0, datetime(2026, 7, 20, 9, 30)),
+        avg_price=1000.0,
+    )  # -200
+    store.record_fill(
+        make_result(OrderSide.SELL, OrderStatus.FILLED, 1100.0, datetime(2026, 7, 20, 10, 0)),
+        avg_price=1000.0,
+    )  # +1,000 — 같은 날이므로 한 점으로 합쳐진다
+    store.record_fill(
+        make_result(OrderSide.SELL, OrderStatus.FILLED, 1100.0, datetime(2026, 8, 1, 9, 30)),
+        avg_price=1000.0,
+    )  # 다음 달 — 제외
+
+    series = store.monthly_cumulative_series(2026, 7, up_to=date(2026, 7, 31))
+
+    assert [p.day for p in series] == [date(2026, 7, 10), date(2026, 7, 20)]
+    assert [p.net_pnl for p in series] == [200.0, 800.0]
+    assert [p.cumulative for p in series] == [200.0, 1000.0]
+
+
+def test_monthly_cumulative_series_ends_at_monthly_net_pnl(tmp_path):
+    """마지막 점은 리포트의 '누적 순손익' 숫자와 같아야 한다 — 수수료 기준도 같다."""
+    store = make_store(tmp_path)
+    store.apply_fills(seed_today(store), DAY)
+
+    series = store.monthly_cumulative_series(2026, 7, up_to=DAY)
+
+    assert series[-1].cumulative == store.monthly_summary(2026, 7, up_to=DAY).net_pnl
+
+
+def test_monthly_cumulative_series_empty_without_trades(tmp_path):
+    assert make_store(tmp_path).monthly_cumulative_series(2026, 7, up_to=DAY) == []
