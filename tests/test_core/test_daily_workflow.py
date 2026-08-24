@@ -108,6 +108,7 @@ def make_workflow(recommendations=None, collected=True, cash=12_000_000):
             slippage_rate=0.001,
             # 메일에 익절선(%)이 그대로 적히는지 보는 테스트들이라 퍼센트 익절로 고정한다
             simple_take_profit_enabled=False,
+            take_profit_enabled=True,
         ),
         note_open_position=lambda ticker: None,
         notify=notifications.append,
@@ -854,3 +855,94 @@ def test_gap_down_ignores_the_previous_close():
     workflow.execute_buys()
 
     assert order_client.orders == []
+
+
+# ── UI '매수 예정' 표 (PRD 5.10) ────────────────────────────
+BOARD_DAY = date(2026, 8, 24)
+
+
+def board_recs():
+    return [
+        StockRecommendation(
+            ticker="005930",
+            name="삼성전자",
+            target_price=1000,
+            reason="a",
+            target_sell_price=1100,
+        )
+    ]
+
+
+def test_buy_plan_snapshot_is_filled_at_recommendation_time():
+    workflow, _, _, _, _ = make_workflow(recommendations=board_recs())
+
+    workflow.recommend_and_notify(today=BOARD_DAY)
+
+    (plan,) = workflow.buy_plan_snapshot(today=BOARD_DAY)
+    assert plan.status == daily_workflow.BUY_PENDING_STATUS
+    assert plan.buy_price == 1000
+    assert plan.quantity == 0  # 아직 주문 전이라 수량을 모른다
+    # 매도예상가는 LLM 목표 매도가(1,100)가 아니라 익절선에 닿는 가격이다
+    assert plan.sell_price == pytest.approx(
+        exit_trigger_price(1000, 0.005, 0.00015, 0.0018, 0.001)
+    )
+
+
+def test_buy_plan_sell_price_follows_simple_take_profit():
+    """단순익절이 켜져 있으면 익절선은 0이다 — 표도 그 가격을 보여줘야 한다."""
+    workflow, _, _, _, _ = make_workflow(recommendations=board_recs())
+    workflow.engine.risk_manager.simple_take_profit_enabled = True
+
+    workflow.recommend_and_notify(today=BOARD_DAY)
+
+    (plan,) = workflow.buy_plan_snapshot(today=BOARD_DAY)
+    assert plan.sell_price == pytest.approx(
+        exit_trigger_price(1000, 0.0, 0.00015, 0.0018, 0.001)
+    )
+
+
+def test_buy_plan_sell_price_is_blank_when_take_profit_is_off():
+    workflow, _, _, _, _ = make_workflow(recommendations=board_recs())
+    workflow.engine.risk_manager.take_profit_enabled = False
+
+    workflow.recommend_and_notify(today=BOARD_DAY)
+
+    (plan,) = workflow.buy_plan_snapshot(today=BOARD_DAY)
+    assert plan.sell_price == 0.0
+
+
+def test_buy_plan_snapshot_shows_order_status_after_buying():
+    recs = board_recs()
+    workflow, _, _, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+
+    workflow.execute_buys()
+
+    (plan,) = workflow.buy_plan_snapshot()
+    assert plan.status == "접수"
+    assert plan.quantity == 2000  # 종목당 200만 ÷ 1,000원
+
+
+def test_buy_plan_snapshot_keeps_the_result_after_the_records_file_is_cleared():
+    """기록 파일은 10:10에 지워진다 — 표는 그 뒤에도 결과를 계속 보여줘야 한다."""
+    recs = board_recs()
+    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.execute_buys()
+    order_client.fills = [unfilled_fill()]
+
+    workflow.cancel_unfilled_buys()
+
+    (plan,) = workflow.buy_plan_snapshot()
+    assert plan.status == "미체결 취소"
+    assert plan.quantity == 0        # 사지 못했으므로 수량을 비운다
+    assert plan.sell_price == 0.0    # 팔 것이 없으니 매도예상가도 없다
+    assert "목표 매수가에 닿지 않아" in plan.note
+
+
+def test_buy_plan_snapshot_is_empty_on_a_different_day():
+    """전날 행이 남으면 오늘 매수한 것처럼 보인다 — 날짜가 다르면 비운다."""
+    workflow, _, _, _, _ = make_workflow(recommendations=board_recs())
+    workflow.recommend_and_notify(today=BOARD_DAY)
+
+    assert workflow.buy_plan_snapshot(today=date(2026, 8, 25)) == []

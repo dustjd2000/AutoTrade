@@ -10,6 +10,7 @@ from src.core.engine import TradingEngine
 from src.core.events import (
     BuyExecution,
     BuyOutcome,
+    BuyPlanView,
     BuyRecord,
     OrderRequest,
     OrderSide,
@@ -22,6 +23,7 @@ from src.llm.recommender import LLMRecommender
 from src.logger.trade_store import TradeStore
 from src.notification.email import EmailNotifier
 from src.notification import templates
+from src.risk.manager import exit_trigger_price
 from src.strategy.llm_momentum import LLMMomentumStrategy
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,11 @@ DEFAULT_REPORT_MARK_PATH = Path("data") / "final_report_sent"
 # 재시작될 때(설정 저장 등) 기록이 사라져, 취소는 체결내역 조회로 살아나도 매수 결과
 # 메일만 조용히 빠진다 — 사용자는 미체결인지 장애인지 구분할 수 없다.
 DEFAULT_BUY_RECORDS_PATH = Path("data") / "buy_records.json"
+
+# 매수 시각 전, 아직 주문이 나가지 않은 추천 종목의 상태 문구 (UI '매수 예정' 표).
+# 주문 이후의 문구는 매수 결과 메일과 같은 것을 쓴다 (templates.BUY_OUTCOME_LABELS) —
+# 화면과 메일이 서로 다른 말을 쓰면 대조가 안 된다.
+BUY_PENDING_STATUS = "매수 대기"
 
 
 @dataclass
@@ -89,10 +96,75 @@ class DailyWorkflow:
         self.buy_records_path = Path(
             buy_records_path if buy_records_path is not None else DEFAULT_BUY_RECORDS_PATH
         )
+        # UI '매수 예정' 표가 읽는 스냅샷 — (날짜, 행 목록) 한 쌍을 통째로 갈아끼운다
+        # (`buy_plan_snapshot` 참고). 주문 기록 파일은 10:10에 지워지므로 표의 출처가 될 수 없다.
+        self._buy_board: tuple = (None, ())
         # 09:08 현재가가 목표 매수가보다 이만큼 넘게 높으면 그 종목은 건너뛴다 (_gap_note 참고)
         self.buy_price_tolerance_ratio = buy_price_tolerance_ratio
         # 09:08 현재가가 추천 시점 가격보다 이만큼 넘게 낮으면 건너뛴다. 0이면 끈다 (_gap_note 참고)
         self.gap_down_tolerance_ratio = gap_down_tolerance_ratio
+
+    # ── '매수 예정' 표 (PRD 5.10) ────────────────────────────
+    def buy_plan_snapshot(self, today: Optional[date] = None) -> List[BuyPlanView]:
+        """오늘의 매수 예정 종목과 진행 상태 (UI 스레드에서 호출 — API를 호출하지 않는다).
+
+        날짜와 행 목록을 한 튜플로 묶어 통째로 갈아끼우므로, 참조를 한 번만 집으면
+        일관된 사본이 된다 (`TradingEngine.position_snapshot`과 같은 규약). 기록된 날짜가
+        오늘이 아니면 빈 목록이라, 08:40 초기화 훅 없이도 전날 행이 남지 않는다.
+        """
+        day, rows = self._buy_board
+        return list(rows) if day == (today or date.today()) else []
+
+    def _set_buy_board(self, day: date, rows: List[BuyPlanView]) -> None:
+        self._buy_board = (day, tuple(rows))
+
+    def _take_profit_price(self, price: float) -> float:
+        """익절선에 닿는 가격 — 표의 '매도예상가'. 익절이 꺼져 있으면 0이라 칸이 빈다.
+
+        LLM의 목표 매도가가 아니라 익절(%) 설정을 순손익 기준으로 역산한 값이다. 목표
+        매도가는 주문에 쓰이지 않는 참고 수치라(PRD 5.5-B) "언제 팔리나"에 답하지 못한다.
+        단순익절은 익절선이 0이므로 그 경우를 먼저 본다 — 두 익절은 배타적이다(PRD 5.5-B).
+        """
+        risk = self.engine.risk_manager
+        if price <= 0:
+            return 0.0
+        if risk.simple_take_profit_enabled:
+            target_ratio = 0.0
+        elif risk.take_profit_enabled:
+            target_ratio = risk.take_profit_ratio
+        else:
+            return 0.0
+        return exit_trigger_price(
+            price, target_ratio, risk.commission_rate, risk.tax_rate, risk.slippage_rate
+        )
+
+    def _board_from_recommendations(self, recommendations) -> List[BuyPlanView]:
+        """추천 직후의 표 — 실제로 매수할 상위 몇 종목만 담는다 (build_buy_plans와 같은 기준)."""
+        return [
+            BuyPlanView(
+                ticker=r.ticker,
+                label=format_stock(r.ticker, r.name),
+                status=BUY_PENDING_STATUS,
+                buy_price=float(r.target_price),
+                sell_price=self._take_profit_price(float(r.target_price)),
+            )
+            for r in recommendations[: self.strategy.target_stock_count]
+        ]
+
+    def _board_from_records(self, records: List[BuyRecord]) -> List[BuyPlanView]:
+        """매수 시각 이후의 표 — 매수하지 못한 종목은 수량·매도예상가를 비우고 사유만 남긴다."""
+        return [
+            BuyPlanView(
+                ticker=r.ticker,
+                label=r.label,
+                status=templates.BUY_OUTCOME_LABELS[r.outcome],
+                quantity=(r.filled_quantity or r.quantity) if r.outcome.is_ordered else 0,
+                buy_price=r.price,
+                sell_price=self._take_profit_price(r.price) if r.outcome.is_ordered else 0.0,
+                note=r.note or "",
+            )
+            for r in records
+        ]
 
     def recommend_and_notify(self, today: Optional[date] = None) -> None:
         """09:05 — 전일·당일 데이터 수집 → LLM 추천 → 결과를 이메일로 발송."""
@@ -110,6 +182,7 @@ class DailyWorkflow:
             return
 
         self.strategy.set_recommendations(recommendations)
+        self._set_buy_board(today, self._board_from_recommendations(recommendations))
         subject, body = templates.recommendation_email(
             recommendations, today, self.strategy.investable_ratio, self.strategy.target_stock_count
         )
@@ -304,6 +377,7 @@ class DailyWorkflow:
                     f"대상: {ordered}"
                 )
 
+        self._set_buy_board(date.today(), self._board_from_records(records))
         # 결과 메일은 10:10 cancel_unfilled_buys가 보낸다 — 지정가라 지금은 체결 여부를 모른다
         self._write_buy_records(cash, plans[0].amount, records)
 
@@ -380,7 +454,8 @@ class DailyWorkflow:
         15:15 마감 정리(`runtime.close_out`)가 한 번 더 부른다 — 10:10을 놓친 날의 그물이다.
         메일을 보내고 나면 기록 파일을 지우므로 같은 메일이 두 번 나가지는 않는다.
         """
-        state = self._read_buy_records(today or date.today())
+        today = today or date.today()
+        state = self._read_buy_records(today)
         cancelled_ids = self._cancel_unfilled_orders(state.records if state else [])
 
         if state is None:
@@ -399,6 +474,8 @@ class DailyWorkflow:
         # 메일이 실패해도 (_notify_buy_result가 예외를 삼킨다) 기록은 지운다 — 남겨두면
         # 15:15 마감 정리가 같은 메일을 다시 시도하며 매번 취소 로그까지 되풀이한다.
         self._clear_buy_records()
+        # 기록 파일은 지워지므로 표의 마지막 상태(체결/미체결 취소)는 여기서 메모리에 남긴다
+        self._set_buy_board(today, self._board_from_records(records))
         self._notify_buy_result(state.cash, state.amount_per_stock, records, fills_synced)
 
     def _cancel_unfilled_orders(self, records: List[BuyRecord]) -> set:

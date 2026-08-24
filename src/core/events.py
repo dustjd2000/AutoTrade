@@ -168,6 +168,23 @@ class BuyExecution:
 
 
 @dataclass(frozen=True)
+class BuyPlanView:
+    """UI '매수 예정' 표 한 줄 (PRD 5.10).
+
+    추천 시각의 추천 목록과 매수 시각 이후의 `BuyRecord`를 같은 모양으로 눕혀, 표가
+    어느 단계인지 신경 쓰지 않고 그대로 그릴 수 있게 한다.
+    """
+
+    ticker: str
+    label: str
+    status: str              # '매수 대기' 또는 BUY_OUTCOME_LABELS의 문구
+    quantity: int = 0        # 0 = 아직 주문 전이거나 매수하지 못한 종목
+    buy_price: float = 0.0   # 매수지정가 — 체결됐으면 체결가
+    sell_price: float = 0.0  # 익절 환산가. 0 = 익절이 꺼져 있거나 산출 불가 (표에서 빈칸)
+    note: str = ""           # 건너뜀·실패·취소 사유
+
+
+@dataclass(frozen=True)
 class UnsellableView:
     """매도하지 못한 종목과 그 사유 — UI '매도 불가' 표와 리포트 메일이 함께 쓴다.
 

@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
 from dotenv import load_dotenv
 
 from config.settings import DEFAULT_BUY_TIME_HHMM, DEFAULT_RECOMMEND_TIME_HHMM, Settings
+from src.core.daily_workflow import BUY_PENDING_STATUS
 from src.core.runtime import MANUAL_ACTIONS, ORDER_ACTIONS
 from src.ui.engine_thread import EngineThread
 from src.ui.env_store import load_env, save_env
@@ -67,6 +68,11 @@ HOLDINGS_CHECK_COLUMN = 0
 # 매도하지 못한 종목 — 보유 목록에서 제외된 건은 보유 종목 표에 나타나지 않으므로
 # 사유와 함께 따로 보여준다 (engine.UnsellableView)
 UNSELLABLE_COLUMNS = ("종목", "사유", "시각")
+# 오늘 매수할 종목과 진행 상태 (DailyWorkflow.buy_plan_snapshot) — 로그만으로는 매수
+# 절차가 어디까지 갔는지 알 수 없어 따로 보여준다 (PRD 5.10 "매수 예정 표")
+BUY_PLAN_COLUMNS = ("종목", "상태", "수량", "매수지정가", "매도예상가", "비고")
+# 매수가 확정된 상태만 강조한다 — 나머지(대기·건너뜀·실패·취소)는 기본색/흐린색이다
+BUY_PLAN_DONE_STATUSES = ("체결", "부분체결")
 
 
 def _table_style() -> str:
@@ -158,6 +164,7 @@ class MainWindow(QMainWindow):
         self._restart_pending = False
         # 보유 종목 표를 만드는 도중에도 갱신이 한 번 돌기 때문에, 아직 없을 수 있음을 표시해 둔다
         self._unsellable_box: Optional[QGroupBox] = None
+        self._buy_plan_box: Optional[QGroupBox] = None
         # 배타 처리로 반대쪽 체크박스를 끄는 동안 True — 그때 딸려오는 toggled는 무시한다
         # (안 그러면 같은 상태로 엔진 반영과 로그가 두 번 나간다)
         self._syncing_exit_flags = False
@@ -578,6 +585,9 @@ class MainWindow(QMainWindow):
         run_layout.addWidget(btn_full)
         root.addWidget(run_box)
 
+        # 비고(건너뜀·실패 사유)가 길어 좌우로 나누지 않고 전체 폭을 쓴다
+        root.addWidget(self._build_buy_plan_box())
+
         # 하단 — 실행 로그(좌)와 보유 종목(우)을 반반으로 나눈다
         bottom_row = QHBoxLayout()
         bottom_row.setSpacing(10)
@@ -734,7 +744,9 @@ class MainWindow(QMainWindow):
         self._holdings_hint.setText(self._holdings_summary(rows))
         # 체크된 종목이 늘거나 줄면 '선택 매도' 버튼의 활성 여부가 달라진다
         self._set_actions_enabled(self._actions_enabled)
-        # 표를 만드는 도중에 불리는 첫 호출에서는 매도 불가 표가 아직 없다
+        # 표를 만드는 도중에 불리는 첫 호출에서는 아래 두 표가 아직 없다
+        if self._buy_plan_box is not None:
+            self._refresh_buy_plans()
         if self._unsellable_box is not None:
             self._refresh_unsellable()
         self._refresh_investable_amount()
@@ -800,6 +812,93 @@ class MainWindow(QMainWindow):
         return f" · 합산 순손익 {ret * 100:+.2f}% ({line})"
 
     # ── 매도 불가 ────────────────────────────────────────────
+    def _build_buy_plan_box(self) -> QGroupBox:
+        """오늘 매수할 종목과 진행 상태. 엔진이 멈춰 있으면 박스 자체를 숨긴다."""
+        box = QGroupBox("매수 예정")
+        layout = QVBoxLayout(box)
+        layout.setSpacing(6)
+
+        self._buy_plan_hint = QLabel()
+        self._buy_plan_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
+        self._buy_plan_hint.setWordWrap(True)
+        layout.addWidget(self._buy_plan_hint)
+
+        table = QTableWidget(0, len(BUY_PLAN_COLUMNS))
+        table.setHorizontalHeaderLabels(BUY_PLAN_COLUMNS)
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        table.setMinimumHeight(110)
+        header = table.horizontalHeader()
+        for col in range(len(BUY_PLAN_COLUMNS) - 1):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        # 비고(건너뜀·실패 사유)가 가장 길다
+        header.setSectionResizeMode(len(BUY_PLAN_COLUMNS) - 1, QHeaderView.ResizeMode.Stretch)
+        table.setStyleSheet(_table_style())
+        self._buy_plan_view = table
+        layout.addWidget(table)
+
+        # 갱신은 _refresh_holdings가 이어서 호출한다 (같은 타이머·같은 캐시)
+        self._buy_plan_box = box
+        self._refresh_buy_plans()
+        return box
+
+    def _refresh_buy_plans(self) -> None:
+        """추천 종목과 매수 진행 상태를 표에 채운다 (workflow.buy_plan_snapshot).
+
+        매수지정가·매도예상가·상태 문구는 전부 엔진이 계산해 둔 값을 그대로 그린다 —
+        UI가 수수료율을 따로 읽어 익절가를 다시 계산하면 실제 판정과 어긋날 수 있다
+        (보유 종목 요약 줄과 같은 원칙).
+        """
+        thread = self._engine_thread
+        # 엔진이 멈춰 있으면 오늘 무엇을 살지 알 수 없다 — 빈 표 대신 박스를 숨긴다
+        self._buy_plan_box.setVisible(thread is not None)
+        if thread is None:
+            return
+
+        rows = thread.buy_plan_snapshot()
+        table = self._buy_plan_view
+        table.setRowCount(len(rows))
+        for row, plan in enumerate(rows):
+            status_color = (
+                COLOR_SUCCESS if plan.status in BUY_PLAN_DONE_STATUSES
+                else COLOR_TEXT_DIM if plan.note
+                else COLOR_TEXT
+            )
+            cells = (
+                (plan.label, Qt.AlignmentFlag.AlignLeft, COLOR_TEXT),
+                (plan.status, Qt.AlignmentFlag.AlignLeft, status_color),
+                (f"{plan.quantity:,}" if plan.quantity else "-",
+                 Qt.AlignmentFlag.AlignRight, COLOR_TEXT),
+                (f"{plan.buy_price:,.0f}" if plan.buy_price else "-",
+                 Qt.AlignmentFlag.AlignRight, COLOR_TEXT),
+                (f"{plan.sell_price:,.0f}" if plan.sell_price else "-",
+                 Qt.AlignmentFlag.AlignRight, COLOR_TEXT),
+                (plan.note, Qt.AlignmentFlag.AlignLeft, COLOR_TEXT_DIM),
+            )
+            for col, (value, align, color) in enumerate(cells):
+                cell = QTableWidgetItem(value)
+                cell.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
+                cell.setForeground(QColor(color))
+                table.setItem(row, col, cell)
+
+        self._buy_plan_hint.setText(self._buy_plan_summary(rows))
+
+    def _buy_plan_summary(self, rows: list) -> str:
+        """표 위 한 줄 — 매수 절차가 어느 단계인지 로그를 뒤지지 않고 알 수 있게 한다."""
+        if not rows:
+            return "아직 추천이 나오지 않았습니다 — 추천 시각에 오늘 매수할 종목이 채워집니다."
+
+        counts: dict = {}
+        for plan in rows:
+            counts[plan.status] = counts.get(plan.status, 0) + 1
+        detail = " · ".join(f"{status} {n}종목" for status, n in counts.items())
+
+        if all(plan.status == BUY_PENDING_STATUS for plan in rows):
+            return f"{detail} — 매수 시각에 목표 매수가로 지정가 주문을 넣습니다."
+        return f"{detail} — 매도예상가는 익절선에 닿는 가격입니다 (합산 판정이라 근사치)."
+
     def _build_unsellable_box(self) -> QGroupBox:
         """오늘 매도하지 못한 종목과 사유. 해당 건이 없으면 박스 자체를 숨긴다."""
         box = QGroupBox("매도 불가")
