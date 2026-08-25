@@ -114,6 +114,9 @@ class TradingEngine:
         # 창 종료 경고와 시세 끊김 감지에 이 두 값을 쓴다.
         self._open_tickers: Set[str] = set()
         self._last_market_data_at: Optional[datetime] = None
+        # 종목별 마지막 수신 시세. 보유 종목의 현재가는 Position이 들고 있지만, 아직 사지
+        # 않은 추천 종목은 담길 곳이 없다 — UI '매수 예정' 표의 현재가가 여기서 나온다.
+        self._last_prices: Dict[str, float] = {}
         # 잔고 스냅샷 캐시 — `POSITION_CACHE_TTL_SECONDS` 참고
         self._positions: Dict[str, Position] = {}
         self._positions_fetched_at: Optional[datetime] = None
@@ -143,6 +146,10 @@ class TradingEngine:
     @property
     def last_market_data_at(self) -> Optional[datetime]:
         return self._last_market_data_at
+
+    def last_price(self, ticker: str) -> float:
+        """마지막으로 수신한 시세. 아직 한 건도 안 왔으면 0 (표에서 빈칸)."""
+        return self._last_prices.get(ticker, 0.0)
 
     @property
     def closed_out_at(self) -> Optional[datetime]:
@@ -531,6 +538,7 @@ class TradingEngine:
             return
 
         self._last_market_data_at = datetime.now()
+        self._last_prices[data.ticker] = data.price
         positions = self._get_positions()
 
         position = positions.get(data.ticker)

@@ -12,6 +12,7 @@ def make_runtime(calls):
         execute_buys=lambda: calls.append("buy"),
         cancel_unfilled_buys=lambda: calls.append("cancel_unfilled"),
         send_daily_report=lambda: calls.append("report"),
+        drop_buy_plans=lambda tickers: calls.append(f"drop_plan:{','.join(tickers)}"),
     )
     engine = SimpleNamespace(
         force_close_all_positions=lambda reason="day_end": calls.append(f"sell_all:{reason}"),
@@ -132,3 +133,33 @@ def test_closeout_liquidates_even_if_cancelling_raises():
     close_out(runtime.workflow, runtime.engine)()
 
     assert calls == ["cancel_unfilled", "sell_all:day_end"]
+
+
+def test_drop_plan_targets_the_selected_tickers():
+    """'매수 예정' 표의 선택 삭제 — sell_selected와 같은 tickers 경로를 쓴다."""
+    calls = []
+    steps = manual_steps(make_runtime(calls), "drop_plan", ["005930", "035720"])
+
+    for step in steps:
+        step.run()
+
+    assert calls == ["drop_plan:005930,035720"]
+
+
+def test_drop_plan_runs_on_the_engine_loop():
+    """매수 시각 작업과 같은 추천 목록·표를 건드리므로 직렬화되어야 한다."""
+    steps = manual_steps(make_runtime([]), "drop_plan", ["005930"])
+    assert [step.touches_orders for step in steps] == [True]
+
+
+def test_drop_plan_is_not_an_order_action():
+    """주문이 나가지 않는다 — 오히려 나갈 주문을 막는 쪽이다."""
+    assert "drop_plan" not in ORDER_ACTIONS
+
+
+def test_drop_plan_still_needs_confirmation():
+    """주문은 안 나가지만 되돌릴 수 없다 — 추천을 다시 돌려야 복구된다."""
+    from src.core.runtime import CONFIRM_ACTIONS
+
+    assert "drop_plan" in CONFIRM_ACTIONS
+    assert CONFIRM_ACTIONS <= set(MANUAL_ACTIONS)

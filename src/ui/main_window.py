@@ -37,7 +37,7 @@ from dotenv import load_dotenv
 
 from config.settings import DEFAULT_BUY_TIME_HHMM, DEFAULT_RECOMMEND_TIME_HHMM, Settings
 from src.core.daily_workflow import BUY_PENDING_STATUS
-from src.core.runtime import MANUAL_ACTIONS, ORDER_ACTIONS
+from src.core.runtime import CONFIRM_ACTIONS, MANUAL_ACTIONS, ORDER_ACTIONS
 from src.ui.engine_thread import EngineThread
 from src.ui.env_store import load_env, save_env
 
@@ -70,9 +70,28 @@ HOLDINGS_CHECK_COLUMN = 0
 UNSELLABLE_COLUMNS = ("종목", "사유", "시각")
 # 오늘 매수할 종목과 진행 상태 (DailyWorkflow.buy_plan_snapshot) — 로그만으로는 매수
 # 절차가 어디까지 갔는지 알 수 없어 따로 보여준다 (PRD 5.10 "매수 예정 표")
-BUY_PLAN_COLUMNS = ("종목", "상태", "수량", "매수지정가", "매도예상가", "비고")
-# 매수가 확정된 상태만 강조한다 — 나머지(대기·건너뜀·실패·취소)는 기본색/흐린색이다
+# 0번 열은 '선택 삭제' 대상 체크 — 보유 종목 표와 같은 방식이다 (HOLDINGS_CHECK_COLUMN 참고).
+# 현재가는 엔진이 받아둔 마지막 시세로, 지정가가 체결될 자리인지 보고 뺄 종목을 고르는 데 쓴다.
+BUY_PLAN_COLUMNS = ("선택", "종목", "상태", "수량", "매수지정가", "현재가", "매도예상가", "비고")
+BUY_PLAN_CHECK_COLUMN = 0
+# 매수가 확정된 상태만 강조한다 — 나머지(대기·건너뜀·실패·취소)는 기본색/흐린색이다.
+# '체결'은 표에서 아예 빠지지만(보유 종목 표로 넘어간다) 부분체결 표기를 위해 남겨둔다.
 BUY_PLAN_DONE_STATUSES = ("체결", "부분체결")
+
+
+def _gap_color(plan) -> str:
+    """현재가가 매수지정가보다 위면 빨강, 아래면 파랑 — 지정가가 체결될 자리인지 보여준다.
+
+    매수 시각에 현재가가 목표가보다 설정 폭 넘게 높으면 그 종목은 건너뛴다
+    (`DailyWorkflow.buy_price_tolerance_ratio`) — 빨간 종목이 그 후보다.
+    """
+    if not plan.current_price or not plan.buy_price:
+        return COLOR_TEXT
+    if plan.current_price > plan.buy_price:
+        return COLOR_PROFIT
+    if plan.current_price < plan.buy_price:
+        return COLOR_LOSS
+    return COLOR_TEXT
 
 
 def _table_style() -> str:
@@ -170,6 +189,8 @@ class MainWindow(QMainWindow):
         self._syncing_exit_flags = False
         # '선택 매도' 대상으로 체크된 종목. 표는 2초마다 다시 그려지므로 상태를 여기 둔다
         self._checked_tickers: set[str] = set()
+        # '매수 예정' 표에서 '선택 삭제' 대상으로 체크된 종목 (같은 이유로 여기 둔다)
+        self._checked_plans: set[str] = set()
         # 즉시 실행 버튼이 마지막으로 지시받은 활성 상태 (_set_actions_enabled 참고)
         self._actions_enabled = False
         self._setup_style()
@@ -692,6 +713,12 @@ class MainWindow(QMainWindow):
         self._checked_tickers ^= {ticker}
         self._refresh_holdings()
 
+    def _plan_labels(self, tickers: tuple) -> str:
+        """확인 팝업에 보여줄 삭제 대상 — 코드만 늘어놓으면 무엇을 빼는지 알기 어렵다."""
+        thread = self._engine_thread
+        labels = {p.ticker: p.label for p in thread.buy_plan_snapshot()} if thread else {}
+        return "\n".join(labels.get(ticker, f"({ticker})") for ticker in tickers)
+
     def _selected_labels(self, tickers: tuple) -> str:
         """확인 팝업에 보여줄 대상 종목 — 코드만 늘어놓으면 무엇을 파는지 알기 어렵다."""
         thread = self._engine_thread
@@ -836,13 +863,31 @@ class MainWindow(QMainWindow):
         # 비고(건너뜀·실패 사유)가 가장 길다
         header.setSectionResizeMode(len(BUY_PLAN_COLUMNS) - 1, QHeaderView.ResizeMode.Stretch)
         table.setStyleSheet(_table_style())
+        table.cellClicked.connect(self._on_buy_plan_cell_clicked)
         self._buy_plan_view = table
         layout.addWidget(table)
+
+        # 대상을 표에서 골라야 하므로 버튼도 ①~⑤ 그리드가 아니라 표 바로 아래에 둔다
+        layout.addWidget(self._make_action_button("drop_plan"))
 
         # 갱신은 _refresh_holdings가 이어서 호출한다 (같은 타이머·같은 캐시)
         self._buy_plan_box = box
         self._refresh_buy_plans()
         return box
+
+    def _on_buy_plan_cell_clicked(self, row: int, column: int) -> None:
+        """선택 열을 누르면 그 종목의 체크를 뒤집는다 (_on_holdings_cell_clicked와 같은 방식)."""
+        if column != BUY_PLAN_CHECK_COLUMN:
+            return
+        item = self._buy_plan_view.item(row, BUY_PLAN_CHECK_COLUMN)
+        if item is None:
+            return
+
+        ticker = item.data(Qt.ItemDataRole.UserRole)
+        if ticker is None:
+            return  # 주문이 나간 뒤의 행 — 지울 수 없다 (_refresh_buy_plans)
+        self._checked_plans ^= {ticker}
+        self._refresh_buy_plans()
 
     def _refresh_buy_plans(self) -> None:
         """추천 종목과 매수 진행 상태를 표에 채운다 (workflow.buy_plan_snapshot).
@@ -858,6 +903,10 @@ class MainWindow(QMainWindow):
             return
 
         rows = thread.buy_plan_snapshot()
+        # 주문이 나갔거나 체결로 표에서 빠진 종목의 체크는 함께 거둔다 — 남겨두면 지울 수
+        # 없는 종목이 체크된 채로 '선택 삭제' 버튼을 열어둔다
+        self._checked_plans &= {plan.ticker for plan in rows if self._can_drop(plan)}
+
         table = self._buy_plan_view
         table.setRowCount(len(rows))
         for row, plan in enumerate(rows):
@@ -873,22 +922,48 @@ class MainWindow(QMainWindow):
                  Qt.AlignmentFlag.AlignRight, COLOR_TEXT),
                 (f"{plan.buy_price:,.0f}" if plan.buy_price else "-",
                  Qt.AlignmentFlag.AlignRight, COLOR_TEXT),
+                (f"{plan.current_price:,.0f}" if plan.current_price else "-",
+                 Qt.AlignmentFlag.AlignRight, _gap_color(plan)),
                 (f"{plan.sell_price:,.0f}" if plan.sell_price else "-",
                  Qt.AlignmentFlag.AlignRight, COLOR_TEXT),
                 (plan.note, Qt.AlignmentFlag.AlignLeft, COLOR_TEXT_DIM),
             )
-            for col, (value, align, color) in enumerate(cells):
+            for col, (value, align, color) in enumerate(cells, start=1):
                 cell = QTableWidgetItem(value)
                 cell.setTextAlignment(align | Qt.AlignmentFlag.AlignVCenter)
                 cell.setForeground(QColor(color))
                 table.setItem(row, col, cell)
 
+            # 체크 상태의 주인은 표가 아니라 _checked_plans다 (_on_buy_plan_cell_clicked).
+            # 주문이 나간 행은 UserRole을 비워 클릭해도 아무 일이 없게 한다.
+            check = QTableWidgetItem()
+            check.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            if self._can_drop(plan):
+                check.setData(Qt.ItemDataRole.UserRole, plan.ticker)
+                check.setCheckState(
+                    Qt.CheckState.Checked
+                    if plan.ticker in self._checked_plans
+                    else Qt.CheckState.Unchecked
+                )
+            table.setItem(row, BUY_PLAN_CHECK_COLUMN, check)
+
         self._buy_plan_hint.setText(self._buy_plan_summary(rows))
+        # 체크된 종목이 늘거나 줄면 '선택 삭제' 버튼의 활성 여부가 달라진다
+        self._set_actions_enabled(self._actions_enabled)
+
+    @staticmethod
+    def _can_drop(plan) -> bool:
+        """아직 주문이 나가지 않은 행만 지울 수 있다 (DailyWorkflow.drop_buy_plans와 같은 기준)."""
+        return plan.status == BUY_PENDING_STATUS
 
     def _buy_plan_summary(self, rows: list) -> str:
         """표 위 한 줄 — 매수 절차가 어느 단계인지 로그를 뒤지지 않고 알 수 있게 한다."""
         if not rows:
-            return "아직 추천이 나오지 않았습니다 — 추천 시각에 오늘 매수할 종목이 채워집니다."
+            # 추천 전과 '전부 체결돼서 빠진' 상태를 표는 구분하지 못한다 — 둘 다 맞는 문구를 쓴다
+            return (
+                "매수 예정 종목이 없습니다 — 추천 시각에 채워지고, 체결된 종목은 "
+                "아래 '보유 종목' 표로 옮겨갑니다."
+            )
 
         counts: dict = {}
         for plan in rows:
@@ -1339,9 +1414,11 @@ class MainWindow(QMainWindow):
             self._style_action_button(action, enabled and self._action_has_target(action))
 
     def _action_has_target(self, action: str) -> bool:
-        """대상이 정해져야만 누를 수 있는 액션인지 — 선택 매도는 체크된 종목이 있어야 한다."""
+        """대상이 정해져야만 누를 수 있는 액션인지 — 선택 매도·선택 삭제는 체크가 있어야 한다."""
         if action == "sell_selected":
             return bool(self._checked_tickers)
+        if action == "drop_plan":
+            return bool(self._checked_plans)
         return True
 
     def _run_action(self, action: str) -> None:
@@ -1352,13 +1429,14 @@ class MainWindow(QMainWindow):
             return
 
         # 확인 팝업을 띄우는 사이에 표가 갱신되어 대상이 바뀌지 않도록 여기서 한 번 집는다
-        tickers = sorted(self._checked_tickers) if action == "sell_selected" else ()
-        if action == "sell_selected" and not tickers:
-            self._statusbar.showMessage("매도할 종목을 먼저 선택하세요.", 4000)
+        checked = {"sell_selected": self._checked_tickers, "drop_plan": self._checked_plans}
+        tickers = tuple(sorted(checked[action])) if action in checked else ()
+        if action in checked and not tickers:
+            self._statusbar.showMessage("대상 종목을 먼저 선택하세요.", 4000)
             return
 
-        # 주문이 나가는 액션은 실수 클릭을 막기 위해 한 번 확인한다
-        if action in ORDER_ACTIONS and not self._confirm_action(action, tickers):
+        # 주문이 나가는 액션과 되돌릴 수 없는 삭제는 실수 클릭을 막기 위해 한 번 확인한다
+        if action in CONFIRM_ACTIONS and not self._confirm_action(action, tickers):
             return
 
         if thread.run_action(action, tickers):
@@ -1384,13 +1462,21 @@ class MainWindow(QMainWindow):
                 "나머지 보유 종목은 그대로 두며, 익절/손절은 남은 종목의 합산 손익으로 "
                 "다시 판정됩니다."
             ),
+            "drop_plan": (
+                f"선택한 {len(tickers)}종목을 오늘 매수 대상에서 뺍니다.\n"
+                f"{self._plan_labels(tickers)}\n\n"
+                "주문은 나가지 않으며, 뺀 종목의 배정액은 남은 종목에 더해지지 않고 "
+                "현금으로 남습니다. 되돌리려면 ① LLM 추천을 다시 실행해야 합니다."
+            ),
             "full": (
                 "LLM 추천 + 메일 → 목표가 지정가 매수를 순서대로 실행합니다.\n"
                 f"{self._exit_watch_text()}\n"
                 "청산(15:15)과 최종 리포트(15:35)는 지금 실행하지 않고 예정 시각에 맡깁니다."
             ),
         }[action]
-        is_live = self._radio_live.isChecked()
+        # 주문이 나가지 않는 액션(선택 삭제)에는 실전 계좌 경고를 붙이지 않는다 — 매번 같은
+        # 경고가 뜨면 정작 주문이 나가는 팝업의 경고를 흘려보게 된다
+        is_live = self._radio_live.isChecked() and action in ORDER_ACTIONS
         head = "⚠️  실전 계좌입니다. 실제 자금으로 주문이 집행됩니다.\n\n" if is_live else ""
 
         box = QMessageBox(self)

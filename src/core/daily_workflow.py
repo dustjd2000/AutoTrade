@@ -1,9 +1,9 @@
 import json
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 from src.api.account import AccountClient
 from src.core.engine import TradingEngine
@@ -114,9 +114,42 @@ class DailyWorkflow:
         날짜와 행 목록을 한 튜플로 묶어 통째로 갈아끼우므로, 참조를 한 번만 집으면
         일관된 사본이 된다 (`TradingEngine.position_snapshot`과 같은 규약). 기록된 날짜가
         오늘이 아니면 빈 목록이라, 08:40 초기화 훅 없이도 전날 행이 남지 않는다.
+
+        현재가만은 기록해 둔 값이 아니라 호출 시점의 마지막 시세를 얹는다 — 표는 2초마다
+        다시 그려지므로, 행을 만들 때 박아두면 추천 시각의 가격에서 멈춘다.
         """
         day, rows = self._buy_board
-        return list(rows) if day == (today or date.today()) else []
+        if day != (today or date.today()):
+            return []
+        return [replace(r, current_price=self.engine.last_price(r.ticker)) for r in rows]
+
+    def drop_buy_plans(self, tickers: Iterable[str], today: Optional[date] = None) -> List[str]:
+        """고른 종목을 오늘 매수 대상에서 뺀다 — UI '매수 예정' 표의 선택 삭제 (PRD 5.10).
+
+        아직 주문이 나가지 않은 '매수 대기' 행만 뺀다. 접수된 뒤에 표에서 지우면 주문은
+        살아 있는데 표에는 없는 상태가 되어, 10:10 취소·결과 메일과 화면이 어긋난다.
+
+        전략의 추천 목록에서도 빼야 매수 시각에 주문이 나가지 않는다. 뺀 몫은 남은
+        종목에 재분배되지 않고 현금으로 남는다 (`build_buy_plans`는 종목당 금액을 고정).
+        엔진 루프 스레드에서 실행된다 — 매수 시각 작업과 같은 자료를 건드린다.
+        """
+        today = today or date.today()
+        day, rows = self._buy_board
+        if day != today:
+            return []
+
+        wanted = set(tickers)
+        dropped = {
+            r.ticker for r in rows if r.ticker in wanted and r.status == BUY_PENDING_STATUS
+        }
+        if not dropped:
+            logger.warning("매수 예정에서 제외할 대기 종목이 없습니다: %s", sorted(wanted))
+            return []
+
+        self.strategy.drop_recommendations(dropped)
+        self._set_buy_board(today, [r for r in rows if r.ticker not in dropped])
+        logger.warning("매수 예정에서 제외했습니다: %s", sorted(dropped))
+        return sorted(dropped)
 
     def _set_buy_board(self, day: date, rows: List[BuyPlanView]) -> None:
         self._buy_board = (day, tuple(rows))
@@ -155,7 +188,11 @@ class DailyWorkflow:
         ]
 
     def _board_from_records(self, records: List[BuyRecord]) -> List[BuyPlanView]:
-        """매수 시각 이후의 표 — 매수하지 못한 종목은 수량·매도예상가를 비우고 사유만 남긴다."""
+        """매수 시각 이후의 표 — 매수하지 못한 종목은 수량·매도예상가를 비우고 사유만 남긴다.
+
+        완전 체결된 종목은 뺀다 — 이미 산 것은 '매수 예정'이 아니고, 바로 아래 '보유 종목'
+        표에 현재가·손익과 함께 실린다. 부분체결은 남은 수량이 아직 미체결이라 남긴다.
+        """
         return [
             BuyPlanView(
                 ticker=r.ticker,
@@ -167,6 +204,7 @@ class DailyWorkflow:
                 note=r.note or "",
             )
             for r in records
+            if r.outcome != BuyOutcome.FILLED
         ]
 
     def recommend_and_notify(self, today: Optional[date] = None) -> None:
@@ -185,12 +223,25 @@ class DailyWorkflow:
             return
 
         self.strategy.set_recommendations(recommendations)
-        self._set_buy_board(today, self._board_from_recommendations(recommendations))
+        board = self._board_from_recommendations(recommendations)
+        self._set_buy_board(today, board)
+        self._watch_plan_prices([plan.ticker for plan in board])
         subject, body = templates.recommendation_email(
             recommendations, today, self.strategy.investable_ratio, self.strategy.target_stock_count
         )
         self.email.send(subject, body)
         logger.info("Recommendation email sent for %s", today)
+
+    def _watch_plan_prices(self, tickers: List[str]) -> None:
+        """추천 종목의 실시간 시세를 미리 구독한다 — UI '매수 예정' 표 현재가의 출처.
+
+        매수 접수분 구독(`execute_buys`)은 익절/손절 감시가 목적이라 매수 시각에야 걸린다.
+        추천~매수 사이에 현재가를 보려면(=어느 종목을 뺄지 판단하려면) 여기서 미리 걸어야 한다.
+        """
+        if not tickers or self.ws_client is None:
+            return
+        self.ws_client.subscribe(tickers)
+        logger.info("추천 종목 시세 구독: %s", tickers)
 
     def execute_buys(self) -> None:
         """09:08 — 예수금 기준으로 자금을 배분해 추천 종목을 목표 매수가에 지정가 매수.

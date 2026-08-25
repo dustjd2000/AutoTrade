@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass
-from typing import List
+from typing import Iterable, List
 
 from src.core.events import MarketData, Signal
 from src.llm.recommender import StockRecommendation
@@ -39,6 +39,15 @@ class LLMMomentumStrategy(BaseStrategy):
 
     def set_recommendations(self, recommendations: List[StockRecommendation]) -> None:
         self._recommendations = recommendations
+
+    def drop_recommendations(self, tickers: Iterable[str]) -> None:
+        """오늘 매수 대상에서 뺀다 — UI '매수 예정' 표의 선택 삭제 (PRD 5.10).
+
+        종목당 배정액은 추천 개수와 무관하게 고정이므로(build_buy_plans), 뺀 몫은
+        남은 종목에 재분배되지 않고 현금으로 남는다.
+        """
+        unwanted = set(tickers)
+        self._recommendations = [r for r in self._recommendations if r.ticker not in unwanted]
 
     def build_buy_plans(self, cash: float) -> List[BuyPlan]:
         """예수금과 추천 목록으로 종목별 매수 계획을 만든다.

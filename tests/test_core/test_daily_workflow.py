@@ -111,6 +111,7 @@ def make_workflow(recommendations=None, collected=True, cash=12_000_000):
             take_profit_enabled=True,
         ),
         note_open_position=lambda ticker: None,
+        last_price=lambda ticker: 0.0,
         notify=notifications.append,
         unsellable_snapshot=lambda: [],
     )
@@ -947,3 +948,126 @@ def test_buy_plan_snapshot_is_empty_on_a_different_day():
     workflow.recommend_and_notify(today=BOARD_DAY)
 
     assert workflow.buy_plan_snapshot(today=date(2026, 8, 25)) == []
+
+
+# ── 현재가 표시와 선택 삭제 (PRD 5.10) ──────────────────────
+def test_buy_plan_snapshot_carries_the_live_price():
+    """표의 현재가는 엔진이 받아둔 마지막 시세다 — UI가 API를 부르지 않는다."""
+    workflow, _, _, _, _ = make_workflow(recommendations=board_recs())
+    workflow.engine.last_price = lambda ticker: 1_050.0 if ticker == "005930" else 0.0
+
+    workflow.recommend_and_notify(today=BOARD_DAY)
+
+    (plan,) = workflow.buy_plan_snapshot(today=BOARD_DAY)
+    assert plan.current_price == 1_050.0
+
+
+def test_buy_plan_current_price_is_blank_before_the_first_tick():
+    workflow, _, _, _, _ = make_workflow(recommendations=board_recs())
+
+    workflow.recommend_and_notify(today=BOARD_DAY)
+
+    (plan,) = workflow.buy_plan_snapshot(today=BOARD_DAY)
+    assert plan.current_price == 0.0
+
+
+def test_recommendation_subscribes_the_recommended_tickers():
+    """아직 보유가 아니라 아무도 구독하지 않는다 — 추천 시점에 걸어야 현재가가 들어온다."""
+    workflow, _, _, _, _ = make_workflow(recommendations=board_recs())
+    subscribed = []
+    workflow.ws_client = SimpleNamespace(
+        subscribe=subscribed.append, is_connected=True
+    )
+
+    workflow.recommend_and_notify(today=BOARD_DAY)
+
+    assert subscribed == [["005930"]]
+
+
+def test_filled_rows_leave_the_buy_plan_board():
+    """체결된 종목은 '매수 예정'이 아니다 — 보유 종목 표로 넘어간다."""
+    recs = board_recs()
+    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.execute_buys()
+    order_client.fills = [
+        FillRecord(
+            order_id="1",
+            ticker="005930",
+            side=OrderSide.BUY,
+            filled_quantity=2000,
+            filled_price=1000.0,
+            unfilled_quantity=0,
+        )
+    ]
+
+    workflow.cancel_unfilled_buys()
+
+    assert workflow.buy_plan_snapshot() == []
+
+
+def test_partially_filled_rows_stay_on_the_board():
+    """부분체결은 남은 수량이 아직 미체결이라 진행 중인 건이다."""
+    recs = board_recs()
+    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.execute_buys()
+    order_client.fills = [
+        FillRecord(
+            order_id="1",
+            ticker="005930",
+            side=OrderSide.BUY,
+            filled_quantity=1000,
+            filled_price=1000.0,
+            unfilled_quantity=1000,
+        )
+    ]
+
+    workflow.cancel_unfilled_buys()
+
+    (plan,) = workflow.buy_plan_snapshot()
+    assert plan.status == "부분체결"
+
+
+def test_dropping_a_plan_removes_it_from_today_s_orders():
+    """표에서 지운 종목은 매수 시각에 주문이 나가면 안 된다."""
+    recs = board_recs()
+    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
+    workflow.recommend_and_notify(today=BOARD_DAY)
+
+    workflow.drop_buy_plans(["005930"], today=BOARD_DAY)
+
+    assert workflow.buy_plan_snapshot(today=BOARD_DAY) == []
+    workflow.execute_buys()
+    assert order_client.orders == []
+
+
+def test_dropping_keeps_the_other_stocks_and_their_allocation():
+    """남은 종목의 배정액은 그대로다 — 지운 몫은 현금으로 남는다 (PRD 10절 2026-07-27)."""
+    recs = board_recs() + [
+        StockRecommendation(ticker="035720", name="카카오", target_price=1000, reason="b")
+    ]
+    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
+    workflow.recommend_and_notify(today=BOARD_DAY)
+
+    workflow.drop_buy_plans(["005930"], today=BOARD_DAY)
+
+    (plan,) = workflow.buy_plan_snapshot(today=BOARD_DAY)
+    assert plan.ticker == "035720"
+    workflow.execute_buys()
+    (order,) = order_client.orders
+    assert order.ticker == "035720"
+    assert order.quantity == 2000, "종목당 배정액은 지운 종목 수와 무관하게 고정이다"
+
+
+def test_dropping_ignores_rows_that_are_already_ordered():
+    """주문이 나간 뒤에 지우면 표와 실제 주문이 어긋난다 — 대기 중인 행만 지운다."""
+    recs = board_recs()
+    workflow, _, _, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.execute_buys()
+
+    workflow.drop_buy_plans(["005930"])
+
+    (plan,) = workflow.buy_plan_snapshot()
+    assert plan.status == "접수"

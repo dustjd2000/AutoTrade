@@ -238,10 +238,17 @@ MANUAL_ACTIONS: Dict[str, str] = {
     # ①~⑤ 버튼 그리드에는 넣지 않는다 — 대상 종목을 보유 종목 표에서 골라야 하므로
     # 버튼도 그 표 아래에 둔다. 여기 두는 것은 라벨과 잠금·확인 처리를 공유하기 위함이다.
     "sell_selected": "선택 매도",
+    # 같은 이유로 '매수 예정' 표 아래에 둔다. 주문을 내지 않고 오늘 살 목록에서만 빼므로
+    # ORDER_ACTIONS에는 넣지 않는다 — 확인 팝업은 UI가 따로 띄운다 (되돌릴 수 없다).
+    "drop_plan": "선택 삭제",
 }
 
-# 실제 주문이 나가는 액션 — UI가 실행 전 확인을 받는다
+# 실제 주문이 나가는 액션 — UI가 실행 전 확인을 받고, 실전 계좌 경고도 함께 띄운다
 ORDER_ACTIONS = frozenset({"buy", "cancel_unfilled", "sell_all", "sell_selected", "full"})
+
+# 확인 팝업이 필요한 액션. '선택 삭제'는 주문을 내지 않지만 되돌릴 수 없다 —
+# 되돌리려면 LLM 추천을 다시 돌려야 하고, 그러면 추천 종목 자체가 달라진다.
+CONFIRM_ACTIONS = ORDER_ACTIONS | {"drop_plan"}
 
 
 @dataclass(frozen=True)
@@ -258,7 +265,8 @@ def manual_steps(
 ) -> List[ManualStep]:
     """액션 이름을 실행 단계 목록으로 바꾼다. '전체'는 하루 흐름의 진입 단계를 순서대로 이어 붙인다.
 
-    `tickers`는 '선택 매도'만 쓴다 — 다른 액션은 대상이 잔고 전체이거나 추천 결과로 정해진다.
+    `tickers`는 '선택 매도'와 '선택 삭제'만 쓴다 — 다른 액션은 대상이 잔고 전체이거나
+    추천 결과로 정해진다.
     """
     selected = tuple(tickers)
     steps: Dict[str, List[ManualStep]] = {
@@ -290,6 +298,13 @@ def manual_steps(
             )
         ],
         "report": [ManualStep(MANUAL_ACTIONS["report"], runtime.workflow.send_daily_report)],
+        "drop_plan": [
+            ManualStep(
+                MANUAL_ACTIONS["drop_plan"],
+                lambda: runtime.workflow.drop_buy_plans(selected),
+                touches_orders=True,
+            )
+        ],
     }
     # 일괄 실행은 '진입'까지만 — 청산과 리포트는 스케줄에 맡긴다.
     # 청산(③)을 넣으면 매수 직후 곧바로 되팔아 익절/손절 감시 구간이 사라지고 왕복 비용만 남는다.

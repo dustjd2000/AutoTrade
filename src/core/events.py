@@ -181,6 +181,7 @@ class BuyPlanView:
     quantity: int = 0        # 0 = 아직 주문 전이거나 매수하지 못한 종목
     buy_price: float = 0.0   # 매수지정가 — 체결됐으면 체결가
     sell_price: float = 0.0  # 익절 환산가. 0 = 익절이 꺼져 있거나 산출 불가 (표에서 빈칸)
+    current_price: float = 0.0  # 마지막 수신 시세. 0 = 아직 틱이 오지 않음 (표에서 빈칸)
     note: str = ""           # 건너뜀·실패·취소 사유
 
 

@@ -31,6 +31,9 @@ class WebSocketClient:
         self._tickers: List[str] = []
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._running = False
+        # connect()가 도는 이벤트 루프 — subscribe가 다른 스레드에서 들어올 때 필요하다
+        # (`subscribe` 참고). 접속 전에는 None이고, 그때는 구독을 목록에만 담는다.
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     @property
     def is_connected(self) -> bool:
@@ -41,17 +44,25 @@ class WebSocketClient:
         """관심종목 등록. 연결 중이면 즉시 등록 요청을 보낸다.
 
         미연결 상태면 목록에만 담아두고, 재접속 시 connect()가 구독을 복구한다.
+
+        추천 시각의 구독은 `_off_loop` 스레드에서 들어온다 — 그 스레드에는 실행 중인
+        이벤트 루프가 없어 `asyncio.create_task`가 곧바로 RuntimeError다. 루프 스레드로
+        넘겨서 거기서 태스크를 만든다 (`call_soon_threadsafe`는 루프 스레드에서 불러도 안전).
         """
         new = [t for t in tickers if t not in self._tickers]
         self._tickers.extend(new)
-        if self._ws is not None and new:
-            asyncio.create_task(self._send_subscribe(new))
+        if self._ws is None or not new or self._loop is None:
+            return
+        self._loop.call_soon_threadsafe(
+            lambda: asyncio.create_task(self._send_subscribe(new))
+        )
 
     def on_data(self, callback: Callable[[MarketData], None]) -> None:
         self._on_market_data.append(callback)
 
     async def connect(self) -> None:
         self._running = True
+        self._loop = asyncio.get_running_loop()
         while self._running:
             try:
                 async with websockets.connect(self.settings.websocket_url) as ws:
