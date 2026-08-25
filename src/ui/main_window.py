@@ -325,10 +325,20 @@ class MainWindow(QMainWindow):
         self._app_secret.setEchoMode(QLineEdit.EchoMode.Password)
         self._account = QLineEdit()
         self._account.setPlaceholderText("계좌번호 (예: 1234567890)")
+        # Anthropic·DART는 키움과 다른 기관의 키다 — 같은 그룹에 두되 라벨로 출처를 구분한다.
+        # 둘 다 App Secret처럼 가려서 표시한다.
+        self._anthropic_key = QLineEdit()
+        self._anthropic_key.setPlaceholderText("console.anthropic.com 발급 — 없으면 추천이 실패한다")
+        self._anthropic_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._dart_key = QLineEdit()
+        self._dart_key.setPlaceholderText("opendart.fss.or.kr 발급 — 비우면 공시 없이 추천")
+        self._dart_key.setEchoMode(QLineEdit.EchoMode.Password)
 
-        api_form.addRow("App Key", self._app_key)
-        api_form.addRow("App Secret", self._app_secret)
-        api_form.addRow("계좌번호", self._account)
+        api_form.addRow("Kiwoom App Key", self._app_key)
+        api_form.addRow("Kiwoom App Secret", self._app_secret)
+        api_form.addRow("Kiwoom 계좌번호", self._account)
+        api_form.addRow("Anthropic Key", self._anthropic_key)
+        api_form.addRow("DART Key", self._dart_key)
         root.addWidget(api_box)
 
         # 매매 모드
@@ -1186,6 +1196,8 @@ class MainWindow(QMainWindow):
         self._app_key.setText(env.get("KIWOOM_APP_KEY", ""))
         self._app_secret.setText(env.get("KIWOOM_APP_SECRET", ""))
         self._account.setText(env.get("KIWOOM_ACCOUNT", ""))
+        self._anthropic_key.setText(env.get("ANTHROPIC_API_KEY", ""))
+        self._dart_key.setText(env.get("DART_API_KEY", ""))
         self._email_from.setText(env.get("EMAIL_FROM", ""))
         self._email_to.setText(env.get("EMAIL_TO", ""))
         # 두 키를 한 칸으로 읽는다 — 손으로 서로 다르게 적어 두면 익절 쪽 값이 보이고,
@@ -1230,6 +1242,10 @@ class MainWindow(QMainWindow):
             "KIWOOM_APP_KEY": self._app_key.text().strip(),
             "KIWOOM_APP_SECRET": self._app_secret.text().strip(),
             "KIWOOM_ACCOUNT": self._account.text().strip(),
+            # LLM 모델명(LLM_MODEL)은 UI에서 다루지 않는다 — 키만 화면에서 채운다
+            "ANTHROPIC_API_KEY": self._anthropic_key.text().strip(),
+            # 비워두면 공시 수집·악재 배제 없이 추천이 진행된다 (PRD 5.5-B '공시 수집과 악재 배제')
+            "DART_API_KEY": self._dart_key.text().strip(),
             # SMTP 서버/포트/비밀번호는 UI에서 다루지 않으므로 저장 대상에서 제외한다
             # (save_env는 전달된 키만 갱신하므로 .env의 기존 값은 그대로 보존된다)
             "SMTP_USER": self._email_from.text().strip(),  # 로그인 계정 = 발송 주소

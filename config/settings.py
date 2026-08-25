@@ -74,11 +74,12 @@ class Settings:
     # 장애 대응: 장중 예외 발생 시 동작 방식 ("close_all" | "hold") — 6절
     emergency_action: str = field(default_factory=lambda: os.getenv("EMERGENCY_ACTION", "hold"))
 
-    # LLM 연동 (1호 전략 — Anthropic Claude API로 확정)
+    # LLM 연동 (1호 전략 — Anthropic Claude API로 확정).
+    # 키는 UI "계좌 / API 설정"의 'Anthropic Key' 칸에서 다룬다(2026-08-25). 모델명은 .env 전용이다.
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
     llm_model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "claude-sonnet-5"))
 
-    # DART 전자공시 — 공시 수집용. UI에서 다루지 않고 .env로만 관리한다(SMTP 비밀번호와 같은 취급).
+    # DART 전자공시 — 공시 수집용. UI "계좌 / API 설정"의 'DART Key' 칸에서 다룬다(2026-08-25).
     # 비어 있으면 공시 없이 추천이 진행된다 (PRD 5.5-B '공시 수집과 악재 배제')
     dart_api_key: str = field(default_factory=lambda: os.getenv("DART_API_KEY", ""))
 
