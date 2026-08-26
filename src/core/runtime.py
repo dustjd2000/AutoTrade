@@ -238,17 +238,19 @@ MANUAL_ACTIONS: Dict[str, str] = {
     # ①~⑤ 버튼 그리드에는 넣지 않는다 — 대상 종목을 보유 종목 표에서 골라야 하므로
     # 버튼도 그 표 아래에 둔다. 여기 두는 것은 라벨과 잠금·확인 처리를 공유하기 위함이다.
     "sell_selected": "선택 매도",
-    # 같은 이유로 '매수 예정' 표 아래에 둔다. 주문을 내지 않고 오늘 살 목록에서만 빼므로
-    # ORDER_ACTIONS에는 넣지 않는다 — 확인 팝업은 UI가 따로 띄운다 (되돌릴 수 없다).
+    # 같은 이유로 '매수 예정' 표 아래에 둔다. 접수된 행을 고르면 미체결 주문 취소가
+    # 나가므로 ORDER_ACTIONS에 넣는다 (확대 2026-08-26, PRD 5.10 '선택 삭제').
     "drop_plan": "선택 삭제",
 }
 
 # 실제 주문이 나가는 액션 — UI가 실행 전 확인을 받고, 실전 계좌 경고도 함께 띄운다
-ORDER_ACTIONS = frozenset({"buy", "cancel_unfilled", "sell_all", "sell_selected", "full"})
+ORDER_ACTIONS = frozenset(
+    {"buy", "cancel_unfilled", "sell_all", "sell_selected", "full", "drop_plan"}
+)
 
-# 확인 팝업이 필요한 액션. '선택 삭제'는 주문을 내지 않지만 되돌릴 수 없다 —
-# 되돌리려면 LLM 추천을 다시 돌려야 하고, 그러면 추천 종목 자체가 달라진다.
-CONFIRM_ACTIONS = ORDER_ACTIONS | {"drop_plan"}
+# 확인 팝업이 필요한 액션. '선택 삭제'는 되돌릴 수 없다는 이유로 주문 액션이 되기 전부터
+# 여기 있었다 — 되돌리려면 LLM 추천을 다시 돌려야 하고, 그러면 추천 종목 자체가 달라진다.
+CONFIRM_ACTIONS = ORDER_ACTIONS
 
 
 @dataclass(frozen=True)

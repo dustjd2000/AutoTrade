@@ -36,7 +36,11 @@ from PyQt6.QtWidgets import (
 from dotenv import load_dotenv
 
 from config.settings import DEFAULT_BUY_TIME_HHMM, DEFAULT_RECOMMEND_TIME_HHMM, Settings
-from src.core.daily_workflow import BUY_PENDING_STATUS
+from src.core.daily_workflow import (
+    BUY_DROPPABLE_STATUSES,
+    BUY_ORDERED_STATUS,
+    BUY_PENDING_STATUS,
+)
 from src.core.runtime import CONFIRM_ACTIONS, MANUAL_ACTIONS, ORDER_ACTIONS
 from src.ui.engine_thread import EngineThread
 from src.ui.env_store import load_env, save_env
@@ -152,6 +156,18 @@ def _with_toggle(field: QLineEdit, *toggles: QCheckBox) -> QWidget:
     for toggle in toggles:
         layout.addWidget(toggle)
     return row
+
+
+class _NoScrollComboBox(QComboBox):
+    """마우스 휠로 값이 바뀌지 않는 콤보박스.
+
+    설정 화면이 스크롤 영역 안에 있어, 화면을 훑다가 콤보박스 위를 지나면 휠이 값을 바꿔
+    버린다. 휠을 무시하면 이벤트가 부모(스크롤 영역)로 올라가 화면만 스크롤된다.
+    값 변경은 클릭과 키보드로만 한다.
+    """
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 (Qt 시그니처)
+        event.ignore()
 
 
 # ── 로그 핸들러 (UI TextEdit에 출력) ────────────────────────
@@ -385,13 +401,13 @@ class MainWindow(QMainWindow):
         self._schedule_times = QLabel()
         self._schedule_times.setWordWrap(True)
 
-        self._investable_ratio = QComboBox()
+        self._investable_ratio = _NoScrollComboBox()
         for percent in range(10, 101, 10):
             self._investable_ratio.addItem(f"{percent}", percent)
         self._investable_ratio.setCurrentIndex(self._investable_ratio.findData(50))
         self._investable_ratio.currentIndexChanged.connect(self._refresh_investable_amount)
 
-        self._target_stock_count = QComboBox()
+        self._target_stock_count = _NoScrollComboBox()
         for count in range(1, 11):
             self._target_stock_count.addItem(f"{count}", count)
         self._target_stock_count.setCurrentIndex(self._target_stock_count.findData(3))
@@ -729,6 +745,26 @@ class MainWindow(QMainWindow):
         labels = {p.ticker: p.label for p in thread.buy_plan_snapshot()} if thread else {}
         return "\n".join(labels.get(ticker, f"({ticker})") for ticker in tickers)
 
+    def _drop_plan_effect(self, tickers: tuple) -> str:
+        """확인 팝업 한 줄 — 고른 행에 접수분이 섞여 있으면 주문 취소가 나간다는 것을 알린다.
+
+        '매수 대기'만 골랐을 때와 실제 주문이 취소될 때는 되돌릴 수 없는 정도가 다르다
+        (PRD 5.10 '선택 삭제').
+        """
+        thread = self._engine_thread
+        rows = thread.buy_plan_snapshot() if thread else []
+        ordered = [
+            p.label
+            for p in rows
+            if p.ticker in tickers and p.status == BUY_ORDERED_STATUS
+        ]
+        if not ordered:
+            return "주문은 나가지 않습니다."
+        return (
+            f"이 중 {len(ordered)}종목은 이미 주문이 접수돼 있어 "
+            "미체결분을 지금 취소합니다 (10:10을 기다리지 않습니다)."
+        )
+
     def _selected_labels(self, tickers: tuple) -> str:
         """확인 팝업에 보여줄 대상 종목 — 코드만 늘어놓으면 무엇을 파는지 알기 어렵다."""
         thread = self._engine_thread
@@ -963,8 +999,12 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _can_drop(plan) -> bool:
-        """아직 주문이 나가지 않은 행만 지울 수 있다 (DailyWorkflow.drop_buy_plans와 같은 기준)."""
-        return plan.status == BUY_PENDING_STATUS
+        """지울 수 있는 행인지 (DailyWorkflow.drop_buy_plans와 같은 기준).
+
+        '매수 대기'는 추천 목록에서 빼고, '접수'는 미체결 주문을 취소한다. 나머지 상태는
+        취소할 살아 있는 주문이 없어 체크 열이 빈다 (PRD 5.10 '선택 삭제').
+        """
+        return plan.status in BUY_DROPPABLE_STATUSES
 
     def _buy_plan_summary(self, rows: list) -> str:
         """표 위 한 줄 — 매수 절차가 어느 단계인지 로그를 뒤지지 않고 알 수 있게 한다."""
@@ -1481,8 +1521,9 @@ class MainWindow(QMainWindow):
             "drop_plan": (
                 f"선택한 {len(tickers)}종목을 오늘 매수 대상에서 뺍니다.\n"
                 f"{self._plan_labels(tickers)}\n\n"
-                "주문은 나가지 않으며, 뺀 종목의 배정액은 남은 종목에 더해지지 않고 "
-                "현금으로 남습니다. 되돌리려면 ① LLM 추천을 다시 실행해야 합니다."
+                f"{self._drop_plan_effect(tickers)}\n"
+                "뺀 종목의 배정액은 남은 종목에 더해지지 않고 현금으로 남습니다. "
+                "되돌리려면 ① LLM 추천을 다시 실행해야 합니다."
             ),
             "full": (
                 "LLM 추천 + 메일 → 목표가 지정가 매수를 순서대로 실행합니다.\n"

@@ -152,13 +152,16 @@ def test_drop_plan_runs_on_the_engine_loop():
     assert [step.touches_orders for step in steps] == [True]
 
 
-def test_drop_plan_is_not_an_order_action():
-    """주문이 나가지 않는다 — 오히려 나갈 주문을 막는 쪽이다."""
-    assert "drop_plan" not in ORDER_ACTIONS
+def test_drop_plan_is_an_order_action():
+    """접수 행을 고르면 미체결 주문 취소가 나간다 — 실전 계좌 경고가 함께 떠야 한다.
+
+    2026-08-26 이전에는 '매수 대기' 행만 지울 수 있어 주문이 나가지 않았다 (PRD 5.10).
+    """
+    assert "drop_plan" in ORDER_ACTIONS
 
 
 def test_drop_plan_still_needs_confirmation():
-    """주문은 안 나가지만 되돌릴 수 없다 — 추천을 다시 돌려야 복구된다."""
+    """되돌릴 수 없다 — 추천을 다시 돌려야 복구되고, 취소된 주문은 살아나지 않는다."""
     from src.core.runtime import CONFIRM_ACTIONS
 
     assert "drop_plan" in CONFIRM_ACTIONS

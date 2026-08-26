@@ -19,7 +19,7 @@ from src.core.events import (
     format_stock,
 )
 from src.data.collector import DataCollector
-from src.llm.recommender import LLMRecommender
+from src.llm.recommender import LLMRecommender, tick_size
 from src.logger.trade_store import TradeStore
 from src.notification.email import EmailNotifier
 from src.notification import chart, templates
@@ -42,6 +42,11 @@ DEFAULT_BUY_RECORDS_PATH = Path("data") / "buy_records.json"
 # 주문 이후의 문구는 매수 결과 메일과 같은 것을 쓴다 (templates.BUY_OUTCOME_LABELS) —
 # 화면과 메일이 서로 다른 말을 쓰면 대조가 안 된다.
 BUY_PENDING_STATUS = "매수 대기"
+
+# '선택 삭제'가 다룰 수 있는 두 상태 (PRD 5.10 '선택 삭제'). 대기 행은 추천 목록에서 빼고,
+# 접수 행은 미체결 주문을 취소한다 — 상태 문구는 표·메일과 같은 것을 써야 대조가 된다.
+BUY_ORDERED_STATUS = templates.BUY_OUTCOME_LABELS[BuyOutcome.ORDERED]
+BUY_DROPPABLE_STATUSES = (BUY_PENDING_STATUS, BUY_ORDERED_STATUS)
 
 # 리포트 메일에 인라인 첨부되는 월 누적 그래프의 Content-ID.
 MONTHLY_CHART_CID = "monthly-cumulative"
@@ -102,7 +107,8 @@ class DailyWorkflow:
         # UI '매수 예정' 표가 읽는 스냅샷 — (날짜, 행 목록) 한 쌍을 통째로 갈아끼운다
         # (`buy_plan_snapshot` 참고). 주문 기록 파일은 10:10에 지워지므로 표의 출처가 될 수 없다.
         self._buy_board: tuple = (None, ())
-        # 09:08 현재가가 목표 매수가보다 이만큼 넘게 높으면 그 종목은 건너뛴다 (_gap_note 참고)
+        # 09:08 현재가가 목표 매수가보다 이만큼 넘게 높으면 그 종목은 건너뛴다 (_gap_note 참고).
+        # 동시에 이 값이 주문 지정가를 정한다 — 밴드 상단이 곧 주문가다 (_order_price 참고)
         self.buy_price_tolerance_ratio = buy_price_tolerance_ratio
         # 09:08 현재가가 추천 시점 가격보다 이만큼 넘게 낮으면 건너뛴다. 0이면 끈다 (_gap_note 참고)
         self.gap_down_tolerance_ratio = gap_down_tolerance_ratio
@@ -126,12 +132,16 @@ class DailyWorkflow:
     def drop_buy_plans(self, tickers: Iterable[str], today: Optional[date] = None) -> List[str]:
         """고른 종목을 오늘 매수 대상에서 뺀다 — UI '매수 예정' 표의 선택 삭제 (PRD 5.10).
 
-        아직 주문이 나가지 않은 '매수 대기' 행만 뺀다. 접수된 뒤에 표에서 지우면 주문은
-        살아 있는데 표에는 없는 상태가 되어, 10:10 취소·결과 메일과 화면이 어긋난다.
+        상태에 따라 하는 일이 다르다 (확대 2026-08-26):
 
-        전략의 추천 목록에서도 빼야 매수 시각에 주문이 나가지 않는다. 뺀 몫은 남은
-        종목에 재분배되지 않고 현금으로 남는다 (`build_buy_plans`는 종목당 금액을 고정).
-        엔진 루프 스레드에서 실행된다 — 매수 시각 작업과 같은 자료를 건드린다.
+        - **매수 대기** (매수 시각 전): 추천 목록에서 빼 그날 주문이 나가지 않게 한다.
+          뺀 몫은 남은 종목에 재분배되지 않고 현금으로 남는다 (`build_buy_plans`는 종목당
+          금액을 고정).
+        - **접수** (매수 시각 이후): 미체결 매수 주문을 그 자리에서 취소한다 — 10:10
+          `cancel_unfilled_buys`를 기다리지 않는다. 행은 지우지 않고 '미체결 취소'로 바꾼다.
+
+        나머지 상태(건너뜀·실패·미체결 취소·부분체결)는 취소할 살아 있는 주문이 없어 대상이
+        아니다. 엔진 루프 스레드에서 실행된다 — 매수 시각 작업과 같은 자료를 건드린다.
         """
         today = today or date.today()
         day, rows = self._buy_board
@@ -139,17 +149,72 @@ class DailyWorkflow:
             return []
 
         wanted = set(tickers)
-        dropped = {
+        pending = {
             r.ticker for r in rows if r.ticker in wanted and r.status == BUY_PENDING_STATUS
         }
-        if not dropped:
-            logger.warning("매수 예정에서 제외할 대기 종목이 없습니다: %s", sorted(wanted))
+        ordered = {
+            r.ticker for r in rows if r.ticker in wanted and r.status == BUY_ORDERED_STATUS
+        }
+        if not pending and not ordered:
+            logger.warning("매수 예정에서 제외할 종목이 없습니다: %s", sorted(wanted))
             return []
 
-        self.strategy.drop_recommendations(dropped)
-        self._set_buy_board(today, [r for r in rows if r.ticker not in dropped])
-        logger.warning("매수 예정에서 제외했습니다: %s", sorted(dropped))
-        return sorted(dropped)
+        # 취소가 먼저다 — 실패하면 그 종목은 빠지지 않으므로 표에 그대로 남아야 한다
+        cancelled = self._cancel_ordered_plans(today, ordered) if ordered else []
+
+        if pending:
+            self.strategy.drop_recommendations(pending)
+        # 취소 경로가 표를 갈아끼웠을 수 있어 여기서 다시 집는다
+        _, rows = self._buy_board
+        self._set_buy_board(today, [r for r in rows if r.ticker not in pending])
+
+        dropped = sorted(pending | set(cancelled))
+        if dropped:
+            logger.warning("매수 예정에서 제외했습니다: %s", dropped)
+        return dropped
+
+    def _cancel_ordered_plans(self, today: date, tickers: set) -> List[str]:
+        """접수된 매수 주문을 그 자리에서 취소하고, 취소된 종목코드를 돌려준다.
+
+        기록 파일(`buy_records_path`)의 해당 건을 '미체결 취소'로 바꿔 다시 쓴다 — 그래야
+        10:10이 같은 주문을 또 취소하려 들지 않고 결과 메일에도 취소로 실린다. 취소에
+        실패하면 기록도 표도 건드리지 않는다: 주문이 살아 있는데 화면만 정리된 상태가
+        가장 위험하다.
+        """
+        state = self._read_buy_records(today)
+        if state is None:
+            logger.warning("오늘 매수 주문 기록이 없어 취소할 수 없습니다: %s", sorted(tickers))
+            return []
+
+        cancelled = []
+        for record in state.records:
+            if record.ticker not in tickers:
+                continue
+            if record.outcome != BuyOutcome.ORDERED or not record.order_id:
+                continue
+
+            label = format_stock(record.ticker, record.name)
+            if self.engine.order_client.cancel_order(record.order_id, record.ticker, 0):
+                record.outcome = BuyOutcome.CANCELLED
+                record.note = "매수 예정에서 빼면서 미체결분을 취소했습니다"
+                cancelled.append(record.ticker)
+                logger.warning(
+                    "매수 주문 취소 (선택 삭제): %s 잔량 전부 (주문번호 %s)",
+                    label,
+                    record.order_id,
+                )
+            else:
+                logger.error(
+                    "매수 주문 취소 실패 (선택 삭제): %s (주문번호 %s)", label, record.order_id
+                )
+                self.engine.notify(
+                    f"[실패] 매수 주문 취소 실패: {label} — 주문이 살아 있습니다. 직접 확인하세요."
+                )
+
+        if cancelled:
+            self._write_buy_records(state.cash, state.amount_per_stock, state.records)
+            self._set_buy_board(today, self._board_from_records(state.records))
+        return cancelled
 
     def _set_buy_board(self, day: date, rows: List[BuyPlanView]) -> None:
         self._buy_board = (day, tuple(rows))
@@ -244,7 +309,7 @@ class DailyWorkflow:
         logger.info("추천 종목 시세 구독: %s", tickers)
 
     def execute_buys(self) -> None:
-        """09:08 — 예수금 기준으로 자금을 배분해 추천 종목을 목표 매수가에 지정가 매수.
+        """09:08 — 예수금 기준으로 자금을 배분해 추천 종목을 허용 밴드 상단에 지정가 매수.
 
         체결 확인과 결과 메일은 여기서 하지 않는다 — 지정가 주문은 접수 직후에 체결 여부를
         알 수 없어, 10:10 `cancel_unfilled_buys`가 미체결분을 정리한 뒤에 알린다.
@@ -268,9 +333,11 @@ class DailyWorkflow:
         for plan in plans:
             label = format_stock(plan.ticker, plan.name)
             try:
-                price = float(plan.target_price)
+                target = float(plan.target_price)
 
-                gap_note = self._gap_note(plan.ticker, label, price, plan.recommend_price)
+                gap_note, current = self._gap_note(
+                    plan.ticker, label, target, plan.recommend_price
+                )
                 if gap_note is not None:
                     skipped.append(plan.ticker)
                     records.append(
@@ -278,16 +345,28 @@ class DailyWorkflow:
                             ticker=plan.ticker,
                             name=plan.name,
                             outcome=BuyOutcome.SKIPPED,
-                            reference_price=price,
+                            reference_price=target,
                             note=gap_note,
                         )
                     )
                     continue
 
+                price = self._order_price(target, current)
+                if price != target:
+                    logger.info(
+                        "주문가 = 허용 밴드 상단: %s 목표가 %s원 → 지정가 %s원 "
+                        "(현재가 %s원, 상승 허용치 %.1f%%)",
+                        label,
+                        f"{target:,.0f}",
+                        f"{price:,.0f}",
+                        f"{current:,.0f}",
+                        self.buy_price_tolerance_ratio * 100,
+                    )
+
                 quantity = int(plan.amount // price)
                 if quantity <= 0:
                     logger.warning(
-                        "매수 건너뜀: %s — 목표가 1주 %s원이 종목당 배정액 %s원을 초과합니다.",
+                        "매수 건너뜀: %s — 주문가 1주 %s원이 종목당 배정액 %s원을 초과합니다.",
                         label,
                         f"{price:,.0f}",
                         f"{plan.amount:,.0f}",
@@ -301,13 +380,13 @@ class DailyWorkflow:
                             name=plan.name,
                             outcome=BuyOutcome.SKIPPED,
                             reference_price=price,
-                            note=f"목표가 1주 {price:,.0f}원이 배정액 {plan.amount:,.0f}원을 초과",
+                            note=f"주문가 1주 {price:,.0f}원이 배정액 {plan.amount:,.0f}원을 초과",
                         )
                     )
                     continue
 
                 logger.info(
-                    "매수 산정: %s 목표가 %s원 × %d주 = %s원 (배정 %s원)",
+                    "매수 산정: %s 주문가 %s원 × %d주 = %s원 (배정 %s원)",
                     label,
                     f"{price:,.0f}",
                     quantity,
@@ -435,17 +514,44 @@ class DailyWorkflow:
         # 결과 메일은 10:10 cancel_unfilled_buys가 보낸다 — 지정가라 지금은 체결 여부를 모른다
         self._write_buy_records(cash, plans[0].amount, records)
 
+    def _order_price(self, target_price: float, current_price: float) -> float:
+        """주문 지정가 = 허용 밴드 상단 (PRD 5.5-B '주문 방식', 범위 지정 2026-08-26).
+
+        목표 매수가는 밴드의 기준점일 뿐 주문가가 아니다. 지정가 매수는 그 가격 **이하**의
+        매도호가에 체결되므로, 상단에 걸어야 밴드 안 어떤 가격이든 받아낼 수 있다 — 목표가
+        한 점에 걸면 현재가가 조금이라도 위일 때 되밀리지 않는 한 영원히 미체결이다
+        (2026-08-26 015760 한국전력, 그날 투입 0원).
+
+        **밴드의 위쪽 절반에서만 올린다.** 현재가가 목표가 이하면 목표가 지정가가 이미 시장가
+        위에 있어 즉시 체결되므로, 상단으로 올려봤자 수량만 줄어든다.
+
+        현재가를 모르면(0 이하) 밴드를 확인할 수 없으므로 종전대로 목표가로 낸다.
+        """
+        if current_price <= target_price:
+            return target_price
+
+        ceiling = target_price * (1 + self.buy_price_tolerance_ratio)
+        tick = tick_size(ceiling)
+        price = float(int(ceiling // tick) * tick)
+        # 호가 단위 내림이 현재가 아래로 떨어지면 다시 미체결이 된다. 현재가는 체결된 값이라
+        # 이미 호가 단위에 맞으므로 그대로 쓴다 — 현재가 ≤ 상단은 갭 상승 판정이 보장한다
+        return max(price, current_price)
+
     def _gap_note(
         self, ticker: str, label: str, target_price: float, reference_price: float = 0.0
-    ) -> Optional[str]:
-        """갭으로 이 종목을 건너뛰어야 하면 사유 문구를, 그대로 매수하면 None을 돌려준다.
+    ) -> tuple:
+        """갭 판정 결과를 `(건너뛸 사유 또는 None, 판정에 쓴 현재가)`로 돌려준다.
+
+        현재가를 함께 넘기는 것은 `_order_price`가 같은 값을 다시 조회하지 않게 하기 위함이다
+        — 조회에 실패했으면 0.0이다.
 
         위아래 두 방향을 본다 (PRD 5.5-B '주문 방식').
 
         - **갭 상승** (확정 2026-08-07): 목표 매수가는 추천 시점 가격을 근거로 잡은 값이다.
           현재가가 그보다 크게 높으면 그 전제가 이미 깨진 것이므로 그날은 참여하지 않는다.
-          지정가라 목표가보다 비싸게 체결되는 일 자체는 없다 — 이 판정이 막는 것은 갭 상승 뒤
-          목표가까지 되밀린 종목을 받아내는 경우다.
+          이 허용치는 **주문 지정가도 함께 정한다**(`_order_price`) — 밴드 안이면 목표가보다
+          이만큼 비싸게 체결될 수 있다는 뜻이라, 손절선보다 크게 잡으면 진입 직후 손절 구간에서
+          시작한다.
         - **갭 하락** (확정 2026-08-11, 기준값 변경 2026-08-14): 기준이 목표가가 아니라
           **추천 시점(09:05)의 현재가**다. 목표가 자체가 눌림을 노려 기준가보다 낮게 잡히므로,
           목표가 기준으로 하한을 두면 얼마나 낮게 출발했는지를 잡지 못한다. 전일 종가 대비
@@ -453,17 +559,18 @@ class DailyWorkflow:
           추천한 뒤 무너진 종목을 잡는다. 지정가 매수는 가격이 목표가까지 내려온 종목만 잡는
           역선택이 있어(오르는 종목은 미체결) 이 판정이 없으면 갭 하락 종목만 남는다.
 
-        시세 조회에 실패하면 매수를 막지 않고 그대로 진행한다: 가격 상한은 지정가가 이미
-        지키고 있다. 기준가를 모르면(0 이하) 갭 하락 판정만 건너뛴다.
+        시세 조회에 실패하면 매수를 막지 않고 그대로 진행한다 — 다만 밴드를 모르므로
+        `_order_price`가 목표가 지정가로 되돌아간다. 기준가를 모르면(0 이하) 갭 하락 판정만
+        건너뛴다.
         """
         try:
             current = self.engine.market_data.get_current_price(ticker).price
         except Exception:
             logger.warning("현재가 조회 실패 — 갭 판정을 건너뛰고 매수합니다: %s", label, exc_info=True)
-            return None
+            return None, 0.0
 
         if current <= 0:
-            return None
+            return None, 0.0
 
         limit = target_price * (1 + self.buy_price_tolerance_ratio)
         if current > limit:
@@ -477,15 +584,15 @@ class DailyWorkflow:
             return (
                 f"갭 상승 — 현재가 {current:,.0f}원이 목표가 {target_price:,.0f}원 대비 "
                 f"허용치 {self.buy_price_tolerance_ratio * 100:.1f}%를 초과"
-            )
+            ), current
 
         # 허용치 0은 '끔'이다 — 갭 상승 쪽(0 = 가장 엄격)과 반대 규약이라 PRD 5.5-B에 명시했다
         if self.gap_down_tolerance_ratio <= 0 or reference_price <= 0:
-            return None
+            return None, current
 
         floor = reference_price * (1 - self.gap_down_tolerance_ratio)
         if current >= floor:
-            return None
+            return None, current
 
         logger.info(
             "매수 건너뜀: %s — 현재가 %s원이 추천 시점 %s원의 허용 하한 %s원을 밑돕니다.",
@@ -497,7 +604,7 @@ class DailyWorkflow:
         return (
             f"갭 하락 — 현재가 {current:,.0f}원이 추천 시점 {reference_price:,.0f}원 대비 "
             f"허용치 {self.gap_down_tolerance_ratio * 100:.1f}%를 초과 하락"
-        )
+        ), current
 
     def cancel_unfilled_buys(self, today: Optional[date] = None) -> None:
         """10:10 — 목표가에 닿지 않은 매수 주문을 취소하고 매수 결과를 알린다 (PRD 5.5-B 6단계).

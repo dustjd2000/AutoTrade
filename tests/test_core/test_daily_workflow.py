@@ -405,6 +405,98 @@ def test_buy_proceeds_inside_the_gap_tolerance():
     assert len(order_client.orders) == 1
 
 
+# ── 범위 지정 주문가 (PRD 5.5-B '주문 방식', 확정 2026-08-26) ────────────────────
+def band_setup(current_price, target_price=1000, tolerance=0.02):
+    """현재가만 바꿔 가며 주문가를 보는 공용 셋업 — 갭 하락 판정은 끄고 위쪽만 본다."""
+    recs = [
+        StockRecommendation(
+            ticker="005930", name="삼성전자", target_price=target_price, reason="a"
+        )
+    ]
+    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.buy_price_tolerance_ratio = tolerance
+    workflow.gap_down_tolerance_ratio = 0.0
+    workflow.engine.market_data = SimpleNamespace(
+        get_current_price=lambda t: MarketData(ticker=t, price=current_price, volume=100)
+    )
+    return workflow, order_client
+
+
+def test_order_price_rises_to_the_band_top_when_the_price_is_above_the_target():
+    """밴드 안이면 반드시 체결돼야 한다 — 목표가 한 점에 걸면 되밀리지 않는 한 미체결이다."""
+    workflow, order_client = band_setup(current_price=1010.0)
+
+    workflow.execute_buys()
+
+    (order,) = order_client.orders
+    assert order.price == 1020  # 1,000 × 1.02, 호가 단위(5원) 내림
+    assert order.quantity == 1960  # 종목당 200만 ÷ 1,020원 — 수량도 주문가 기준이다
+
+
+def test_order_price_stays_at_the_target_when_the_price_is_below_it():
+    """아래쪽 절반은 목표가 지정가로도 이미 즉시 체결된다 — 올리면 수량만 준다."""
+    workflow, order_client = band_setup(current_price=990.0)
+
+    workflow.execute_buys()
+
+    (order,) = order_client.orders
+    assert order.price == 1000
+    assert order.quantity == 2000
+
+
+def test_order_price_stays_at_the_target_when_the_price_equals_it():
+    workflow, order_client = band_setup(current_price=1000.0)
+
+    workflow.execute_buys()
+
+    assert order_client.orders[0].price == 1000
+
+
+def test_order_price_never_falls_below_the_current_price_after_tick_flooring():
+    """호가 단위 내림이 현재가 아래로 떨어지면 다시 미체결이 된다 — 그때는 현재가로 낸다.
+
+    목표가 1,000원·허용치 0.6% → 상단 1,006원, 호가 단위(5원) 내림이면 1,005원이라
+    현재가 1,006원보다 낮아진다. 현재가는 체결된 값이라 이미 호가 단위에 맞는다.
+    """
+    workflow, order_client = band_setup(current_price=1006.0, tolerance=0.006)
+
+    workflow.execute_buys()
+
+    assert order_client.orders[0].price == 1006
+
+
+def test_order_price_falls_back_to_the_target_when_the_quote_fails():
+    """밴드를 확인할 수 없는 상태에서 상단에 거는 것은 근거 없이 비싸게 사는 것이다."""
+    workflow, order_client = band_setup(current_price=1010.0)
+
+    def boom(ticker):
+        raise RuntimeError("quote down")
+
+    workflow.engine.market_data = SimpleNamespace(get_current_price=boom)
+
+    workflow.execute_buys()
+
+    assert order_client.orders[0].price == 1000
+
+
+def test_korea_electric_power_regression_2026_08_26():
+    """2026-08-26 (015760)한국전력 회귀 — 밴드 안인데 종일 미체결로 투입 0원이던 사례.
+
+    목표가 33,200원, 09:05 현재가 33,400원, 상승 허용치 3% → 상한 34,196원.
+    갭 판정은 통과했는데 지정가가 33,200원이라 시장가 아래에 놓여 체결되지 않았다.
+    """
+    workflow, order_client = band_setup(
+        current_price=33_400.0, target_price=33_200, tolerance=0.03
+    )
+
+    workflow.execute_buys()
+
+    (order,) = order_client.orders
+    assert order.price == 34_150  # 34,196 → 호가 단위(50원) 내림
+    assert order.price > 33_400  # 현재가 위 = 접수 즉시 체결되는 지정가
+
+
 def test_gap_skip_is_reported_in_the_buy_result_email():
     recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a")]
     workflow, email, order_client, _, strategy = make_workflow(recommendations=recs)
@@ -1060,14 +1152,64 @@ def test_dropping_keeps_the_other_stocks_and_their_allocation():
     assert order.quantity == 2000, "종목당 배정액은 지운 종목 수와 무관하게 고정이다"
 
 
-def test_dropping_ignores_rows_that_are_already_ordered():
-    """주문이 나간 뒤에 지우면 표와 실제 주문이 어긋난다 — 대기 중인 행만 지운다."""
+# ── 접수 행 선택 삭제 (PRD 5.10, 확대 2026-08-26) ────────────────────────────
+def test_dropping_an_ordered_row_cancels_the_unfilled_order():
+    """접수 행을 빼면 10:10을 기다리지 않고 그 자리에서 미체결 주문을 취소한다.
+
+    종전에는 '매수 대기' 행만 지울 수 있었는데, 그 상태가 추천~매수 3분 동안만 존재해
+    기능을 쓸 수 있는 시간이 사실상 없었다.
+    """
     recs = board_recs()
-    workflow, _, _, _, strategy = make_workflow(recommendations=recs)
+    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
     strategy.set_recommendations(recs)
     workflow.execute_buys()
 
+    assert workflow.drop_buy_plans(["005930"]) == ["005930"]
+
+    assert order_client.cancelled == [("1", "005930", 0)]  # 잔량 전부
+    (plan,) = workflow.buy_plan_snapshot()
+    assert plan.status == "미체결 취소", "행은 지우지 않는다 — 주문이 있었다는 사실이 기록이다"
+
+
+def test_cancelled_row_is_not_cancelled_again_at_ten_ten():
+    """기록 파일을 갈아써야 10:10이 같은 주문을 다시 취소하려 들지 않는다."""
+    recs = board_recs()
+    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.execute_buys()
     workflow.drop_buy_plans(["005930"])
+
+    workflow.cancel_unfilled_buys()
+
+    assert order_client.cancelled == [("1", "005930", 0)], "취소는 한 번뿐이어야 한다"
+
+
+def test_dropping_an_ordered_row_leaves_it_alone_when_the_cancel_fails():
+    """취소에 실패했는데 표만 정리되면, 주문이 살아 있는 줄 모른 채 하루가 간다."""
+    recs = board_recs()
+    workflow, _, order_client, notifications, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.execute_buys()
+    order_client.cancel_order = lambda order_id, ticker, quantity=0: False
+
+    assert workflow.drop_buy_plans(["005930"]) == []
 
     (plan,) = workflow.buy_plan_snapshot()
     assert plan.status == "접수"
+    assert any("취소 실패" in n for n in notifications)
+
+
+def test_dropping_ignores_rows_with_no_live_order():
+    """건너뜀·실패 행은 취소할 주문이 없다 — 체크 열도 비어 있다 (MainWindow._can_drop)."""
+    recs = [
+        StockRecommendation(ticker="005930", name="삼성전자", target_price=9_000_000, reason="a")
+    ]
+    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.execute_buys()  # 1주 가격이 배정액을 넘어 '건너뜀'
+    (plan,) = workflow.buy_plan_snapshot()
+    assert plan.status == "건너뜀"
+
+    assert workflow.drop_buy_plans(["005930"]) == []
+
+    assert order_client.cancelled == []
