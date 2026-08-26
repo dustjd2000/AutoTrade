@@ -112,6 +112,8 @@ def make_workflow(recommendations=None, collected=True, cash=12_000_000):
         ),
         note_open_position=lambda ticker: None,
         last_price=lambda ticker: 0.0,
+        # 매수 예정 표가 접수 행을 잔고와 대조한다 (_settled_row) — 기본은 '아직 미체결'
+        position_snapshot=lambda: [],
         notify=notifications.append,
         unsellable_snapshot=lambda: [],
     )
@@ -1152,6 +1154,79 @@ def test_dropping_keeps_the_other_stocks_and_their_allocation():
     assert order.quantity == 2000, "종목당 배정액은 지운 종목 수와 무관하게 고정이다"
 
 
+# ── 체결 반영 시차를 잔고로 메움 (PRD 5.10, 확정 2026-08-26) ──────────────────
+def hold(ticker, quantity):
+    """엔진 잔고 캐시 한 줄 — position_snapshot이 돌려주는 모양만 흉내낸다."""
+    return SimpleNamespace(ticker=ticker, quantity=quantity)
+
+
+def test_fully_filled_row_leaves_the_board_before_the_ten_ten_sync():
+    """2026-08-26 회귀 — 전량 체결됐는데 표가 15:15까지 '접수'로 남아 두 표가 겹쳤다.
+
+    체결 반영(_fill_buy_prices)은 10:10·15:15에만 도는데, 밴드 상단 지정가는 접수 직후
+    체결되는 것이 보통이라 그 시차가 그대로 드러난다.
+    """
+    recs = board_recs()
+    workflow, _, _, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.execute_buys()
+    assert workflow.buy_plan_snapshot()[0].status == "접수"
+
+    workflow.engine.position_snapshot = lambda: [hold("005930", 2000)]
+
+    assert workflow.buy_plan_snapshot() == [], "보유 종목 표로 옮겨갔으므로 겹쳐 실리면 안 된다"
+
+
+def test_partially_held_row_becomes_partially_filled():
+    """보유 수량이 주문 수량에 못 미치면 아직 진행 중이다 — 남은 수량은 미체결분이다."""
+    recs = board_recs()
+    workflow, _, _, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.execute_buys()
+
+    workflow.engine.position_snapshot = lambda: [hold("005930", 1200)]
+
+    (plan,) = workflow.buy_plan_snapshot()
+    assert plan.status == "부분체결"
+    assert plan.quantity == 1200
+
+
+def test_ordered_row_stays_while_nothing_is_held():
+    """잔고에 없으면 아직 미체결이다 — 이때는 표가 종전대로 '접수'다."""
+    recs = board_recs()
+    workflow, _, _, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.execute_buys()
+
+    (plan,) = workflow.buy_plan_snapshot()
+    assert plan.status == "접수"
+
+
+def test_settling_does_not_touch_the_saved_records():
+    """표시만 바꾼다 — 기록과 결과 메일을 확정하는 것은 10:10의 체결내역 조회다."""
+    recs = board_recs()
+    workflow, email, order_client, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.execute_buys()
+    workflow.engine.position_snapshot = lambda: [hold("005930", 2000)]
+    workflow.buy_plan_snapshot()
+
+    order_client.fills = [
+        FillRecord(
+            order_id="1",
+            ticker="005930",
+            side=OrderSide.BUY,
+            filled_quantity=2000,
+            filled_price=1000.0,
+            unfilled_quantity=0,
+        )
+    ]
+    workflow.cancel_unfilled_buys()
+
+    _, body, _ = email.sent[0]
+    assert "체결" in body
+
+
 # ── 접수 행 선택 삭제 (PRD 5.10, 확대 2026-08-26) ────────────────────────────
 def test_dropping_an_ordered_row_cancels_the_unfilled_order():
     """접수 행을 빼면 10:10을 기다리지 않고 그 자리에서 미체결 주문을 취소한다.
@@ -1197,6 +1272,23 @@ def test_dropping_an_ordered_row_leaves_it_alone_when_the_cancel_fails():
     (plan,) = workflow.buy_plan_snapshot()
     assert plan.status == "접수"
     assert any("취소 실패" in n for n in notifications)
+
+
+def test_cancel_rejected_on_a_filled_order_is_not_reported_as_failure():
+    """키움은 이미 체결된 주문의 취소를 거절한다 — '주문이 살아 있다'는 정반대 안내였다.
+
+    2026-08-26 13:49 실측: 취소가능수량이 없습니다(=전량 체결)인데 실패 알림이 나갔다.
+    """
+    recs = board_recs()
+    workflow, _, order_client, notifications, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.execute_buys()
+    order_client.cancel_order = lambda order_id, ticker, quantity=0: False
+    workflow.engine.position_snapshot = lambda: [hold("005930", 2000)]
+
+    assert workflow.drop_buy_plans(["005930"]) == []
+
+    assert not any("취소 실패" in n for n in notifications)
 
 
 def test_dropping_ignores_rows_with_no_live_order():

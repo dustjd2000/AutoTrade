@@ -48,6 +48,10 @@ BUY_PENDING_STATUS = "매수 대기"
 BUY_ORDERED_STATUS = templates.BUY_OUTCOME_LABELS[BuyOutcome.ORDERED]
 BUY_DROPPABLE_STATUSES = (BUY_PENDING_STATUS, BUY_ORDERED_STATUS)
 
+# 잔고 대조로 접수 행을 옮길 때 쓰는 상태 (`_settled_row`) — 부분체결은 표에 남지만
+# 체크 열은 비운다. 남은 미체결분만 골라 취소하면 이미 체결된 몫까지 덮어쓰기 때문이다.
+BUY_PARTIAL_STATUS = templates.BUY_OUTCOME_LABELS[BuyOutcome.PARTIALLY_FILLED]
+
 # 리포트 메일에 인라인 첨부되는 월 누적 그래프의 Content-ID.
 MONTHLY_CHART_CID = "monthly-cumulative"
 
@@ -122,12 +126,40 @@ class DailyWorkflow:
         오늘이 아니면 빈 목록이라, 08:40 초기화 훅 없이도 전날 행이 남지 않는다.
 
         현재가만은 기록해 둔 값이 아니라 호출 시점의 마지막 시세를 얹는다 — 표는 2초마다
-        다시 그려지므로, 행을 만들 때 박아두면 추천 시각의 가격에서 멈춘다.
+        다시 그려지므로, 행을 만들 때 박아두면 추천 시각의 가격에서 멈춘다. 접수 행의 체결
+        여부도 같은 이유로 여기서 잔고와 대조한다 (`_settled_row`).
         """
         day, rows = self._buy_board
         if day != (today or date.today()):
             return []
-        return [replace(r, current_price=self.engine.last_price(r.ticker)) for r in rows]
+        held = {p.ticker: p.quantity for p in self.engine.position_snapshot()}
+        settled = (self._settled_row(r, held) for r in rows)
+        return [
+            replace(r, current_price=self.engine.last_price(r.ticker))
+            for r in settled
+            if r is not None
+        ]
+
+    @staticmethod
+    def _settled_row(row: BuyPlanView, held: dict) -> Optional[BuyPlanView]:
+        """접수 행을 보유 수량과 대조해 체결 상태로 옮긴다. 표에서 뺄 행은 None (PRD 5.10).
+
+        체결 반영(`_fill_buy_prices`)은 10:10·15:15에만 도는데, 지정가가 허용 밴드 상단으로
+        올라간 뒤로는 접수 직후 체결되는 것이 보통이다. 그 사이 표가 '접수'로 얼어붙어 같은
+        종목이 보유 종목 표와 겹쳐 실린다 (2026-08-26 13:40 실측).
+
+        **표시만 바꾸고 기록은 건드리지 않는다** — 기록과 결과 메일을 확정하는 것은 체결내역
+        조회를 보는 10:10·15:15의 일이고, 잔고 대조는 표를 맞추기 위한 근사치다. 전일부터
+        들고 있던 종목이 추천되면 체결로 오판하는 한계가 있다 (당일 청산이라 실무상 드물다).
+        """
+        if row.status != BUY_ORDERED_STATUS or row.quantity <= 0:
+            return row
+        quantity = held.get(row.ticker, 0)
+        if quantity <= 0:
+            return row
+        if quantity >= row.quantity:
+            return None  # 완전 체결 — '보유 종목' 표로 옮겨간다
+        return replace(row, status=BUY_PARTIAL_STATUS, quantity=quantity)
 
     def drop_buy_plans(self, tickers: Iterable[str], today: Optional[date] = None) -> List[str]:
         """고른 종목을 오늘 매수 대상에서 뺀다 — UI '매수 예정' 표의 선택 삭제 (PRD 5.10).
@@ -186,6 +218,8 @@ class DailyWorkflow:
             logger.warning("오늘 매수 주문 기록이 없어 취소할 수 없습니다: %s", sorted(tickers))
             return []
 
+        # 취소 거절이 '이미 체결됨'인지 가리는 데 쓴다 — 잔고 캐시라 API를 부르지 않는다
+        held = {p.ticker: p.quantity for p in self.engine.position_snapshot()}
         cancelled = []
         for record in state.records:
             if record.ticker not in tickers:
@@ -200,6 +234,15 @@ class DailyWorkflow:
                 cancelled.append(record.ticker)
                 logger.warning(
                     "매수 주문 취소 (선택 삭제): %s 잔량 전부 (주문번호 %s)",
+                    label,
+                    record.order_id,
+                )
+            elif held.get(record.ticker, 0) >= record.quantity > 0:
+                # 키움은 이미 전량 체결된 주문의 취소를 '취소가능수량이 없습니다'로 거절한다.
+                # 이것을 실패로 알리면 "주문이 살아 있습니다"라는 정반대 안내가 나간다
+                # (2026-08-26 실측). 표에서는 `_settled_row`가 이미 이 행을 빼고 있다.
+                logger.info(
+                    "매수 주문 취소 불필요 (선택 삭제): %s — 이미 체결된 주문입니다 (주문번호 %s)",
                     label,
                     record.order_id,
                 )
