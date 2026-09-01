@@ -68,6 +68,11 @@ def _render(points: Sequence[DailyPoint], label_format: str) -> Optional[bytes]:
         buffer = io.BytesIO()
         fig.savefig(buffer, format="png", dpi=_DPI, bbox_inches="tight", facecolor="white")
         return buffer.getvalue()
+    except Exception:
+        # 여기서 예외를 올리면 호출부(daily_workflow)가 메일 본문을 만들기도 전에 죽어
+        # 리포트가 통째로 빠진다 — 그래프 하나 때문에 잃을 것이 아니다
+        logger.warning("누적 그래프를 PNG로 굽지 못했습니다 — 숫자만 보냅니다.", exc_info=True)
+        return None
     finally:
         _close(fig)
 

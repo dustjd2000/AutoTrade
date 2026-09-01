@@ -84,7 +84,7 @@ class RiskManager:
         stop_loss_ratio: float = 0.02,        # 손절 라인 (순손익률)
         max_total_exposure_ratio: float = 0.7,  # 전체 계좌 대비 최대 노출 비중
         commission_rate: float = 0.00015,     # 매매수수료 (매수·매도 동일 적용)
-        tax_rate: float = 0.0018,             # 증권거래세+농특세 (매도 시만)
+        tax_rate: float = 0.002,              # 증권거래세+농특세 (매도 시만)
         slippage_rate: float = 0.001,         # 시장가 청산 슬리피지 추정치
         take_profit_enabled: bool = True,     # 합산 퍼센트 익절 적용 여부 (UI 체크박스, 기본 적용)
         stop_loss_enabled: bool = True,       # 손절 적용 여부 (UI 체크박스)

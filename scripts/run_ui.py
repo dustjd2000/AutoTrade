@@ -26,8 +26,12 @@ logger = logging.getLogger(__name__)
 SINGLE_INSTANCE_MUTEX = r"Global\AutoTrade-SingleInstance"
 
 # 인스턴스 대체(--auto-start)가 상대 프로세스를 찾는 경로. 뮤텍스는 "누군가 떠 있다"만
-# 알려줄 뿐 PID를 주지 않는다. 비정상 종료로 남은 값은 지우지 않는다 — 대체는 살아 있는
-# 프로세스인지, 파이썬인지까지 확인하므로 stale 처리가 필요 없다.
+# 알려줄 뿐 PID를 주지 않는다.
+#
+# **stale 처리가 필요하다.** 프로세스를 열지 못하면(액세스 거부) 살아 있는 것으로 보는데,
+# PID는 재부팅 뒤 재사용되고 낮은 번호는 대개 SYSTEM 서비스가 가져간다. 그러면 죽은 기록
+# 하나가 영원히 "떠 있음"으로 읽혀 --auto-start가 대체도 못 하고 종료한다. 그래서 마지막
+# 부팅보다 먼저 쓰인 파일은 무시하고(_pid_file_is_stale), 정상 종료 때는 지운다(_clear_pid).
 PID_PATH = ROOT / "data" / "autotrade.pid"
 
 # 정상 종료(WM_CLOSE)를 기다리는 시간. 보유 종목이 있으면 MainWindow.closeEvent가 확인
@@ -60,6 +64,17 @@ def _show_fatal(message: str) -> None:
     _show_dialog("AutoTrade 시작 실패", message, 0x10)  # MB_ICONERROR
 
 
+def _kernel32():
+    """kernel32 핸들.
+
+    `use_last_error=True`가 핵심이다. `ctypes.windll`의 기본 핸들에서는 마지막 오류 값이
+    보장되지 않아, 아래 판정들이 '액세스 거부'와 '없는 PID'를 뒤바꿔 읽을 수 있다.
+    """
+    import ctypes
+
+    return ctypes.WinDLL("kernel32", use_last_error=True)
+
+
 def _mutex_says_running() -> bool:
     """뮤텍스가 "이미 떠 있다"고 하면 True.
 
@@ -67,8 +82,10 @@ def _mutex_says_running() -> bool:
     잠금이 남지 않는다. 락 파일과 달리 정리 코드도, stale lock 처리도 필요 없다.
 
     **`Global` 네임스페이스 객체를 만드는 데는 SeCreateGlobalPrivilege가 필요하다.** 일반 권한
-    세션에서는 생성이 거부될 수 있어, 그때는 열기만 시도해 존재 여부를 본다 — 잠금을
-    소유하지는 못하지만 그 경우는 PID 대조(`_running_instance_pid`)가 받아낸다.
+    세션에서는 생성이 거부될 수 있어, 그때는 열기만 시도해 존재 여부를 본다 — 그 경로에서는
+    잠금을 소유하지 못하므로 PID 대조(`_running_instance_pid`)가 유일한 방어가 된다.
+    (2026-09-01 이 PC에서 실측하니 비상승 실행에서도 생성이 되어, 실제로는 생성 경로를
+    탄다. 폴백은 권한이 더 좁은 환경을 위한 보험이다.)
 
     검사 자체가 실패하면 막지 않는다 — 두 번 뜨는 것보다 아예 못 뜨는 쪽이 더 나쁘다.
     """
@@ -77,9 +94,9 @@ def _mutex_says_running() -> bool:
     try:
         import ctypes
 
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = _kernel32()
         if kernel32.CreateMutexW(None, False, SINGLE_INSTANCE_MUTEX):
-            return kernel32.GetLastError() == ERROR_ALREADY_EXISTS
+            return ctypes.get_last_error() == ERROR_ALREADY_EXISTS
 
         handle = kernel32.OpenMutexW(SYNCHRONIZE, False, SINGLE_INSTANCE_MUTEX)
         if not handle:
@@ -98,6 +115,50 @@ def _write_pid() -> None:
         PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
     except OSError:
         logger.warning("PID 파일을 남기지 못했습니다 (%s).", PID_PATH, exc_info=True)
+
+
+def _clear_pid() -> None:
+    """정상 종료 때 자기 PID 기록을 지운다.
+
+    **자기 PID일 때만 지운다.** `--auto-start` 대체 경로에서는 이 프로세스가 죽은 뒤
+    다음 인스턴스가 자기 값을 써 넣는데, 그것까지 지우면 그 인스턴스가 보이지 않게 된다.
+    """
+    try:
+        if PID_PATH.read_text(encoding="utf-8").strip() == str(os.getpid()):
+            PID_PATH.unlink()
+    except OSError:
+        pass  # 애초에 남기지 못했거나 이미 지워진 것 — 종료 경로를 막을 일이 아니다
+
+
+def _boot_epoch() -> float:
+    """마지막 부팅 시각 (epoch 초). GetTickCount64는 부팅 후 경과 밀리초를 준다."""
+    import ctypes
+    import time
+
+    kernel32 = _kernel32()
+    kernel32.GetTickCount64.restype = ctypes.c_ulonglong  # 기본 c_int면 49일에서 잘린다
+    return time.time() - kernel32.GetTickCount64() / 1000.0
+
+
+def _pid_file_is_stale() -> bool:
+    """PID 파일이 마지막 부팅보다 먼저 쓰였으면 True — 그 PID는 믿을 수 없다.
+
+    재부팅하면 PID가 재사용되고, 낮은 번호는 대개 SYSTEM 서비스가 가져간다. 그 프로세스는
+    일반 권한으로 열리지 않아 `_running_instance_pid`가 '살아 있는 우리 인스턴스'로 읽고,
+    `--auto-start`는 그것을 종료하지 못해 시작 자체를 포기한다.
+
+    부팅 시각을 읽지 못하면 stale이 아닌 쪽으로 붙는다 — 중복 실행을 막는 것이 먼저다.
+    """
+    try:
+        written_at = PID_PATH.stat().st_mtime
+    except OSError:
+        return False  # 파일이 없으면 따질 것도 없다
+
+    try:
+        return written_at < _boot_epoch()
+    except Exception:
+        logger.warning("부팅 시각을 읽지 못했습니다 — PID 기록을 그대로 씁니다.", exc_info=True)
+        return False
 
 
 def _running_pid() -> int:
@@ -120,16 +181,22 @@ def _running_instance_pid() -> int:
     if pid <= 0:
         return 0
 
+    # 재부팅 전 기록이면 PID가 이미 남의 것이다 — 열리지 않는다는 이유로 살아 있다고
+    # 읽으면 그 하나 때문에 실행이 영구히 막힌다
+    if _pid_file_is_stale():
+        logger.info("PID 기록이 마지막 부팅 이전 것이라 무시합니다 (PID %d).", pid)
+        return 0
+
     import ctypes
 
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     ERROR_ACCESS_DENIED = 5
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = _kernel32()
 
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
         # 액세스 거부 = 프로세스는 있는데 권한이 모자란 것이다. 그 외(대개 '없는 PID')는 죽었다
-        return pid if kernel32.GetLastError() == ERROR_ACCESS_DENIED else 0
+        return pid if ctypes.get_last_error() == ERROR_ACCESS_DENIED else 0
     try:
         # PID가 재사용돼 다른 프로그램이 그 번호를 쓰고 있으면 우리 인스턴스가 아니다
         return pid if _is_python_process(handle) else 0
@@ -265,7 +332,9 @@ def main() -> None:
     #
     # 뮤텍스 검사는 **조건과 무관하게 먼저 부른다** — 이 호출이 곧 뮤텍스를 잡는 일이라,
     # 건너뛰면 이 인스턴스가 소유자가 되지 못해 다음 실행이 아무것도 보지 못한다.
-    # 대체 경로에서도 앞서 잡은 핸들이 남아, 기존 인스턴스가 죽어도 잠금은 이어진다.
+    # 대체 경로에서도 앞서 잡은 핸들이 남아, 기존 인스턴스가 죽어도 잠금은 이어진다
+    # (생성에 성공한 경우다. 권한이 모자라 열기로만 확인한 경우는 소유하지 못하므로,
+    #  그때는 PID 대조가 유일한 방어다 — `_mutex_says_running` 참고).
     mutex_running = _mutex_says_running()
     running_pid = _running_instance_pid()
     if running_pid or mutex_running:
@@ -319,7 +388,12 @@ def main() -> None:
     app.setApplicationName("AutoTrade")
     window = MainWindow(auto_start=auto_start)
     window.show()
-    sys.exit(app.exec())
+    try:
+        code = app.exec()
+    finally:
+        # 남겨두면 다음 실행이 죽은 PID를 보게 된다 (_pid_file_is_stale 참고)
+        _clear_pid()
+    sys.exit(code)
 
 
 if __name__ == "__main__":

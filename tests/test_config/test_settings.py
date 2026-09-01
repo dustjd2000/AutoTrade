@@ -141,3 +141,22 @@ def test_validate_accepts_a_later_pair(monkeypatch):
     monkeypatch.setenv("BUY_TIME", "09:20")
 
     _valid_settings(monkeypatch).validate()
+
+
+# ── 매매 비용 (익절/손절 순손익률 판정에 그대로 들어간다) ──────────────
+def test_tax_defaults_to_the_measured_rate(monkeypatch):
+    """실제 키움 매도세금은 0.20%다 — 매도 49건(2026-07-29~09-01) 전수 대조로 확인했다.
+
+    ⌊금액×0.15%⌋ + ⌊금액×0.05%⌋로 1원 오차 없이 맞는다. 2026-09-01 이전 기본값
+    0.18%는 한 건도 설명하지 못했고, 그만큼 순손익을 후하게 봐서 손절이 늦게 걸렸다.
+    """
+    monkeypatch.delenv("TAX_PERCENT", raising=False)
+
+    assert Settings().tax_ratio == 0.002
+
+
+def test_commission_defaults_to_the_measured_rate(monkeypatch):
+    """실효 수수료는 0.015%를 10원 단위로 절사한 값이라 항상 이 값 이하다."""
+    monkeypatch.delenv("COMMISSION_PERCENT", raising=False)
+
+    assert Settings().commission_ratio == 0.00015

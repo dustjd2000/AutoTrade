@@ -60,3 +60,15 @@ def test_missing_matplotlib_degrades_to_no_chart(monkeypatch):
     monkeypatch.setattr(chart, "_figure", lambda *a, **k: (_ for _ in ()).throw(ImportError("no matplotlib")))
 
     assert chart.render_monthly_cumulative(points(1000.0, 2000.0)) is None
+
+
+def test_savefig_failure_degrades_to_no_chart(monkeypatch):
+    """PNG로 굽는 단계가 실패해도 리포트 메일은 나가야 한다 — _figure 실패와 같은 처리다."""
+    class Broken:
+        def savefig(self, *a, **kw):
+            raise RuntimeError("no space left on device")
+
+    monkeypatch.setattr(chart, "_figure", lambda *a, **k: Broken())
+    monkeypatch.setattr(chart, "_close", lambda fig: None)
+
+    assert chart.render_monthly_cumulative(points(1000.0, 2000.0)) is None
