@@ -112,6 +112,10 @@ class DailyWorkflow:
         # UI '매수 예정' 표가 읽는 스냅샷 — (날짜, 행 목록) 한 쌍을 통째로 갈아끼운다
         # (`buy_plan_snapshot` 참고). 주문 기록 파일은 10:10에 지워지므로 표의 출처가 될 수 없다.
         self._buy_board: tuple = (None, ())
+        # 오늘 '전량 체결'을 한 번이라도 관찰한 종목. 잔고 대조만으로는 매도 뒤에
+        # 판정이 되돌아가 매수예정 표로 행이 살아 돌아온다 (2026-09-01 실측).
+        # _buy_board와 같이 (날짜, 값) 한 튜플로 통째 갈아끼워 UI 스레드가 일관되게 읽는다.
+        self._settled_board: tuple = (None, frozenset())
         # 09:08 현재가가 목표 매수가보다 이만큼 넘게 높으면 그 종목은 건너뛴다 (_gap_note 참고).
         # 동시에 이 값이 주문 지정가를 정한다 — 밴드 상단이 곧 주문가다 (_order_price 참고)
         self.buy_price_tolerance_ratio = buy_price_tolerance_ratio
@@ -134,15 +138,38 @@ class DailyWorkflow:
         if day != (today or date.today()):
             return []
         held = {p.ticker: p.quantity for p in self.engine.position_snapshot()}
-        settled = (self._settled_row(r, held) for r in rows)
+        done = self._observe_settled(day, rows, held)
+        settled = (self._settled_row(r, held, done) for r in rows)
         return [
             replace(r, current_price=self.engine.last_price(r.ticker))
             for r in settled
             if r is not None
         ]
 
+    def _observe_settled(self, day: date, rows, held: dict) -> frozenset:
+        """지금 전량 체결로 보이는 종목을 기억에 더하고, 오늘의 기억 전체를 돌려준다.
+
+        판 뒤에는 잔고가 0이라 '아직 체결 안 됨'과 구분되지 않는다. 한 번 본 체결을
+        기억해 두지 않으면 매도한 종목이 매수예정 표에 '접수'로 되살아난다.
+        기억은 그날 것이다 — 날짜가 넘어가면 버린다 (`_buy_board`와 같은 규약).
+        """
+        remembered_day, done = self._settled_board
+        if remembered_day != day:
+            done = frozenset()
+        seen = {
+            r.ticker
+            for r in rows
+            if r.status == BUY_ORDERED_STATUS
+            and r.quantity > 0
+            and held.get(r.ticker, 0) >= r.quantity
+        }
+        if not seen <= done:
+            done = done | seen
+            self._settled_board = (day, done)   # 통째로 갈아끼운다 (제자리 수정 금지)
+        return done
+
     @staticmethod
-    def _settled_row(row: BuyPlanView, held: dict) -> Optional[BuyPlanView]:
+    def _settled_row(row: BuyPlanView, held: dict, done: frozenset = frozenset()) -> Optional[BuyPlanView]:
         """접수 행을 보유 수량과 대조해 체결 상태로 옮긴다. 표에서 뺄 행은 None (PRD 5.10).
 
         체결 반영(`_fill_buy_prices`)은 10:10·15:15에만 도는데, 지정가가 허용 밴드 상단으로
@@ -152,9 +179,15 @@ class DailyWorkflow:
         **표시만 바꾸고 기록은 건드리지 않는다** — 기록과 결과 메일을 확정하는 것은 체결내역
         조회를 보는 10:10·15:15의 일이고, 잔고 대조는 표를 맞추기 위한 근사치다. 전일부터
         들고 있던 종목이 추천되면 체결로 오판하는 한계가 있다 (당일 청산이라 실무상 드물다).
+
+        `done`은 오늘 전량 체결을 이미 관찰한 종목이다 (`_observe_settled`). 잔고만 보면
+        매도 뒤 판정이 되돌아가 판 종목이 '접수'로 살아 돌아온다 (2026-09-01 실측).
+        부분체결 뒤 매도한 경우는 아직 되돌아간다 — 관찰한 수량까지 기억하지는 않는다.
         """
         if row.status != BUY_ORDERED_STATUS or row.quantity <= 0:
             return row
+        if row.ticker in done:
+            return None  # 체결을 이미 봤다 — 그 뒤 팔렸어도 매수예정으로 돌아가지 않는다
         quantity = held.get(row.ticker, 0)
         if quantity <= 0:
             return row

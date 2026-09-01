@@ -1206,6 +1206,53 @@ def test_ordered_row_stays_while_nothing_is_held():
     assert plan.status == "접수"
 
 
+def test_filled_row_does_not_return_after_the_position_is_sold():
+    """2026-09-01 회귀 — 전량 매도했더니 그 종목이 매수예정 표에 '접수'로 되살아났다.
+
+    체결 판정을 현재 보유 수량에서 매번 다시 유도하기 때문이었다. 판 뒤에는 잔고가
+    0이라 '아직 체결 안 됨'과 구분되지 않는다. 한 번 본 체결은 되돌아가면 안 된다.
+    """
+    recs = board_recs()
+    workflow, _, _, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.execute_buys()
+
+    workflow.engine.position_snapshot = lambda: [hold("005930", 2000)]
+    assert workflow.buy_plan_snapshot() == []   # 체결을 한 번 관찰한다
+
+    workflow.engine.position_snapshot = lambda: []   # 전량 매도
+    assert workflow.buy_plan_snapshot() == [], "판 종목이 매수예정으로 돌아왔다"
+
+
+def test_never_filled_row_still_stays_after_a_sell_of_another_stock():
+    """되돌아가지 않게 만든 것이 '미체결도 숨긴다'가 되면 안 된다."""
+    recs = board_recs()
+    workflow, _, _, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.execute_buys()
+
+    workflow.engine.position_snapshot = lambda: []
+
+    (plan,) = workflow.buy_plan_snapshot()
+    assert plan.status == "접수"
+
+
+def test_settled_tickers_do_not_leak_into_another_day():
+    """표가 날짜로 비워지듯, 체결을 봤다는 기억도 그날 것이라야 한다."""
+    recs = board_recs()
+    workflow, _, _, _, strategy = make_workflow(recommendations=recs)
+    strategy.set_recommendations(recs)
+    workflow.execute_buys()
+    workflow.engine.position_snapshot = lambda: [hold("005930", 2000)]
+    workflow.buy_plan_snapshot()
+
+    workflow._set_buy_board(date(2026, 9, 2), workflow._buy_board[1])
+    workflow.engine.position_snapshot = lambda: []
+
+    (plan,) = workflow.buy_plan_snapshot(today=date(2026, 9, 2))
+    assert plan.status == "접수", "전날의 체결 기억이 다음 날 행을 숨겼다"
+
+
 def test_settling_does_not_touch_the_saved_records():
     """표시만 바꾼다 — 기록과 결과 메일을 확정하는 것은 10:10의 체결내역 조회다."""
     recs = board_recs()
