@@ -109,6 +109,9 @@ class AccountClient:
         self._client = KiwoomClient(settings, auth)
         # 잔고는 5초마다 돌아서, 필드를 못 찾는다는 경고를 매번 남기면 로그가 묻힌다
         self._logged_missing_fees = False
+        # 무엇을 읽었는지도 한 번은 남긴다 — 폴백을 쓰는지 아닌지 로그로 판정하려면
+        # '못 찾았다'가 없는 것만으로는 부족하다 (한쪽만 읽었을 수 있다)
+        self._logged_fee_values = False
 
     def get_balance_snapshot(self) -> BalanceSnapshot:
         return BalanceSnapshot(cash=self.get_cash(), positions=self.get_positions())
@@ -195,4 +198,20 @@ class AccountClient:
                 "첫 행 키: %s",
                 list(rows[0].keys()),
             )
+
+        if not self._logged_fee_values:
+            found = next(
+                (p for p in positions.values() if p.buy_fee is not None or p.sell_cost is not None),
+                None,
+            )
+            if found is not None:
+                self._logged_fee_values = True
+                logger.info(
+                    "잔고 응답에서 수수료·세금을 읽었습니다 — %s 매입수수료 %s, 예상 매도비용 %s. "
+                    "첫 행 키: %s",
+                    found.label,
+                    found.buy_fee,
+                    found.sell_cost,
+                    list(rows[0].keys()),
+                )
         return positions

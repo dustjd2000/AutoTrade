@@ -9,6 +9,7 @@ def make_client(response):
     client.auth = SimpleNamespace()
     client._client = SimpleNamespace(request=lambda *a, **kw: (response, {}))
     client._logged_missing_fees = False   # __new__로 만들어 __init__을 건너뛴다
+    client._logged_fee_values = False
     return client
 
 
@@ -201,3 +202,52 @@ def test_missing_fee_fields_are_logged_once(caplog):
     hits = [r for r in caplog.records if "수수료" in r.message]
     assert len(hits) == 1
     assert "stk_cd" in hits[0].getMessage()   # 실제 응답 키를 남겨야 다음에 후보를 넓힐 수 있다
+
+
+def test_found_fee_fields_are_logged_once(caplog):
+    """무엇을 받았는지 한 번은 남겨야 폴백을 쓰는지 아닌지 로그로 판정할 수 있다."""
+    client = make_client(
+        {
+            "acnt_evlt_remn_indv_tot": [
+                {
+                    "stk_cd": "A047050",
+                    "rmnd_qty": "15",
+                    "pur_pric": "55600",
+                    "cur_prc": "56400",
+                    "pur_cmsn": "120",
+                    "sell_cmsn": "120",
+                    "tax": "1692",
+                }
+            ]
+        }
+    )
+
+    with caplog.at_level("INFO"):
+        client.get_positions()
+        client.get_positions()
+
+    hits = [r for r in caplog.records if "수수료·세금을 읽었습니다" in r.getMessage()]
+    assert len(hits) == 1
+    message = hits[0].getMessage()
+    assert "120" in message and "1812" in message   # 매입수수료와 예상 매도비용
+    assert "pur_cmsn" in message                    # 어느 키가 맞았는지 알 수 있어야 한다
+
+
+def test_partial_fee_fields_fall_back_and_report_the_keys(caplog):
+    """세금만 오면 매도비용 합을 만들 수 없다 — 그때는 전부 폴백이고 키를 남겨야 한다."""
+    client = make_client(
+        {
+            "acnt_evlt_remn_indv_tot": [
+                {"stk_cd": "A047050", "rmnd_qty": "15", "pur_pric": "55600", "tax": "1692"}
+            ]
+        }
+    )
+
+    with caplog.at_level("INFO"):
+        held = client.get_positions()["047050"]
+
+    assert held.sell_cost is None, "매도수수료가 없으면 합을 만들 수 없다"
+    assert held.buy_fee is None
+    hits = [r for r in caplog.records if "찾지 못해" in r.getMessage()]
+    assert len(hits) == 1
+    assert "tax" in hits[0].getMessage(), "다음에 후보를 넓히려면 실제 키가 보여야 한다"
