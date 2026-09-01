@@ -34,9 +34,13 @@ MAX_X_LABELS = 10
 
 
 def render_monthly_cumulative(points: Sequence[DailyPoint]) -> Optional[bytes]:
-    """날짜별 누적 순손익을 꺾은선 PNG로 그린다. 못 그리면 None."""
-    if len(points) < 2:
-        return None  # 점이 하나뿐이면 꺾은선이 아니다
+    """날짜별 누적 순손익을 꺾은선 PNG로 그린다. 못 그리면 None.
+
+    **점이 하나여도 그린다 (2026-09-01)**. 매달 첫 거래일에는 이번 달 거래일이 하루뿐이라
+    그래프가 통째로 빠졌다 — 꺾은선은 아니지만 그날의 위치를 0선 대비로 보여주는 값은 있다.
+    """
+    if not points:
+        return None  # 이번 달 거래가 아직 없다
     try:
         fig = _figure(points)
     except Exception:
@@ -128,7 +132,11 @@ def _style_axes(ax, points: Sequence[DailyPoint], values: List[float]) -> None:
     margin = max(abs(min(values)), abs(max(values)), 1) * 0.25
     ax.set_ylim(min(min(values), 0) - margin, max(max(values), 0) + margin)
     # 오른쪽 여백은 마지막 점 옆에 붙는 값 라벨 자리다
-    ax.set_xlim(-0.4, len(points) + 0.8)
+    if len(points) == 1:
+        # 같은 식을 쓰면 홀로 찍힌 점이 왼쪽 끝으로 몰린다 (여백이 폭의 8할)
+        ax.set_xlim(-0.6, 1.2)
+    else:
+        ax.set_xlim(-0.4, len(points) + 0.8)
 
 
 def _close(fig) -> None:

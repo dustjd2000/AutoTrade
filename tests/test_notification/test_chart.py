@@ -23,9 +23,16 @@ def test_renders_png_bytes():
     assert png[:8] == PNG_MAGIC
 
 
-def test_no_chart_when_a_line_cannot_be_drawn():
-    """점이 하나뿐이면 꺾은선이 아니다 — 그래프 없이 숫자만 보낸다."""
-    assert chart.render_monthly_cumulative(points(1000.0)) is None
+def test_renders_a_single_point():
+    """매달 첫 거래일 — 꺾은선은 아니지만 0선 대비 위치는 보여준다 (2026-09-01)."""
+    png = chart.render_monthly_cumulative(points(1000.0))
+
+    assert png is not None
+    assert png[:8] == PNG_MAGIC
+
+
+def test_no_chart_without_any_trade():
+    """이번 달 매매가 아직 없으면 그릴 것이 없다 — 그래프 없이 숫자만 보낸다."""
     assert chart.render_monthly_cumulative([]) is None
 
 
