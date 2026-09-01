@@ -85,9 +85,11 @@ def _first_present(row: Dict, *keys: str):
 def _fee_fields(row: Dict) -> tuple:
     """잔고 행에서 매입수수료와 예상 매도비용(수수료+세금)을 뽑는다.
 
-    키움이 이 필드들을 주는지는 실계좌 응답으로 확인되지 않았다 (2026-09-01 시점에
-    보유 종목이 없어 확인 불가). 못 찾으면 (None, None)을 돌려주고 호출부가
-    절사 규칙 계산으로 폴백한다 — 실측 오차가 1원 이내라 실질 차이는 없다.
+    **kt00018이 세 필드를 모두 준다** — 2026-09-01 14:12 실계좌 응답으로 확인했다
+    (`pur_cmsn`/`sell_cmsn`/`tax`, 그 밖에 `sum_cmsn`·`pur_amt`·`evlt_amt`·
+    `evltv_prft`·`prft_rt`도 온다). 그래서 순손익은 폴백이 아니라 키움 실제값을 쓴다.
+    못 찾는 경우는 (None, None)을 돌려주고 호출부가 절사 규칙 계산으로 폴백한다 —
+    실측 오차가 1원 이내라 응답 형식이 바뀌어도 실질 차이는 없다.
     """
     buy_fee = _first_present(row, "pur_cmsn", "buy_cmsn", "pchs_cmsn")
     sell_cmsn = _first_present(row, "sell_cmsn", "evlt_cmsn", "sl_cmsn")
