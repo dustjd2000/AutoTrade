@@ -1,7 +1,7 @@
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from src.api.auth import AuthClient
 from src.api.client import KiwoomAPIError
@@ -56,6 +56,10 @@ class PositionView:
     quantity: int
     avg_price: float
     current_price: float
+    # 수수료·세금을 뺀 순손익 (표시용 — 슬리피지 없음). 엔진이 채워서 넘긴다.
+    # 아래 pnl/pnl_percent는 비용을 빼지 않은 평가손익이라 값이 다르다.
+    net_pnl: float = 0.0
+    net_pnl_percent: float = 0.0
 
     @property
     def label(self) -> str:
@@ -367,17 +371,24 @@ class TradingEngine:
         매도된 종목은 잔고에서 빠지거나 _mark_exited가 지우므로 여기 나타나지 않는다.
         """
         positions = self._positions
-        return [
-            PositionView(
-                ticker=p.ticker,
-                name=p.name,
-                quantity=p.quantity,
-                avg_price=p.avg_price,
-                current_price=p.current_price,
+        views = []
+        for p in positions.values():
+            if p.quantity <= 0:
+                continue
+            net_pnl = self.risk_manager.position_net_pnl(p)
+            cost = p.avg_price * p.quantity
+            views.append(
+                PositionView(
+                    ticker=p.ticker,
+                    name=p.name,
+                    quantity=p.quantity,
+                    avg_price=p.avg_price,
+                    current_price=p.current_price,
+                    net_pnl=net_pnl,
+                    net_pnl_percent=(net_pnl / cost * 100) if cost > 0 else 0.0,
+                )
             )
-            for p in positions.values()
-            if p.quantity > 0
-        ]
+        return views
 
     def portfolio_return_snapshot(self) -> Optional[float]:
         """익절/손절 판정에 쓰이는 합산 순손익률 (UI 스레드에서 호출 — API를 호출하지 않는다).
@@ -388,6 +399,15 @@ class TradingEngine:
         """
         holdings = [p for t, p in self._positions.items() if t not in self._exiting]
         return self.risk_manager.portfolio_return(holdings)
+
+    def portfolio_net_pnl_snapshot(self) -> Tuple[float, Optional[float]]:
+        """화면에 찍을 합산 (순손익 금액, 순손익률) — 슬리피지 없음, API 호출 없음.
+
+        `portfolio_return_snapshot`(판정값)과는 슬리피지만큼 다르다. 이쪽이 항상 조금
+        높다. 종목별 표와 같은 식으로 계산해야 표의 합계가 요약줄과 맞는다.
+        """
+        holdings = [p for t, p in self._positions.items() if t not in self._exiting]
+        return self.risk_manager.portfolio_net_pnl(holdings)
 
     def reset_for_new_day(self) -> None:
         """장 시작 전 일일 리스크 카운터를 초기화한다.

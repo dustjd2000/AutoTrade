@@ -39,6 +39,10 @@ def make_engine(positions, sent, sell_status=OrderStatus.FILLED):
             initialize=lambda s: None,
             record_order=lambda *a, **kw: None,
             check_portfolio_exit=lambda ps: None,
+            commission_rate=0.0,
+            tax_rate=0.0,
+            position_net_pnl=lambda p: (p.current_price - p.avg_price) * p.quantity,
+            portfolio_net_pnl=lambda ps: (0.0, None),
             check_simple_take_profits=lambda ps: [],
         ),
     )

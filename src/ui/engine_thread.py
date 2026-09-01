@@ -92,6 +92,13 @@ class EngineThread(QThread):
             return None
         return runtime.engine.portfolio_return_snapshot()
 
+    def portfolio_net_pnl(self) -> tuple:
+        """표시용 합산 (순손익 금액, 순손익률). 판정값과 달리 슬리피지가 빠져 있다."""
+        runtime = self._runtime
+        if runtime is None:
+            return (0.0, None)
+        return runtime.engine.portfolio_net_pnl_snapshot()
+
     def cash_snapshot(self) -> Optional[float]:
         """마지막으로 조회한 예수금 (UI 표시용 — API 호출 없이 캐시값만 읽는다)."""
         runtime = self._runtime
