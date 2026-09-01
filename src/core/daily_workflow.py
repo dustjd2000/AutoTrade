@@ -69,7 +69,6 @@ class DailyWorkflow:
     """1호 전략의 하루 흐름을 스케줄러 트리거에 연결한다 (PRD 5.5-B, 5.11).
 
     추천 시각 recommend_and_notify → 09:08 execute_buys → 10:10 cancel_unfilled_buys
-    (접수분이 전부 체결되면 10:10을 기다리지 않고 그 시점에 결과 메일을 보낸다)
     → 15:35 send_final_report
     (보유 종목이 그 전에 전량 매도되고 체결까지 확인되면 15:35를 기다리지 않고 최종 리포트를 보낸다)
     """
@@ -161,26 +160,6 @@ class DailyWorkflow:
         if quantity >= row.quantity:
             return None  # 완전 체결 — '보유 종목' 표로 옮겨간다
         return replace(row, status=BUY_PARTIAL_STATUS, quantity=quantity)
-
-    def buy_orders_settled(self, today: Optional[date] = None) -> bool:
-        """오늘 접수한 매수 주문이 남김없이 전량 체결됐는지 — 결과 메일을 앞당길 근거.
-
-        `_settled_row`와 같은 잔고 대조라 API를 부르지 않는다. 확정은 여전히
-        `cancel_unfilled_buys`가 체결내역 조회로 한다 — 여기서는 "10:10까지 기다릴 이유가
-        남았는가"만 본다 (runtime.watch_buy_result).
-
-        접수 행이 하나도 없거나(주문이 나가지 않은 날), 표가 오늘 것이 아니거나(엔진이
-        재시작돼 메모리 표가 비었다), 부분체결·미체결이 남아 있으면 False다 — 그런 날은
-        종전대로 10:10이 마무리한다.
-        """
-        day, rows = self._buy_board
-        if day != (today or date.today()):
-            return False
-        ordered = [row for row in rows if row.status == BUY_ORDERED_STATUS]
-        if not ordered:
-            return False
-        held = {p.ticker: p.quantity for p in self.engine.position_snapshot()}
-        return all(self._settled_row(row, held) is None for row in ordered)
 
     def drop_buy_plans(self, tickers: Iterable[str], today: Optional[date] = None) -> List[str]:
         """고른 종목을 오늘 매수 대상에서 뺀다 — UI '매수 예정' 표의 선택 삭제 (PRD 5.10).
@@ -376,8 +355,7 @@ class DailyWorkflow:
         """09:08 — 예수금 기준으로 자금을 배분해 추천 종목을 허용 밴드 상단에 지정가 매수.
 
         체결 확인과 결과 메일은 여기서 하지 않는다 — 지정가 주문은 접수 직후에 체결 여부를
-        알 수 없어, `cancel_unfilled_buys`가 미체결분을 정리한 뒤에 알린다. 접수분이 전부
-        체결된 날은 10:10을 기다리지 않고 `runtime.watch_buy_result`가 그 시점에 부른다.
+        알 수 없어, 10:10 `cancel_unfilled_buys`가 미체결분을 정리한 뒤에 알린다.
         """
         cash = self.account.get_cash()
         plans = self.strategy.build_buy_plans(cash)
@@ -576,7 +554,7 @@ class DailyWorkflow:
                 )
 
         self._set_buy_board(date.today(), self._board_from_records(records))
-        # 결과 메일은 cancel_unfilled_buys가 보낸다 — 지정가라 지금은 체결 여부를 모른다
+        # 결과 메일은 10:10 cancel_unfilled_buys가 보낸다 — 지정가라 지금은 체결 여부를 모른다
         self._write_buy_records(cash, plans[0].amount, records)
 
     def _order_price(self, target_price: float, current_price: float) -> float:
@@ -677,9 +655,7 @@ class DailyWorkflow:
         취소 대상은 **당일 체결내역 조회**에서 찾는다. 09:08과 10:10 사이에 설정 저장 등으로
         엔진이 재시작돼도 미체결 주문이 장 마감까지 방치되면 안 되기 때문이다.
 
-        부르는 곳이 셋이다. 10:10 스케줄 외에, 접수분이 전부 체결되면 그 시점에
-        `runtime.watch_buy_result`가 앞당겨 부르고(취소할 주문은 없고 결과 메일만 나간다),
-        15:15 마감 정리(`runtime.close_out`)가 10:10을 놓친 날의 그물로 한 번 더 부른다.
+        15:15 마감 정리(`runtime.close_out`)가 한 번 더 부른다 — 10:10을 놓친 날의 그물이다.
         메일을 보내고 나면 기록 파일을 지우므로 같은 메일이 두 번 나가지는 않는다.
         """
         today = today or date.today()

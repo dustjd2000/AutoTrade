@@ -62,12 +62,6 @@ CLOSEOUT_CHECK_INTERVAL_SECONDS = 30
 # '보유중'으로 실린다 (DailyWorkflow._fill_buy_prices의 같은 시차 참고).
 CLOSEOUT_SETTLE_SECONDS = 60
 
-# 매수 체결 완료 감시 — 접수한 매수가 전부 체결됐으면 10:10을 기다리지 않고 결과 메일을 보낸다.
-BUY_RESULT_CHECK_INTERVAL_SECONDS = 30
-# 잔고에 잡힌 체결이 체결내역 조회(DailyWorkflow._fill_buy_prices)에도 실릴 때까지의 시차.
-# 이 시간만큼 '전부 체결'이 이어져야 결과 메일을 보낸다 — 너무 이르면 체결가가 빈 메일이 나간다.
-BUY_RESULT_SETTLE_SECONDS = 60
-
 # 예수금 캐시 갱신 — 입금 등 장중 잔고 변동을 "총 매수가능 금액" UI 표시에 반영한다.
 # 시세 틱과 달리 예수금은 자연스러운 갱신 계기가 없어 별도 주기로 돈다.
 CASH_REFRESH_INTERVAL_SECONDS = 60
@@ -454,49 +448,6 @@ async def watch_closeout_report(
             logger.exception("전량 매도 결과 리포트 발송 실패 — 15:35 리포트에 맡깁니다.")
 
 
-async def watch_buy_result(
-    runtime: Runtime,
-    interval_seconds: float = BUY_RESULT_CHECK_INTERVAL_SECONDS,
-    settle_seconds: float = BUY_RESULT_SETTLE_SECONDS,
-) -> None:
-    """접수한 매수가 전부 체결되면 10:10을 기다리지 않고 결과 메일을 보낸다.
-
-    주문 지정가를 허용 밴드 상단으로 올린 뒤로(2026-08-26) 접수 직후 전량 체결되는 날이
-    대부분인데, 결과 메일만 `CANCEL_UNFILLED_TIME`에 묶여 한 시간 늦게 나갔다. 매도 쪽
-    `watch_closeout_report`와 같은 구조다.
-
-    판정은 잔고 대조(`DailyWorkflow.buy_orders_settled`)라 API를 부르지 않고, 확정과 발송은
-    종전대로 `cancel_unfilled_buys`가 한다 — 이미 다 체결된 상태라 그 안에서 취소되는 주문은
-    없다. 보내고 나면 기록 파일이 지워지므로 10:10·15:15가 같은 메일을 다시 보내지 않는다.
-    미체결·부분체결이 남은 날은 판정이 서지 않아 종전 흐름 그대로다.
-    """
-    settled_since: Optional[datetime] = None
-    while True:
-        await asyncio.sleep(interval_seconds)
-
-        if not runtime.workflow.buy_orders_settled():
-            settled_since = None
-            continue
-
-        now = datetime.now()
-        if settled_since is None:
-            settled_since = now
-            continue
-        if (now - settled_since).total_seconds() < settle_seconds:
-            continue
-
-        settled_since = None
-        logger.info(
-            "접수한 매수가 전부 체결됐습니다 — %s을 기다리지 않고 매수 결과 메일을 발송합니다.",
-            CANCEL_UNFILLED_TIME.strftime("%H:%M"),
-        )
-        try:
-            # 주문·기록을 건드리므로 루프 스레드에서 그대로 실행한다 (close_out과 같은 규약)
-            runtime.workflow.cancel_unfilled_buys()
-        except Exception:
-            logger.exception("매수 결과 메일 조기 발송 실패 — 10:10 마무리에 맡깁니다.")
-
-
 async def watch_cash_refresh(
     runtime: Runtime,
     interval_seconds: float = CASH_REFRESH_INTERVAL_SECONDS,
@@ -550,7 +501,6 @@ async def run(runtime: Runtime) -> None:
     adopt_carried_over_positions(runtime)
     watchdog = asyncio.create_task(watch_quote_stall(runtime))
     closeout_watch = asyncio.create_task(watch_closeout_report(runtime))
-    buy_result_watch = asyncio.create_task(watch_buy_result(runtime))
     cash_watch = asyncio.create_task(watch_cash_refresh(runtime))
     try:
         await asyncio.gather(runtime.ws_client.connect(), runtime.scheduler.run())
@@ -559,7 +509,6 @@ async def run(runtime: Runtime) -> None:
     finally:
         watchdog.cancel()
         closeout_watch.cancel()
-        buy_result_watch.cancel()
         cash_watch.cancel()
         request_stop(runtime)
         await runtime.ws_client.disconnect()
