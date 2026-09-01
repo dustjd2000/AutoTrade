@@ -34,23 +34,34 @@ def make_monthly(**overrides):
     return MonthlySummary(**defaults)
 
 
+def make_yearly(**overrides):
+    """올해 누적 실현손익 +98,700원, 수수료·세금 7,400원 → 순손익 +91,300원."""
+    defaults = dict(realized_pnl=98700.0, fees=7400.0, base_asset=1_300_000.0)
+    defaults.update(overrides)
+    return MonthlySummary(**defaults)
+
+
 def render(
     summary=None,
     monthly=None,
+    yearly=None,
     cash=1220735.0,
     sync_failed=False,
     closed_out=False,
     unsellable=None,
     chart_cid=None,
+    yearly_chart_cid=None,
 ):
     return templates.daily_report_email(
         summary or make_summary(),
         monthly or make_monthly(),
+        yearly or make_yearly(),
         cash,
         sync_failed=sync_failed,
         closed_out=closed_out,
         unsellable=unsellable,
         chart_cid=chart_cid,
+        yearly_chart_cid=yearly_chart_cid,
     )
 
 
@@ -111,6 +122,36 @@ def test_monthly_section_present():
         assert "2026-07" in body
         assert "+12,340원" in body
         assert "+0.89%" in body
+
+
+def test_yearly_section_present():
+    """월 블록 아래에 같은 꼴의 올해 누적이 붙는다 (2026-09-01)."""
+    _, text, html = render()
+
+    for body in (text, html):
+        assert "올해 누적 (2026년 기준)" in body
+        assert "+98,700원" in body          # 올해 누적 실현손익
+        assert "+91,300원" in body          # 수수료·세금을 뺀 순손익
+        assert body.index("이번 달 누적") < body.index("올해 누적")
+
+
+def test_yearly_section_omits_cash():
+    """주문가능금액은 기간과 무관한 값이라 월 블록에만 둔다."""
+    _, text, html = render()
+
+    for body in (text, html):
+        assert body.count("현재 주문가능금액") == 1
+
+
+def test_yearly_chart_is_embedded_only_when_given():
+    _, text, html = render(chart_cid="monthly-cumulative", yearly_chart_cid="yearly-cumulative")
+
+    assert 'src="cid:yearly-cumulative"' in html
+    assert html.index("cid:monthly-cumulative") < html.index("cid:yearly-cumulative")
+    assert "cid:" not in text, "평문 파트에는 그래프가 없다"
+
+    _, _, only_monthly = render(chart_cid="monthly-cumulative")
+    assert "cid:yearly-cumulative" not in only_monthly
 
 
 def test_monthly_section_nets_out_fees():

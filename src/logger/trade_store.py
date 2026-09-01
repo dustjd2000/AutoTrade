@@ -111,7 +111,10 @@ class DailySummary:
 
 @dataclass
 class MonthlySummary:
-    """월초부터 기준일까지의 누적 실적 — 리포트의 '이번 달 누적' 블록.
+    """기간 누적 실적 — 리포트의 '이번 달 누적'과 '올해 누적' 블록이 함께 쓴다.
+
+    이름은 월 블록만 있던 시절의 것이다. 필드도 파생값도 기간 길이와 무관해 연 집계가
+    그대로 들어맞아, 같은 모양의 dataclass를 하나 더 만드는 대신 재사용한다 (2026-09-01).
 
     수익률의 분모(base_asset)는 계좌 잔고를 봐야 알 수 있어 TradeStore가 채우지 못한다.
     호출부(DailyWorkflow)가 월초 자산 추정치를 넣어준다.
@@ -137,11 +140,15 @@ class MonthlySummary:
 
 @dataclass
 class DailyPoint:
-    """월 누적 꺾은선 그래프의 한 점 — 매매가 있었던 하루."""
+    """누적 꺾은선 그래프의 한 점 — 매매가 있었던 하루.
+
+    연 그래프에서는 **매매가 있었던 한 달**을 뜻하고 `day`에 그 달의 1일이 들어간다
+    (2026-09-01). 눈금 문구만 다를 뿐 그리는 방식이 같아 점 타입을 나누지 않았다.
+    """
 
     day: date
-    net_pnl: float      # 그날의 순손익 (실현손익 - 수수료·세금)
-    cumulative: float   # 월초부터 그날까지 누적 순손익
+    net_pnl: float      # 그 구간의 순손익 (실현손익 - 수수료·세금)
+    cumulative: float   # 기간 시작부터 그 점까지 누적 순손익
 
 
 class TradeStore:
@@ -328,7 +335,19 @@ class TradeStore:
         월 누적 기준일(매월 1일 vs 실전 전환일)은 아직 미확정(10절)이므로,
         우선 달력상 매월 1일 기준으로 계산한다.
         """
-        start = datetime(year, month, 1).isoformat()
+        return self._range_summary(datetime(year, month, 1), up_to)
+
+    def yearly_summary(self, year: int, up_to: date) -> MonthlySummary:
+        """연초부터 up_to 날짜까지의 누적 실현손익과 수수료·세금 (PRD 5.11, 2026-09-01).
+
+        기준은 월 집계와 같고 기간만 1월 1일부터다 — 두 블록의 숫자가 같은 규칙으로
+        나와야 "이번 달"과 "올해"를 나란히 놓고 읽을 수 있다.
+        """
+        return self._range_summary(datetime(year, 1, 1), up_to)
+
+    def _range_summary(self, start_at: datetime, up_to: date) -> MonthlySummary:
+        """기간 누적 실현손익과 수수료·세금 — 월·연 집계가 공유한다."""
+        start = start_at.isoformat()
         end = datetime.combine(up_to, datetime.max.time()).isoformat()
         placeholders = ", ".join("?" for _ in FILLED_STATUSES)
         with closing(self._connect()) as conn:
@@ -371,6 +390,37 @@ class TradeStore:
             running += net
             points.append(
                 DailyPoint(day=date.fromisoformat(day_text), net_pnl=net, cumulative=running)
+            )
+        return points
+
+    def yearly_cumulative_series(self, year: int, up_to: date) -> List[DailyPoint]:
+        """연초부터 up_to까지 **달별** 누적 순손익 — 연 그래프 입력 (2026-09-01).
+
+        점 하나가 한 달이고 `day`에는 그 달의 1일이 들어간다. 매매가 없던 달은 점을 만들지
+        않는다 — 날짜별 계열이 휴장일을 건너뛰는 것과 같은 규약이다. 마지막 점의 누적값은
+        `yearly_summary`의 누적 순손익과 일치한다.
+        """
+        start = datetime(year, 1, 1).isoformat()
+        end = datetime.combine(up_to, datetime.max.time()).isoformat()
+        placeholders = ", ".join("?" for _ in FILLED_STATUSES)
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""SELECT strftime('%m', timestamp) AS m,
+                           COALESCE(SUM(realized_pnl), 0),
+                           COALESCE(SUM(COALESCE(commission, 0) + COALESCE(tax, 0)), 0)
+                    FROM trades
+                    WHERE status IN ({placeholders}) AND timestamp BETWEEN ? AND ?
+                    GROUP BY m ORDER BY m""",
+                (*FILLED_STATUSES, start, end),
+            ).fetchall()
+
+        points: List[DailyPoint] = []
+        running = 0.0
+        for month_text, realized, fees in rows:
+            net = (realized or 0.0) - (fees or 0.0)
+            running += net
+            points.append(
+                DailyPoint(day=date(year, int(month_text), 1), net_pnl=net, cumulative=running)
             )
         return points
 

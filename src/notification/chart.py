@@ -32,6 +32,10 @@ _FIGSIZE = (6.4, 2.6)
 _DPI = 110
 MAX_X_LABELS = 10
 
+# 눈금 문구 — 월 그래프는 점 하나가 하루, 연 그래프는 한 달이다
+DAY_LABEL = "%m/%d"
+MONTH_LABEL = "%m월"
+
 
 def render_monthly_cumulative(points: Sequence[DailyPoint]) -> Optional[bytes]:
     """날짜별 누적 순손익을 꺾은선 PNG로 그린다. 못 그리면 None.
@@ -39,10 +43,23 @@ def render_monthly_cumulative(points: Sequence[DailyPoint]) -> Optional[bytes]:
     **점이 하나여도 그린다 (2026-09-01)**. 매달 첫 거래일에는 이번 달 거래일이 하루뿐이라
     그래프가 통째로 빠졌다 — 꺾은선은 아니지만 그날의 위치를 0선 대비로 보여주는 값은 있다.
     """
+    return _render(points, DAY_LABEL)
+
+
+def render_yearly_cumulative(points: Sequence[DailyPoint]) -> Optional[bytes]:
+    """달별 누적 순손익을 꺾은선 PNG로 그린다 (2026-09-01). 못 그리면 None.
+
+    입력은 `TradeStore.yearly_cumulative_series` — 점 하나가 한 달이다. 그리는 방식은
+    월 그래프와 같고 x축 눈금만 날짜에서 달로 바뀐다.
+    """
+    return _render(points, MONTH_LABEL)
+
+
+def _render(points: Sequence[DailyPoint], label_format: str) -> Optional[bytes]:
     if not points:
-        return None  # 이번 달 거래가 아직 없다
+        return None  # 그 기간에 거래가 아직 없다
     try:
-        fig = _figure(points)
+        fig = _figure(points, label_format)
     except Exception:
         logger.warning("월 누적 그래프를 그리지 못했습니다 — 숫자만 보냅니다.", exc_info=True)
         return None
@@ -55,7 +72,7 @@ def render_monthly_cumulative(points: Sequence[DailyPoint]) -> Optional[bytes]:
         _close(fig)
 
 
-def _figure(points: Sequence[DailyPoint]):
+def _figure(points: Sequence[DailyPoint], label_format: str = DAY_LABEL):
     import matplotlib
 
     matplotlib.use("Agg")  # 헤드리스 렌더링 — GUI 백엔드를 잡으면 UI 스레드와 충돌한다
@@ -76,7 +93,7 @@ def _figure(points: Sequence[DailyPoint]):
     ax.axhline(0, color=COLOR_AXIS, linewidth=1, zorder=2)
 
     _annotate_last(ax, len(values) - 1, values[-1])
-    _style_axes(ax, points, values)
+    _style_axes(ax, points, values, label_format)
 
     fig.tight_layout()
     return fig
@@ -111,7 +128,9 @@ def _annotate_last(ax, index: int, value: float) -> None:
     )
 
 
-def _style_axes(ax, points: Sequence[DailyPoint], values: List[float]) -> None:
+def _style_axes(
+    ax, points: Sequence[DailyPoint], values: List[float], label_format: str = DAY_LABEL
+) -> None:
     ax.set_title("누적 순손익(원)", fontsize=10, color=COLOR_MUTED, loc="left", pad=8)
     ax.grid(axis="y", color=COLOR_GRID, linewidth=1)
     ax.set_axisbelow(True)
@@ -125,7 +144,7 @@ def _style_axes(ax, points: Sequence[DailyPoint], values: List[float]) -> None:
     if ticks[-1] != len(points) - 1:
         ticks.append(len(points) - 1)
     ax.set_xticks(ticks)
-    ax.set_xticklabels([f"{points[i].day:%m/%d}" for i in ticks])
+    ax.set_xticklabels([format(points[i].day, label_format) for i in ticks])
     ax.tick_params(axis="both", colors=COLOR_MUTED, labelsize=9, length=0)
     ax.yaxis.set_major_formatter(lambda v, _: f"{v:,.0f}")
 

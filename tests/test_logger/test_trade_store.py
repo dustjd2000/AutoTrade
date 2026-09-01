@@ -462,3 +462,66 @@ def test_monthly_cumulative_series_ends_at_monthly_net_pnl(tmp_path):
 
 def test_monthly_cumulative_series_empty_without_trades(tmp_path):
     assert make_store(tmp_path).monthly_cumulative_series(2026, 7, up_to=DAY) == []
+
+
+# ── 연 누적 (2026-09-01) ────────────────────────────────────
+def test_yearly_summary_covers_the_whole_year(tmp_path):
+    """월 집계와 기준은 같고 기간만 1월 1일부터다."""
+    store = make_store(tmp_path)
+
+    store.record_fill(
+        make_result(OrderSide.SELL, OrderStatus.FILLED, 1020.0, datetime(2026, 7, 10, 9, 30)),
+        avg_price=1000.0,
+    )  # +200
+    store.record_fill(
+        make_result(OrderSide.SELL, OrderStatus.FILLED, 1100.0, datetime(2026, 8, 3, 9, 30)),
+        avg_price=1000.0,
+    )  # +1,000 — 다른 달이지만 같은 해다
+    store.record_fill(
+        make_result(OrderSide.SELL, OrderStatus.FILLED, 1500.0, datetime(2025, 12, 30, 9, 30)),
+        avg_price=1000.0,
+    )  # 작년 — 제외
+
+    yearly = store.yearly_summary(2026, up_to=date(2026, 8, 31))
+    august = store.monthly_summary(2026, 8, up_to=date(2026, 8, 31))
+
+    assert yearly.realized_pnl == 1200.0   # 7월 +200 + 8월 +1,000, 작년 것은 빠진다
+    assert august.realized_pnl == 1000.0  # 월 집계는 그 달만
+
+
+def test_yearly_cumulative_series_accumulates_by_month(tmp_path):
+    """점 하나가 한 달이고, 매매가 없던 달은 점을 만들지 않는다."""
+    store = make_store(tmp_path)
+
+    store.record_fill(
+        make_result(OrderSide.SELL, OrderStatus.FILLED, 1020.0, datetime(2026, 7, 10, 9, 30)),
+        avg_price=1000.0,
+    )  # +200
+    store.record_fill(
+        make_result(OrderSide.SELL, OrderStatus.FILLED, 1080.0, datetime(2026, 7, 20, 9, 30)),
+        avg_price=1000.0,
+    )  # +800 — 같은 달이라 한 점으로 합쳐진다
+    store.record_fill(
+        make_result(OrderSide.SELL, OrderStatus.FILLED, 900.0, datetime(2026, 9, 1, 9, 30)),
+        avg_price=1000.0,
+    )  # -1,000 — 8월은 매매가 없어 건너뛴다
+
+    series = store.yearly_cumulative_series(2026, up_to=date(2026, 9, 30))
+
+    assert [p.day for p in series] == [date(2026, 7, 1), date(2026, 9, 1)]
+    assert [p.net_pnl for p in series] == [1000.0, -1000.0]
+    assert [p.cumulative for p in series] == [1000.0, 0.0]
+
+
+def test_yearly_cumulative_series_ends_at_yearly_net_pnl(tmp_path):
+    """마지막 점은 리포트의 '올해 누적 순손익' 숫자와 같아야 한다."""
+    store = make_store(tmp_path)
+    store.apply_fills(seed_today(store), DAY)
+
+    series = store.yearly_cumulative_series(2026, up_to=DAY)
+
+    assert series[-1].cumulative == store.yearly_summary(2026, up_to=DAY).net_pnl
+
+
+def test_yearly_cumulative_series_empty_without_trades(tmp_path):
+    assert make_store(tmp_path).yearly_cumulative_series(2026, up_to=DAY) == []

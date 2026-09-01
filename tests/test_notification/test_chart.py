@@ -36,6 +36,25 @@ def test_no_chart_without_any_trade():
     assert chart.render_monthly_cumulative([]) is None
 
 
+def test_yearly_chart_labels_months():
+    """연 그래프는 점 하나가 한 달이라 눈금도 날짜가 아니라 달이다 (2026-09-01)."""
+    monthly_points = [
+        DailyPoint(day=date(2026, 7, 1), net_pnl=1000.0, cumulative=1000.0),
+        DailyPoint(day=date(2026, 8, 1), net_pnl=-300.0, cumulative=700.0),
+    ]
+
+    png = chart.render_yearly_cumulative(monthly_points)
+    assert png is not None
+    assert png[:8] == PNG_MAGIC
+
+    fig = chart._figure(monthly_points, chart.MONTH_LABEL)
+    try:
+        labels = [t.get_text() for t in fig.axes[0].get_xticklabels()]
+    finally:
+        chart._close(fig)
+    assert labels == ["07월", "08월"]
+
+
 def test_missing_matplotlib_degrades_to_no_chart(monkeypatch):
     """차트 실패가 리포트 메일 자체를 막으면 안 된다."""
     monkeypatch.setattr(chart, "_figure", lambda *a, **k: (_ for _ in ()).throw(ImportError("no matplotlib")))

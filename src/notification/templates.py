@@ -91,28 +91,34 @@ def buy_result_email(execution: BuyExecution) -> tuple[str, str, str]:
 def daily_report_email(
     summary: DailySummary,
     monthly: MonthlySummary,
+    yearly: MonthlySummary,
     cash: float,
     sync_failed: bool = False,
     closed_out: bool = False,
     unsellable: Optional[List[UnsellableView]] = None,
     chart_cid: Optional[str] = None,
+    yearly_chart_cid: Optional[str] = None,
 ) -> tuple[str, str, str]:
-    """15:35 일일/월간 성과 리포트 이메일 (PRD 5.11).
+    """15:35 일일/월간/연간 성과 리포트 이메일 (PRD 5.11).
 
     (제목, 평문, HTML)을 돌려준다 — 표는 HTML로 보이고, 평문만 읽는 클라이언트에서도
     같은 내용이 등폭 정렬로 남는다.
 
     closed_out=True는 보유 종목을 전부 매도해 15:35보다 앞서 보내는 최종 리포트다.
     unsellable은 오늘 매도하지 못한 종목 — 메일만 보는 상황에서도 잔여 포지션을 알 수 있어야 한다.
-    chart_cid를 주면 월 누적 꺾은선 PNG를 그 CID로 HTML에 끼워 넣는다 (평문에는 없다).
+    `yearly`는 연초부터의 같은 집계다 (2026-09-01) — 월 블록 아래에 같은 꼴로 붙는다.
+    두 chart_cid는 각각 월(날짜별)·연(달별) 누적 꺾은선 PNG를 HTML에 끼워 넣는다
+    (평문에는 없다).
     """
     subject = f"[AutoTrade] {summary.day:%Y-%m-%d} 매매 결과 리포트"
     notes = _report_notes(summary, sync_failed, closed_out)
     unsellable = unsellable or []
     return (
         subject,
-        _report_text(summary, monthly, cash, notes, unsellable),
-        _report_html(summary, monthly, cash, notes, unsellable, chart_cid),
+        _report_text(summary, monthly, yearly, cash, notes, unsellable),
+        _report_html(
+            summary, monthly, yearly, cash, notes, unsellable, chart_cid, yearly_chart_cid
+        ),
     )
 
 
@@ -197,6 +203,7 @@ def _pad(text: str, width: int, right: bool = True) -> str:
 def _report_text(
     summary: DailySummary,
     monthly: MonthlySummary,
+    yearly: MonthlySummary,
     cash: float,
     notes: List[str],
     unsellable: List[UnsellableView],
@@ -236,6 +243,12 @@ def _report_text(
             f"- 누적 수수료·세금: {_won(-monthly.fees)}",
             f"- 누적 순손익: {_won(monthly.net_pnl)} ({_percent(monthly.net_return_pct)})",
             f"- 현재 주문가능금액: {_balance(cash)}",
+            "",
+            # 주문가능금액은 기간과 무관한 값이라 월 블록에만 둔다
+            f"올해 누적 ({summary.day:%Y}년 기준)",
+            f"- 누적 실현손익: {_won(yearly.realized_pnl)} ({_percent(yearly.return_pct)})",
+            f"- 누적 수수료·세금: {_won(-yearly.fees)}",
+            f"- 누적 순손익: {_won(yearly.net_pnl)} ({_percent(yearly.net_return_pct)})",
         ]
     )
 
@@ -254,13 +267,39 @@ _TH = "padding:6px 10px; border-bottom:2px solid #cccccc; font-weight:600; text-
 _TD = "padding:6px 10px; border-bottom:1px solid #eeeeee; text-align:right;"
 
 
+def _cumulative_items(period: MonthlySummary, cash: Optional[float] = None) -> List[str]:
+    """'이번 달 누적'·'올해 누적' 블록의 항목 — 두 블록이 같은 꼴이라야 나란히 읽힌다."""
+    items = [
+        '<ul style="margin:0; padding-left:18px; color:#333333;">',
+        f'<li>누적 실현손익: <span style="color:{_color(period.realized_pnl)};">'
+        f'{_won(period.realized_pnl)} ({_percent(period.return_pct)})</span></li>',
+        f'<li>누적 수수료·세금: <span style="color:{COLOR_LOSS};">{_won(-period.fees)}</span></li>',
+        f'<li style="font-size:16px;"><strong>누적 순손익: <span style="color:{_color(period.net_pnl)};">'
+        f'{_won(period.net_pnl)} ({_percent(period.net_return_pct)})</span></strong></li>',
+    ]
+    if cash is not None:
+        items.append(f"<li>현재 주문가능금액: {_balance(cash)}</li>")
+    items.append("</ul>")
+    return items
+
+
+def _chart_img(cid: str, alt: str) -> str:
+    """CID 인라인 첨부 그래프 — width 속성은 Outlook용이다 (style만 주면 원본 크기로 벌어진다)."""
+    return (
+        f'<img src="cid:{escape(cid)}" width="{CHART_WIDTH_PX}" alt="{escape(alt)}" '
+        f'style="display:block; width:100%; max-width:{CHART_WIDTH_PX}px; height:auto; margin:10px 0 0;">'
+    )
+
+
 def _report_html(
     summary: DailySummary,
     monthly: MonthlySummary,
+    yearly: MonthlySummary,
     cash: float,
     notes: List[str],
     unsellable: List[UnsellableView],
     chart_cid: Optional[str] = None,
+    yearly_chart_cid: Optional[str] = None,
 ) -> str:
     parts = [
         '<div style="font-family:-apple-system,\'Malgun Gothic\',sans-serif; font-size:14px; color:#222222;">',
@@ -312,23 +351,21 @@ def _report_html(
     parts.extend(
         [
             f'<h3 style="font-size:15px; margin:20px 0 8px;">이번 달 누적 ({summary.day:%Y-%m} 기준)</h3>',
-            '<ul style="margin:0; padding-left:18px; color:#333333;">',
-            f'<li>누적 실현손익: <span style="color:{_color(monthly.realized_pnl)};">'
-            f'{_won(monthly.realized_pnl)} ({_percent(monthly.return_pct)})</span></li>',
-            f'<li>누적 수수료·세금: <span style="color:{COLOR_LOSS};">{_won(-monthly.fees)}</span></li>',
-            f'<li style="font-size:16px;"><strong>누적 순손익: <span style="color:{_color(monthly.net_pnl)};">'
-            f'{_won(monthly.net_pnl)} ({_percent(monthly.net_return_pct)})</span></strong></li>',
-            f"<li>현재 주문가능금액: {_balance(cash)}</li>",
-            "</ul>",
+            *_cumulative_items(monthly, cash),
         ]
     )
-
     if chart_cid:
-        # width 속성은 Outlook용 — style만 주면 원본 크기로 벌어진다
-        parts.append(
-            f'<img src="cid:{escape(chart_cid)}" width="{CHART_WIDTH_PX}" alt="이번 달 누적 순손익 추이" '
-            f'style="display:block; width:100%; max-width:{CHART_WIDTH_PX}px; height:auto; margin:10px 0 0;">'
-        )
+        parts.append(_chart_img(chart_cid, "이번 달 누적 순손익 추이"))
+
+    # 주문가능금액은 기간과 무관한 값이라 월 블록에만 둔다
+    parts.extend(
+        [
+            f'<h3 style="font-size:15px; margin:20px 0 8px;">올해 누적 ({summary.day:%Y}년 기준)</h3>',
+            *_cumulative_items(yearly),
+        ]
+    )
+    if yearly_chart_cid:
+        parts.append(_chart_img(yearly_chart_cid, "올해 달별 누적 순손익 추이"))
 
     if unsellable:
         parts.append(

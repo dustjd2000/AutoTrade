@@ -184,6 +184,10 @@ def make_workflow(unsettled_sells=False):
                 realized_pnl=1000.0, fees=100.0
             ),
             monthly_cumulative_series=lambda year, month, up_to: [],
+            yearly_summary=lambda year, up_to: MonthlySummary(
+                realized_pnl=98700.0, fees=7400.0
+            ),
+            yearly_cumulative_series=lambda year, up_to: [],
         ),
         email=email,
     )

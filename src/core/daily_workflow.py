@@ -52,8 +52,9 @@ BUY_DROPPABLE_STATUSES = (BUY_PENDING_STATUS, BUY_ORDERED_STATUS)
 # 체크 열은 비운다. 남은 미체결분만 골라 취소하면 이미 체결된 몫까지 덮어쓰기 때문이다.
 BUY_PARTIAL_STATUS = templates.BUY_OUTCOME_LABELS[BuyOutcome.PARTIALLY_FILLED]
 
-# 리포트 메일에 인라인 첨부되는 월 누적 그래프의 Content-ID.
+# 리포트 메일에 인라인 첨부되는 누적 그래프의 Content-ID (월: 날짜별, 연: 달별).
 MONTHLY_CHART_CID = "monthly-cumulative"
+YEARLY_CHART_CID = "yearly-cumulative"
 
 
 @dataclass
@@ -956,30 +957,44 @@ class DailyWorkflow:
 
         summary = self.trade_store.daily_summary(today)
         monthly = self.trade_store.monthly_summary(today.year, today.month, up_to=today)
+        yearly = self.trade_store.yearly_summary(today.year, up_to=today)
 
         snapshot = self.account.get_balance_snapshot()
-        # 월초 자산 추정치 = 현재 총자산 - 이번 달 순손익. 수수료·세금도 계좌에서 빠져나간
-        # 금액이므로 실현손익이 아니라 순손익을 되돌려야 월초 시점 자산에 맞는다.
+        # 기간초 자산 추정치 = 현재 총자산 - 그 기간의 순손익. 수수료·세금도 계좌에서 빠져나간
+        # 금액이므로 실현손익이 아니라 순손익을 되돌려야 기간 시작 시점 자산에 맞는다.
+        # **연 단위는 그만큼 더 거칠다** — 연중 입출금이 있으면 그 금액만큼 어긋난다 (PRD 5.11).
         monthly.base_asset = snapshot.total_asset - monthly.net_pnl
+        yearly.base_asset = snapshot.total_asset - yearly.net_pnl
 
-        # 그래프는 못 그려도(거래일 1일 이하 등) 리포트는 그대로 나간다
+        # 그래프는 못 그려도(그 기간 매매가 없는 등) 리포트는 그대로 나간다
         chart_png = chart.render_monthly_cumulative(
             self.trade_store.monthly_cumulative_series(today.year, today.month, up_to=today)
+        )
+        yearly_chart_png = chart.render_yearly_cumulative(
+            self.trade_store.yearly_cumulative_series(today.year, up_to=today)
         )
 
         subject, body, html = templates.daily_report_email(
             summary,
             monthly,
+            yearly,
             snapshot.cash,
             sync_failed=sync_failed,
             closed_out=closed_out,
             # 메일만 보는 상황에서도 매도되지 않고 남은 종목을 알 수 있어야 한다
             unsellable=self.engine.unsellable_snapshot(),
             chart_cid=MONTHLY_CHART_CID if chart_png else None,
+            yearly_chart_cid=YEARLY_CHART_CID if yearly_chart_png else None,
         )
-        self.email.send(
-            subject, body, html, images={MONTHLY_CHART_CID: chart_png} if chart_png else None
-        )
+        images = {
+            cid: png
+            for cid, png in (
+                (MONTHLY_CHART_CID, chart_png),
+                (YEARLY_CHART_CID, yearly_chart_png),
+            )
+            if png
+        }
+        self.email.send(subject, body, html, images=images or None)
         logger.info("Daily report email sent for %s", today)
 
     def _sync_fills(self, today: date) -> bool:
