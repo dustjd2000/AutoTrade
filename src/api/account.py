@@ -30,6 +30,11 @@ class Position:
     # 매도가능수량. 미결제·미체결 매도 주문이 걸려 있으면 보유수량보다 적다.
     # None은 '응답에서 읽지 못했다'는 뜻이며, 0(정말로 팔 수 없음)과 구분해야 한다.
     sellable_quantity: Optional[int] = None
+    # 키움 잔고 응답이 주는 실제 비용. None은 '응답에서 읽지 못했다'는 뜻이며
+    # 0.0(비용 없음)과 구분해야 한다 — sellable_quantity와 같은 규약이다.
+    # 못 읽으면 표시용 순손익은 절사 규칙으로 계산한다 (src/risk/manager.py).
+    buy_fee: Optional[float] = None      # 매입수수료 — 이미 낸 확정값
+    sell_cost: Optional[float] = None    # 예상 매도수수료 + 세금 (키움 추정)
 
     @property
     def unrealized_pnl(self) -> float:
@@ -77,11 +82,33 @@ def _first_present(row: Dict, *keys: str):
     return None
 
 
+def _fee_fields(row: Dict) -> tuple:
+    """잔고 행에서 매입수수료와 예상 매도비용(수수료+세금)을 뽑는다.
+
+    키움이 이 필드들을 주는지는 실계좌 응답으로 확인되지 않았다 (2026-09-01 시점에
+    보유 종목이 없어 확인 불가). 못 찾으면 (None, None)을 돌려주고 호출부가
+    절사 규칙 계산으로 폴백한다 — 실측 오차가 1원 이내라 실질 차이는 없다.
+    """
+    buy_fee = _first_present(row, "pur_cmsn", "buy_cmsn", "pchs_cmsn")
+    sell_cmsn = _first_present(row, "sell_cmsn", "evlt_cmsn", "sl_cmsn")
+    tax = _first_present(row, "tax", "sell_tax", "evlt_tax")
+
+    # 매도비용은 수수료와 세금이 둘 다 있어야 의미가 있다 — 한쪽만 있으면 폴백이 낫다
+    sell_cost = (
+        to_float(sell_cmsn) + to_float(tax)
+        if sell_cmsn is not None and tax is not None
+        else None
+    )
+    return (to_float(buy_fee) if buy_fee is not None else None), sell_cost
+
+
 class AccountClient:
     def __init__(self, settings: Settings, auth: AuthClient):
         self.settings = settings
         self.auth = auth
         self._client = KiwoomClient(settings, auth)
+        # 잔고는 5초마다 돌아서, 필드를 못 찾는다는 경고를 매번 남기면 로그가 묻힌다
+        self._logged_missing_fees = False
 
     def get_balance_snapshot(self) -> BalanceSnapshot:
         return BalanceSnapshot(cash=self.get_cash(), positions=self.get_positions())
@@ -132,6 +159,7 @@ class AccountClient:
             sellable = _first_present(
                 row, "trde_able_qty", "ord_psbl_qty", "sll_able_qty", "sell_able_qty"
             )
+            buy_fee, sell_cost = _fee_fields(row)
             positions[ticker] = Position(
                 ticker=ticker,
                 quantity=quantity,
@@ -141,6 +169,8 @@ class AccountClient:
                 current_price=abs(to_float(_first_present(row, "cur_prc", "prpr", "now_pric"))),
                 name=str(name).strip() if name else None,
                 sellable_quantity=to_int(sellable) if sellable is not None else None,
+                buy_fee=buy_fee,
+                sell_cost=sell_cost,
             )
 
         # 응답은 왔는데 한 건도 해석하지 못한 상태를 조용히 넘기면 '보유 없음'으로 읽혀
@@ -150,6 +180,19 @@ class AccountClient:
                 "잔고 %d행을 받았지만 보유 종목을 하나도 해석하지 못했습니다. "
                 "응답 필드명이 바뀌었을 수 있습니다 — scripts/check_balance.py로 확인하세요. 첫 행 키: %s",
                 len(rows),
+                list(rows[0].keys()),
+            )
+
+        # 필드명을 모르면 다음에 후보를 넓힐 수 없다 — 실제 응답 키를 한 번 남겨 둔다
+        if (
+            positions
+            and not self._logged_missing_fees
+            and all(p.buy_fee is None and p.sell_cost is None for p in positions.values())
+        ):
+            self._logged_missing_fees = True
+            logger.warning(
+                "잔고 응답에서 수수료·세금 필드를 찾지 못해 순손익을 자체 계산합니다. "
+                "첫 행 키: %s",
                 list(rows[0].keys()),
             )
         return positions

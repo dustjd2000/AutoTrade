@@ -8,6 +8,7 @@ def make_client(response):
     client.settings = SimpleNamespace()
     client.auth = SimpleNamespace()
     client._client = SimpleNamespace(request=lambda *a, **kw: (response, {}))
+    client._logged_missing_fees = False   # __new__로 만들어 __init__을 건너뛴다
     return client
 
 
@@ -140,3 +141,63 @@ def test_unparsable_rows_are_logged_as_an_error(caplog):
         assert client.get_positions() == {}
 
     assert "하나도 해석하지 못했습니다" in caplog.text
+
+
+def test_get_positions_reads_the_fee_fields_when_present():
+    """키움이 수수료·세금을 주면 그대로 담는다 — 매도 비용은 수수료+세금 합이다."""
+    client = make_client(
+        {
+            "acnt_evlt_remn_indv_tot": [
+                {
+                    "stk_cd": "A047050",
+                    "rmnd_qty": "000000000000015",
+                    "pur_pric": "000000000055600",
+                    "cur_prc": "000000056400",
+                    "pur_cmsn": "000000000120",
+                    "sell_cmsn": "000000000120",
+                    "tax": "000000001692",
+                }
+            ]
+        }
+    )
+
+    held = client.get_positions()["047050"]
+
+    assert held.buy_fee == 120.0
+    assert held.sell_cost == 1812.0   # 매도수수료 120 + 세금 1692
+
+
+def test_get_positions_leaves_fees_none_when_absent():
+    """필드가 없으면 None — 0(비용 없음)과 구분해야 폴백 계산으로 넘어간다."""
+    client = make_client(
+        {
+            "acnt_evlt_remn_indv_tot": [
+                {
+                    "stk_cd": "A047050",
+                    "rmnd_qty": "000000000000015",
+                    "pur_pric": "000000000055600",
+                    "cur_prc": "000000056400",
+                }
+            ]
+        }
+    )
+
+    held = client.get_positions()["047050"]
+
+    assert held.buy_fee is None
+    assert held.sell_cost is None
+
+
+def test_missing_fee_fields_are_logged_once(caplog):
+    """잔고는 5초마다 돌므로 매번 남기면 로그가 묻힌다 — 첫 행 키를 한 번만 남긴다."""
+    client = make_client(
+        {"acnt_evlt_remn_indv_tot": [{"stk_cd": "A047050", "rmnd_qty": "1", "pur_pric": "100"}]}
+    )
+
+    with caplog.at_level("WARNING"):
+        client.get_positions()
+        client.get_positions()
+
+    hits = [r for r in caplog.records if "수수료" in r.message]
+    assert len(hits) == 1
+    assert "stk_cd" in hits[0].getMessage()   # 실제 응답 키를 남겨야 다음에 후보를 넓힐 수 있다
