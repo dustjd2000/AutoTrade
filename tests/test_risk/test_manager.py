@@ -4,7 +4,15 @@ import pytest
 
 from src.api.account import BalanceSnapshot, Position
 from src.core.events import ExitReason, OrderRequest, OrderResult, OrderSide, OrderStatus, OrderType
-from src.risk.manager import RiskManager, exit_trigger_price, net_return, portfolio_net_return
+from src.risk.manager import (
+    RiskManager,
+    exit_trigger_price,
+    net_return,
+    portfolio_net_pnl,
+    portfolio_net_return,
+    position_costs,
+    position_net_pnl,
+)
 
 
 def make_manager(
@@ -319,3 +327,83 @@ def test_approve_allows_buy_within_total_exposure_ratio():
     )
 
     assert manager.approve(request, positions, reference_price=100_000.0) is True
+
+
+# ── 표시용 순손익 (슬리피지 없음, 절사 규칙 재현) ──────────────
+# 2026-09-01 실매매 3건 — (평단, 현재가, 수량, 실제 순손익)
+# 실제 순손익 = 실현손익 - 실제 매수수수료 - 실제 매도수수료 - 실제 세금
+REAL_FILLS = [
+    ("047050", 55600.0, 56400.0, 15, 10068.0),   # 12000 - 120 - 120 - 1692
+    ("012330", 453000.0, 447500.0, 1, -6514.0),  # -5500 - 60 - 60 - 894
+    ("161390", 67100.0, 66900.0, 12, -4245.0),   # -2400 - 120 - 120 - 1605
+]
+
+
+def fill_position(ticker, avg, cur, qty):
+    return Position(ticker=ticker, quantity=qty, avg_price=avg, current_price=cur)
+
+
+@pytest.mark.parametrize("ticker,avg,cur,qty,actual", REAL_FILLS)
+def test_net_pnl_matches_real_fills_within_one_won(ticker, avg, cur, qty, actual):
+    """절사 규칙 폴백이 실제 체결 결과와 1원 이내로 맞아야 한다."""
+    pnl = position_net_pnl(fill_position(ticker, avg, cur, qty), 0.00015, 0.002)
+    assert abs(pnl - actual) <= 1.0, f"{ticker}: {pnl} vs {actual}"
+
+
+def test_commission_is_truncated_to_ten_won():
+    """키움은 매매수수료를 10원 단위로 절사한다 — 453,000원이면 67.95원이 아니라 60원."""
+    position = fill_position("012330", 453000.0, 453000.0, 1)
+    # 매수 60 + 매도 60 + 세금 ⌊453000*0.002⌋=906
+    assert position_costs(position, 0.00015, 0.002) == 1026.0
+
+
+def test_kiwoom_values_take_precedence_over_the_formula():
+    """키움이 실제 비용을 주면 절사 계산 대신 그 값을 쓴다."""
+    position = fill_position("047050", 55600.0, 56400.0, 15)
+    position.buy_fee = 100.0
+    position.sell_cost = 200.0
+    assert position_costs(position, 0.00015, 0.002) == 300.0
+
+
+def test_portfolio_net_pnl_sums_positions_and_divides_by_cost():
+    """합산 비율의 분모는 매입금액 — portfolio_net_return과 같은 기준이라야 나란히 읽힌다."""
+    positions = [fill_position(t, a, c, q) for t, a, c, q, _ in REAL_FILLS]
+
+    amount, ratio = portfolio_net_pnl(positions, 0.00015, 0.002)
+
+    assert amount == pytest.approx(-692.0, abs=1.0)
+    cost = 55600 * 15 + 453000 * 1 + 67100 * 12
+    assert ratio == pytest.approx(amount / cost)
+
+
+def test_portfolio_net_pnl_skips_positions_without_a_price():
+    """현재가 0을 그대로 넣으면 -100%로 잡힌다 — portfolio_net_return과 같은 방어다."""
+    positions = [
+        fill_position("047050", 55600.0, 56400.0, 15),
+        fill_position("000000", 10000.0, 0.0, 10),
+    ]
+
+    amount, ratio = portfolio_net_pnl(positions, 0.00015, 0.002)
+
+    assert amount == pytest.approx(10068.0, abs=1.0)
+    assert ratio == pytest.approx(10068.0 / (55600 * 15), abs=1e-6)
+
+
+def test_portfolio_net_pnl_returns_none_ratio_when_nothing_to_measure():
+    assert portfolio_net_pnl([], 0.00015, 0.002) == (0.0, None)
+
+
+def test_manager_exposes_net_pnl_with_its_own_rates():
+    manager = make_manager(commission_rate=0.00015, tax_rate=0.002)
+    position = fill_position("047050", 55600.0, 56400.0, 15)
+
+    assert manager.position_net_pnl(position) == pytest.approx(10068.0, abs=1.0)
+    assert manager.portfolio_net_pnl([position])[0] == pytest.approx(10068.0, abs=1.0)
+
+
+def test_net_pnl_ignores_slippage():
+    """표시용이라 슬리피지를 빼지 않는다 — 판정(portfolio_net_return)과 다른 점이다."""
+    manager = make_manager(commission_rate=0.0, tax_rate=0.0, slippage_rate=0.5)
+    position = fill_position("047050", 1000.0, 1100.0, 10)
+
+    assert manager.position_net_pnl(position) == pytest.approx(1000.0)

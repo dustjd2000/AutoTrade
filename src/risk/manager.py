@@ -1,5 +1,6 @@
 import logging
-from typing import Dict, Iterable, List, Optional
+import math
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from src.api.account import BalanceSnapshot, Position
 from src.core.events import ExitReason, OrderRequest, OrderResult, OrderSide, OrderStatus
@@ -75,6 +76,72 @@ def portfolio_net_return(
     return (proceeds - cost * (1 + commission_rate)) / cost
 
 
+# --- 표시 전용 (슬리피지 없음) --------------------------------------------
+# 위의 net_return / portfolio_net_return은 익절/손절 **판정**용이라 슬리피지를 포함한다.
+# 아래 함수들은 화면에 찍는 값이라 슬리피지를 빼고, 대신 키움의 절사 규칙을 재현한다.
+# 슬리피지 0.1%는 세율 오차(0.02%p)의 5배라, 표시값에 넣으면 가장 근거가 약한 가정이
+# 화면 숫자를 지배한다 (설계 문서 2026-09-01).
+
+
+def _truncated_fee(amount: float, rate: float) -> float:
+    """매매수수료 — 키움은 10원 단위로 절사한다 (매도 49건 실측, 2026-09-01)."""
+    return math.floor(amount * rate / 10) * 10
+
+
+def position_costs(position: Position, commission_rate: float, tax_rate: float) -> float:
+    """이 종목을 지금 팔았을 때 나가는 비용 — 매수·매도 수수료와 매도세금의 합.
+
+    키움 잔고 응답이 실제 비용을 주면(`buy_fee`/`sell_cost`) 그 값을 쓰고, 없으면
+    절사 규칙으로 계산한다. 세금은 `0.15%+0.05%`로 쪼개지 않고 `tax_rate` 한 값으로
+    절사한다 — 쪼개면 1원 더 정확하지만 TAX_PERCENT 설정을 무시하게 된다.
+    """
+    buy_amount = position.avg_price * position.quantity
+    sell_amount = position.current_price * position.quantity
+
+    buy_fee = (
+        position.buy_fee
+        if position.buy_fee is not None
+        else _truncated_fee(buy_amount, commission_rate)
+    )
+    sell_cost = (
+        position.sell_cost
+        if position.sell_cost is not None
+        else _truncated_fee(sell_amount, commission_rate) + math.floor(sell_amount * tax_rate)
+    )
+    return buy_fee + sell_cost
+
+
+def position_net_pnl(position: Position, commission_rate: float, tax_rate: float) -> float:
+    """수수료·세금을 뺀 순손익 금액 (원)."""
+    gross = (position.current_price - position.avg_price) * position.quantity
+    return gross - position_costs(position, commission_rate, tax_rate)
+
+
+def portfolio_net_pnl(
+    positions: Iterable[Position],
+    commission_rate: float,
+    tax_rate: float,
+) -> Tuple[float, Optional[float]]:
+    """보유 종목 전체의 (순손익 금액, 순손익률).
+
+    분모는 매입금액이라 `portfolio_net_return`과 같은 기준이다 — 요약줄에서 두 값이
+    나란히 읽혀야 한다. 평단·수량·현재가 중 하나라도 0인 종목은 뺀다: 현재가 0은
+    조회 실패나 장 전 상태인데 그대로 넣으면 -100%로 잡힌다.
+    계산할 종목이 하나도 없으면 비율은 None — '판정하지 않는다'는 뜻이다.
+    """
+    total = 0.0
+    cost = 0.0
+    for position in positions:
+        if position.avg_price <= 0 or position.quantity <= 0 or position.current_price <= 0:
+            continue
+        total += position_net_pnl(position, commission_rate, tax_rate)
+        cost += position.avg_price * position.quantity
+
+    if cost <= 0:
+        return 0.0, None
+    return total, total / cost
+
+
 class RiskManager:
     def __init__(
         self,
@@ -147,6 +214,18 @@ class RiskManager:
         return portfolio_net_return(
             positions, self.commission_rate, self.tax_rate, self.slippage_rate
         )
+
+    def position_net_pnl(self, position: Position) -> float:
+        """종목 순손익 금액 (표시용 — 슬리피지 없음)."""
+        return position_net_pnl(position, self.commission_rate, self.tax_rate)
+
+    def portfolio_net_pnl(self, positions: Iterable[Position]) -> Tuple[float, Optional[float]]:
+        """보유 종목 합산 (순손익 금액, 순손익률) — 표시용이라 슬리피지를 빼지 않는다.
+
+        판정에 쓰는 `portfolio_return`과는 슬리피지만큼 다르다. 표시값이 익절선에
+        닿아도 실제 매도는 조금 뒤에 일어난다 — 요약줄 툴팁이 이걸 알린다.
+        """
+        return portfolio_net_pnl(positions, self.commission_rate, self.tax_rate)
 
     def check_portfolio_exit(self, positions: Iterable[Position]) -> Optional[ExitReason]:
         """보유 종목 **전체**가 익절/손절 라인에 도달했는지 확인한다.
