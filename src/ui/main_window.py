@@ -67,7 +67,7 @@ COLOR_LOSS = "#6ba3ff"
 HOLDINGS_REFRESH_MS = 2000
 # 0번 열은 '선택 매도' 대상 체크 — 표가 NoEditTriggers라 셀 체크박스는 클릭으로 토글되지
 # 않는다(실측). 체크 표시만 아이템으로 그리고 토글은 cellClicked에서 직접 처리한다.
-HOLDINGS_COLUMNS = ("선택", "종목", "수량", "평단", "현재가", "손익")
+HOLDINGS_COLUMNS = ("선택", "종목", "수량", "평단", "현재가", "순손익")
 HOLDINGS_CHECK_COLUMN = 0
 # 매도하지 못한 종목 — 보유 목록에서 제외된 건은 보유 종목 표에 나타나지 않으므로
 # 사유와 함께 따로 보여준다 (engine.UnsellableView)
@@ -783,14 +783,16 @@ class MainWindow(QMainWindow):
         table = self._holdings_view
         table.setRowCount(len(rows))
         for row, held in enumerate(rows):
-            color = COLOR_PROFIT if held.pnl > 0 else COLOR_LOSS if held.pnl < 0 else COLOR_TEXT
+            color = (
+                COLOR_PROFIT if held.net_pnl > 0 else COLOR_LOSS if held.net_pnl < 0 else COLOR_TEXT
+            )
             cells = (
                 (held.label, Qt.AlignmentFlag.AlignLeft, COLOR_TEXT),
                 (f"{held.quantity:,}", Qt.AlignmentFlag.AlignRight, COLOR_TEXT),
                 (f"{held.avg_price:,.0f}", Qt.AlignmentFlag.AlignRight, COLOR_TEXT),
                 (f"{held.current_price:,.0f}", Qt.AlignmentFlag.AlignRight, COLOR_TEXT),
                 (
-                    f"{held.pnl:+,.0f} ({held.pnl_percent:+.2f}%)",
+                    f"{held.net_pnl:+,.0f} ({held.net_pnl_percent:+.2f}%)",
                     Qt.AlignmentFlag.AlignRight,
                     color,
                 ),
@@ -815,6 +817,11 @@ class MainWindow(QMainWindow):
             table.setItem(row, HOLDINGS_CHECK_COLUMN, check)
 
         self._holdings_hint.setText(self._holdings_summary(rows))
+        self._holdings_hint.setToolTip(
+            "표시값은 수수료·세금을 뺀 순손익입니다 (현재가에 팔린다고 가정).\n"
+            "익절/손절 판정은 여기에 시장가 슬리피지까지 더 빼고 하므로, 표시값이\n"
+            "익절선에 닿아도 실제 매도는 조금 뒤에 일어납니다."
+        )
         # 체크된 종목이 늘거나 줄면 '선택 매도' 버튼의 활성 여부가 달라진다
         self._set_actions_enabled(self._actions_enabled)
         # 표를 만드는 도중에 불리는 첫 호출에서는 아래 두 표가 아직 없다
@@ -857,10 +864,10 @@ class MainWindow(QMainWindow):
         if not rows:
             return "보유 종목이 없습니다."
 
-        total_pnl = sum(held.pnl for held in rows)
-        cost = sum(held.avg_price * held.quantity for held in rows)
-        percent = f" ({total_pnl / cost * 100:+.2f}%)" if cost > 0 else ""
-        return f"{len(rows)}종목 · 평가손익 {total_pnl:+,.0f}원{percent}{self._exit_progress()}"
+        # 표의 종목별 순손익과 같은 식으로 계산된 값이다 — UI가 따로 더하지 않는다
+        amount, ratio = self._engine_thread.portfolio_net_pnl()
+        percent = f" ({ratio * 100:+.2f}%)" if ratio is not None else ""
+        return f"{len(rows)}종목 · 순손익 {amount:+,.0f}원{percent}{self._exit_progress()}"
 
     def _exit_progress(self) -> str:
         """익절/손절 판정에 실제로 쓰이는 합산 순손익률.
