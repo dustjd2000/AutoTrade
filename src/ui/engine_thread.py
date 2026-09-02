@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from concurrent.futures import Future
 from typing import Iterable, Optional
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -36,8 +35,6 @@ class EngineThread(QThread):
         self._settings = settings
         self._runtime: Optional[runtime_module.Runtime] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._action_busy = False
-        self._action_future: Optional[Future] = None
 
     def run(self) -> None:
         loop = asyncio.new_event_loop()
@@ -45,6 +42,9 @@ class EngineThread(QThread):
         asyncio.set_event_loop(loop)
         try:
             self._runtime = runtime_module.build_runtime(self._settings)
+            # 스케줄 실행과 버튼 실행이 같은 통로를 타므로, 자동 실행 상태도 UI에 그대로 뜬다
+            self._runtime.runner.on_started = self.action_started.emit
+            self._runtime.runner.on_finished = self.action_finished.emit
             self.started_ok.emit()
             loop.run_until_complete(runtime_module.run(self._runtime))
         except Exception as e:
@@ -126,73 +126,48 @@ class EngineThread(QThread):
     # ── 즉시 실행 ────────────────────────────────────────────
     @property
     def action_busy(self) -> bool:
-        return self._action_busy
+        runtime = self._runtime
+        return runtime is not None and runtime.runner is not None and runtime.runner.busy
 
     def run_action(self, action: str, tickers: Iterable[str] = ()) -> bool:
         """스케줄 시각과 무관하게 하루 흐름의 단계를 지금 실행한다.
 
-        주문을 내는 단계는 엔진 루프 스레드에서 실행해 실시간 시세 콜백과 직렬화하고
-        (같은 종목을 동시에 청산하는 경쟁 상태 방지), 오래 걸리는 수집·LLM·메일은
-        별도 스레드로 넘긴다. 예약에 성공하면 True — 완료는 action_finished로 알린다.
+        접수만 하고 곧바로 돌아온다 — 실행은 ActionRunner의 큐가 순서대로 맡는다.
+        이미 다른 단계가 도는 중이면 거부하지 않고 그 뒤에 붙는다. 완료는 action_finished로
+        알린다.
 
-        `tickers`는 '선택 매도'만 쓴다 (`manual_steps` 참고).
+        `submit`은 루프 스레드에서만 불러야 하므로 `call_soon_threadsafe`로 넘긴다. 결과를
+        기다리지 않는 이유는, 루프가 매수 같은 긴 단계를 돌고 있으면 UI가 그만큼 얼기
+        때문이다 — 중복 접수는 러너가 걸러내고 로그로 남긴다.
+
+        `tickers`는 '선택 매도'와 '선택 삭제'만 쓴다 (`manual_steps` 참고).
         """
         loop, runtime = self._loop, self._runtime
         if runtime is None or loop is None or not loop.is_running():
             logger.warning("엔진이 실행 중이 아니어서 즉시 실행할 수 없습니다.")
             return False
-        if self._action_busy:
-            logger.warning("이미 즉시 실행이 진행 중입니다. 완료 후 다시 시도하세요.")
-            return False
 
-        try:
-            steps = runtime_module.manual_steps(runtime, action, tickers)
-        except ValueError:
-            logger.error("알 수 없는 즉시 실행 액션: %s", action)
-            return False
-
-        self._action_busy = True
-        self._action_future = asyncio.run_coroutine_threadsafe(
-            self._run_action(action, steps), loop
-        )
+        loop.call_soon_threadsafe(runtime.runner.submit, action, tuple(tickers))
         return True
 
-    async def _run_action(self, action: str, steps) -> None:
-        self.action_started.emit(action)
-        loop = asyncio.get_running_loop()
-        try:
-            for step in steps:
-                logger.info("[즉시 실행] %s — 시작", step.label)
-                if step.touches_orders:
-                    # 실시간 익절/손절 콜백과 겹치지 않도록 루프 스레드에서 직접 실행한다
-                    result = step.run()
-                    if asyncio.iscoroutine(result):
-                        await result
-                else:
-                    # 수집·LLM·메일은 수십 초가 걸려 루프를 막으면 WebSocket이 끊긴다
-                    await loop.run_in_executor(None, step.run)
-                logger.info("[즉시 실행] %s — 완료", step.label)
-            self.action_finished.emit(action, True, "")
-        except Exception as e:
-            logger.exception("[즉시 실행] 실행 중 오류가 발생했습니다: %s", action)
-            self.action_finished.emit(action, False, f"{type(e).__name__}: {e}")
-        finally:
-            self._action_busy = False
-
     def _await_action(self) -> None:
-        """진행 중인 즉시 실행을 중간에 끊지 않도록 완료를 기다린다.
+        """진행 중인 실행을 중간에 끊지 않도록 큐가 빌 때까지 기다린다.
 
         별도 스레드로 넘긴 단계는 루프가 살아 있어 정지 요청이 즉시 처리되므로,
         기다려주지 않으면 수집·LLM·메일이 중간에 버려진 채 스레드만 정리된다.
         """
-        future = self._action_future
-        if future is None or future.done():
+        loop, runtime = self._loop, self._runtime
+        if runtime is None or runtime.runner is None or loop is None or not loop.is_running():
             return
-        logger.warning("즉시 실행이 진행 중입니다 — 최대 %d초까지 완료를 기다립니다.", ACTION_WAIT_SECONDS)
+        if not runtime.runner.busy:
+            return
+
+        logger.warning("실행이 진행 중입니다 — 최대 %d초까지 완료를 기다립니다.", ACTION_WAIT_SECONDS)
         try:
+            future = asyncio.run_coroutine_threadsafe(runtime.runner.wait_idle(), loop)
             future.result(timeout=ACTION_WAIT_SECONDS)
         except Exception:
-            logger.warning("즉시 실행 완료를 기다리지 못했습니다. 정지를 계속 진행합니다.")
+            logger.warning("실행 완료를 기다리지 못했습니다. 정지를 계속 진행합니다.")
 
     def stop(self) -> None:
         """구동 루프에 정지를 요청하고 스레드가 끝날 때까지 기다린다."""
