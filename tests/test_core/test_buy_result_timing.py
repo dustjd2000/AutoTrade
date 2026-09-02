@@ -174,26 +174,55 @@ def test_records_without_ordered_rows_are_false_without_calling_the_api():
 # ── 감시 태스크 ─────────────────────────────────────────────
 import asyncio
 import threading
+import time
 from types import SimpleNamespace
 
 from src.core.runtime import watch_buy_result
 
+# `run_in_executor`는 진짜 OS 스레드를 넘나든다 — 그 스레드가 언제 끝나 결과가 이벤트
+# 루프로 돌아올지는 asyncio가 보장하지 않는다. `await asyncio.sleep(0)`을 정해진 횟수만
+# 미는 방식은 그 스레드 완료를 그냥 운에 맡기는 것이라, 느린 기기나 다른 이벤트 루프
+# 구현(예: Windows의 ProactorEventLoop)에서 언제든 깨질 수 있는 경쟁 상태다. 아래
+# 헬퍼들은 대신 실제로 짧게(10ms) 쉬며 신호(응답이 소진됐거나 제출이 일어났는지)를
+# 직접 확인하고, 신호를 본 뒤에도 부작용이 더 없는지 짧게 더 지켜본 다음에만 멈춘다.
+# 진짜 회귀(응답이 끝내 돌아오지 않는 경우)는 `timeout`에 걸려 그대로 테스트 실패로
+# 드러난다 — 시간을 넉넉히 줄 뿐 결과를 추측하지 않는다.
+WATCH_POLL_SECONDS = 0.01
+WATCH_TIMEOUT_SECONDS = 2.0
+WATCH_SETTLE_SECONDS = 0.05
 
-def run_watch(filled_sequence, submitted, cycles=5):
-    """buy_orders_filled가 순서대로 값을 돌려주게 하고 감시를 몇 바퀴 돌린다."""
+
+def run_watch(filled_sequence, submitted, timeout=WATCH_TIMEOUT_SECONDS, settle=WATCH_SETTLE_SECONDS):
+    """buy_orders_filled가 순서대로 값을 돌려주게 하고 감시가 실제로 반응할 때까지 돈다.
+
+    `filled_sequence`의 값이 `None`이면 조회가 실패한 것으로 보고 예외를 던진다.
+    """
     answers = list(filled_sequence)
 
+    def check():
+        value = answers.pop(0) if answers else False
+        if value is None:
+            raise RuntimeError("조회 실패")
+        return value
+
     runtime = SimpleNamespace(
-        workflow=SimpleNamespace(
-            buy_orders_filled=lambda: answers.pop(0) if answers else False
-        ),
+        workflow=SimpleNamespace(buy_orders_filled=check),
         runner=SimpleNamespace(submit=lambda action: submitted.append(action) or True),
     )
 
     async def scenario():
         task = asyncio.create_task(watch_buy_result(runtime, interval_seconds=0))
-        for _ in range(cycles):
-            await asyncio.sleep(0)
+        deadline = time.monotonic() + timeout
+        settle_until = None
+        while time.monotonic() < deadline:
+            await asyncio.sleep(WATCH_POLL_SECONDS)
+            if settle_until is None and (not answers or submitted):
+                # 기대한 신호(응답 소진 또는 제출)를 봤다 — 그래도 그 뒤에 재접수 같은
+                # 부작용이 더 없는지 짧게 더 지켜본다 (FIX 4의 '하루 한 번' 가드가 실제로
+                # 막는지는 이 추가 관찰 구간이 있어야 드러난다).
+                settle_until = time.monotonic() + settle
+            if settle_until is not None and time.monotonic() >= settle_until:
+                break
         task.cancel()
         try:
             await task
@@ -218,31 +247,7 @@ def test_watch_stays_quiet_while_orders_are_unfilled():
 def test_watch_survives_a_failing_check():
     """판정이 터져도 감시는 계속 돌아야 한다 — 다음 바퀴에 다시 본다."""
     submitted = []
-    answers = [None, True]  # None이면 예외를 던진다
-
-    def check():
-        value = answers.pop(0) if answers else False
-        if value is None:
-            raise RuntimeError("조회 실패")
-        return value
-
-    runtime = SimpleNamespace(
-        workflow=SimpleNamespace(buy_orders_filled=check),
-        runner=SimpleNamespace(submit=lambda action: submitted.append(action) or True),
-    )
-
-    async def scenario():
-        task = asyncio.create_task(watch_buy_result(runtime, interval_seconds=0))
-        for _ in range(6):
-            await asyncio.sleep(0)
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-    asyncio.run(scenario())
-
+    run_watch([None, True], submitted)  # None이면 예외를 던진다
     assert submitted == ["cancel_unfilled"]
 
 
@@ -266,8 +271,9 @@ def test_buy_orders_filled_check_runs_off_the_loop_thread():
     async def scenario():
         threads["loop"] = threading.get_ident()
         task = asyncio.create_task(watch_buy_result(runtime, interval_seconds=0))
-        for _ in range(5):
-            await asyncio.sleep(0)
+        deadline = time.monotonic() + WATCH_TIMEOUT_SECONDS
+        while "check" not in threads and time.monotonic() < deadline:
+            await asyncio.sleep(WATCH_POLL_SECONDS)
         task.cancel()
         try:
             await task
@@ -286,5 +292,5 @@ def test_watch_submits_only_once_per_day_even_if_still_true():
     같은 날짜 안에서는 재접수하지 않는다 — 아니면 15:15까지 분당 메일이 나간다.
     """
     submitted = []
-    run_watch([True, True, True, True], submitted, cycles=8)
+    run_watch([True, True, True, True], submitted)
     assert submitted == ["cancel_unfilled"]
