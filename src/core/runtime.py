@@ -7,7 +7,7 @@ import asyncio
 import inspect
 import logging
 from dataclasses import dataclass
-from datetime import datetime, time as dt_time
+from datetime import date, datetime, time as dt_time
 from typing import Callable, List, Optional
 
 from config.settings import Settings
@@ -345,7 +345,8 @@ async def watch_closeout_report(
             closed_at.strftime("%H:%M:%S"),
         )
         try:
-            # SMTP·체결조회가 몇 초 걸리므로 이벤트 루프를 막지 않는다 (_off_loop 참고)
+            # SMTP·체결조회가 몇 초 걸리므로 이벤트 루프를 막지 않는다
+            # (ActionRunner가 ManualStep.touches_orders를 보고 배분하는 것과 같은 이유)
             await asyncio.get_running_loop().run_in_executor(
                 None, lambda: runtime.workflow.send_final_report(closed_out=True)
             )
@@ -368,13 +369,27 @@ async def watch_buy_result(
 
     발송은 직접 부르지 않고 실행 통로에 접수한다. 09:08 매수가 아직 도는 중이면 그 뒤에서
     기다리고, 실시간 익절·손절 감시와도 직렬화된다. 이미 큐에 있으면 러너가 걸러낸다.
-    메일이 나가면 기록 파일이 지워지므로 10:10·15:15가 같은 메일을 다시 보내지 않는다.
+    메일이 나가면 기록 파일이 지워지므로 10:10·15:15가 같은 메일을 다시 보내지 않는다 —
+    다만 그 삭제(`_clear_buy_records`)가 `OSError`로 실패하면(Windows에서 백신·OneDrive가
+    파일을 잠근 경우 등) 판정이 계속 True로 남아 재접수를 시도할 수 있으므로, 하루 한 번
+    제출했으면 그 날짜 동안은 더 시도하지 않는다 (`watch_closeout_report`의 `reported_at`과
+    같은 구조).
     """
+    submitted_on: Optional[date] = None
     while True:
         await asyncio.sleep(interval_seconds)
 
+        today = date.today()
+        if submitted_on == today:
+            continue
+
         try:
-            if not runtime.workflow.buy_orders_filled():
+            # 체결내역 조회는 페이지네이션이 걸린 블로킹 requests 호출이라 이벤트 루프를
+            # 막으면 그동안 WebSocket PING 응답도, 실시간 익절/손절 콜백도 멈춘다.
+            filled = await asyncio.get_running_loop().run_in_executor(
+                None, runtime.workflow.buy_orders_filled
+            )
+            if not filled:
                 continue
         except Exception:
             logger.exception("매수 체결 확인에 실패했습니다 — 10:10 마무리에 맡깁니다.")
@@ -384,6 +399,7 @@ async def watch_buy_result(
             "접수한 매수가 전부 체결됐습니다 — %s을 기다리지 않고 매수 결과 메일을 발송합니다.",
             CANCEL_UNFILLED_TIME.strftime("%H:%M"),
         )
+        submitted_on = today
         if not runtime.runner.submit("cancel_unfilled"):
             logger.info("매수 결과 메일 발송이 이미 큐에 있어 건너뜁니다 (중복 접수 아님).")
 
@@ -398,7 +414,8 @@ async def watch_cash_refresh(
     """
     while True:
         await asyncio.sleep(interval_seconds)
-        # 네트워크 호출이 이벤트 루프를 막지 않도록 별도 스레드로 넘긴다 (_off_loop 참고)
+        # 네트워크 호출이 이벤트 루프를 막지 않도록 별도 스레드로 넘긴다
+        # (ActionRunner가 ManualStep.touches_orders를 보고 배분하는 것과 같은 이유)
         await asyncio.get_running_loop().run_in_executor(None, runtime.engine.refresh_cash)
 
 

@@ -173,6 +173,7 @@ def test_records_without_ordered_rows_are_false_without_calling_the_api():
 
 # ── 감시 태스크 ─────────────────────────────────────────────
 import asyncio
+import threading
 from types import SimpleNamespace
 
 from src.core.runtime import watch_buy_result
@@ -242,4 +243,48 @@ def test_watch_survives_a_failing_check():
 
     asyncio.run(scenario())
 
+    assert submitted == ["cancel_unfilled"]
+
+
+def test_buy_orders_filled_check_runs_off_the_loop_thread():
+    """체결내역 조회는 페이지네이션 걸린 블로킹 requests 호출이다 — 이벤트 루프에서
+
+    그대로 돌리면 그 사이 WebSocket PING 응답도, 실시간 익절/손절 콜백도 멈춘다
+    (`watch_closeout_report`·`watch_cash_refresh`와 같은 이유로 executor에 맡겨야 한다).
+    """
+    threads = {}
+
+    def fake_filled():
+        threads["check"] = threading.get_ident()
+        return False
+
+    runtime = SimpleNamespace(
+        workflow=SimpleNamespace(buy_orders_filled=fake_filled),
+        runner=SimpleNamespace(submit=lambda action: True),
+    )
+
+    async def scenario():
+        threads["loop"] = threading.get_ident()
+        task = asyncio.create_task(watch_buy_result(runtime, interval_seconds=0))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(scenario())
+
+    assert "check" in threads
+    assert threads["check"] != threads["loop"]
+
+
+def test_watch_submits_only_once_per_day_even_if_still_true():
+    """기록 삭제(`_clear_buy_records`)가 OSError로 실패해 판정이 계속 True로 남아도,
+
+    같은 날짜 안에서는 재접수하지 않는다 — 아니면 15:15까지 분당 메일이 나간다.
+    """
+    submitted = []
+    run_watch([True, True, True, True], submitted, cycles=8)
     assert submitted == ["cancel_unfilled"]

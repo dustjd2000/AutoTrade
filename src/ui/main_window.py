@@ -1567,10 +1567,10 @@ class MainWindow(QMainWindow):
     def _on_action_finished(self, action: str, ok: bool, message: str) -> None:
         label = ACTION_LABELS.get(action, action)
         if ok:
-            logger.info("[즉시 실행] %s — 종료", label)
-            self._statusbar.showMessage(f"즉시 실행 완료: {label}", 5000)
+            logger.info("[실행] %s — 종료", label)
+            self._statusbar.showMessage(f"실행 완료: {label}", 5000)
         else:
-            self._statusbar.showMessage(f"즉시 실행 실패: {label} — {message}", 8000)
+            self._statusbar.showMessage(f"실행 실패: {label} — {message}", 8000)
         # 엔진이 계속 돌고 있다면 버튼을 다시 열어준다
         self._set_actions_enabled(self._engine_thread is not None)
 

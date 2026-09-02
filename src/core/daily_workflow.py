@@ -706,6 +706,11 @@ class DailyWorkflow:
         않고** False다. 부분체결·미체결이 남았거나, 체결수량이 주문수량에 못 미치거나,
         조회 결과에 흔적조차 없는 주문이 있거나, 조회가 실패하면 역시 False — 그런 날은
         종전대로 10:10이 마무리한다.
+
+        ka10076이 한 주문에 체결마다 행을 하나씩 나눠 보내는 경우라면, 마지막 체결 전까지는
+        그 주문의 어느 한 행이 `unfilled_quantity > 0`을 계속 들고 있어 하루 종일 False로
+        남는다 — 조기 발송 대상에서 조용히 빠지고 10:10 마무리로 넘어갈 뿐이니 의도된
+        안전한 쪽이다. 고치려 들지 말 것.
         """
         state = self._read_buy_records(today or date.today())
         if state is None:
