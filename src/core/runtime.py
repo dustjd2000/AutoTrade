@@ -75,6 +75,11 @@ CLOSEOUT_CHECK_INTERVAL_SECONDS = 30
 # '보유중'으로 실린다 (DailyWorkflow._fill_buy_prices의 같은 시차 참고).
 CLOSEOUT_SETTLE_SECONDS = 60
 
+# 매수 체결 완료 감시 — 접수한 매수가 전부 체결됐으면 10:10을 기다리지 않고 결과 메일을 보낸다.
+# 판정이 체결내역 조회를 부르므로 시세 감시보다 넉넉한 주기를 쓴다. 결과 메일이 나가면
+# 기록 파일이 지워져 판정이 API를 부르지 않게 되므로, 하루 호출은 09:08~체결확인 구간에 그친다.
+BUY_RESULT_CHECK_INTERVAL_SECONDS = 60
+
 # 예수금 캐시 갱신 — 입금 등 장중 잔고 변동을 "총 매수가능 금액" UI 표시에 반영한다.
 # 시세 틱과 달리 예수금은 자연스러운 갱신 계기가 없어 별도 주기로 돈다.
 CASH_REFRESH_INTERVAL_SECONDS = 60
@@ -348,6 +353,41 @@ async def watch_closeout_report(
             logger.exception("전량 매도 결과 리포트 발송 실패 — 15:35 리포트에 맡깁니다.")
 
 
+async def watch_buy_result(
+    runtime: Runtime,
+    interval_seconds: float = BUY_RESULT_CHECK_INTERVAL_SECONDS,
+) -> None:
+    """접수한 매수가 전부 체결되면 10:10을 기다리지 않고 결과 메일을 보낸다.
+
+    주문 지정가를 허용 밴드 상단으로 올린 뒤로(2026-08-26) 접수 직후 전량 체결되는 날이
+    대부분인데, 결과 메일만 `CANCEL_UNFILLED_TIME`에 묶여 한 시간 늦게 나갔다. 매도 쪽
+    `watch_closeout_report`와 같은 구조다.
+
+    판정은 `DailyWorkflow.buy_orders_filled` — 체결내역 조회의 주문번호 대조다. 2026-09-01에
+    되돌린 잔고 대조와 달리 남의 물량에 속지 않는다 (PRD 10절).
+
+    발송은 직접 부르지 않고 실행 통로에 접수한다. 09:08 매수가 아직 도는 중이면 그 뒤에서
+    기다리고, 실시간 익절·손절 감시와도 직렬화된다. 이미 큐에 있으면 러너가 걸러낸다.
+    메일이 나가면 기록 파일이 지워지므로 10:10·15:15가 같은 메일을 다시 보내지 않는다.
+    """
+    while True:
+        await asyncio.sleep(interval_seconds)
+
+        try:
+            if not runtime.workflow.buy_orders_filled():
+                continue
+        except Exception:
+            logger.exception("매수 체결 확인에 실패했습니다 — 10:10 마무리에 맡깁니다.")
+            continue
+
+        logger.info(
+            "접수한 매수가 전부 체결됐습니다 — %s을 기다리지 않고 매수 결과 메일을 발송합니다.",
+            CANCEL_UNFILLED_TIME.strftime("%H:%M"),
+        )
+        if not runtime.runner.submit("cancel_unfilled"):
+            logger.info("매수 결과 메일 발송이 이미 큐에 있어 건너뜁니다 (중복 접수 아님).")
+
+
 async def watch_cash_refresh(
     runtime: Runtime,
     interval_seconds: float = CASH_REFRESH_INTERVAL_SECONDS,
@@ -402,6 +442,7 @@ async def run(runtime: Runtime) -> None:
     runner_task = asyncio.create_task(runtime.runner.run())
     watchdog = asyncio.create_task(watch_quote_stall(runtime))
     closeout_watch = asyncio.create_task(watch_closeout_report(runtime))
+    buy_result_watch = asyncio.create_task(watch_buy_result(runtime))
     cash_watch = asyncio.create_task(watch_cash_refresh(runtime))
     try:
         await asyncio.gather(runtime.ws_client.connect(), runtime.scheduler.run())
@@ -411,6 +452,7 @@ async def run(runtime: Runtime) -> None:
         runner_task.cancel()
         watchdog.cancel()
         closeout_watch.cancel()
+        buy_result_watch.cancel()
         cash_watch.cancel()
         request_stop(runtime)
         await runtime.ws_client.disconnect()

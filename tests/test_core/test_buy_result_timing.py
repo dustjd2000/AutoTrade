@@ -169,3 +169,77 @@ def test_records_without_ordered_rows_are_false_without_calling_the_api():
 
     assert workflow.buy_orders_filled(TODAY) is False
     assert called == []
+
+
+# ── 감시 태스크 ─────────────────────────────────────────────
+import asyncio
+from types import SimpleNamespace
+
+from src.core.runtime import watch_buy_result
+
+
+def run_watch(filled_sequence, submitted, cycles=5):
+    """buy_orders_filled가 순서대로 값을 돌려주게 하고 감시를 몇 바퀴 돌린다."""
+    answers = list(filled_sequence)
+
+    runtime = SimpleNamespace(
+        workflow=SimpleNamespace(
+            buy_orders_filled=lambda: answers.pop(0) if answers else False
+        ),
+        runner=SimpleNamespace(submit=lambda action: submitted.append(action) or True),
+    )
+
+    async def scenario():
+        task = asyncio.create_task(watch_buy_result(runtime, interval_seconds=0))
+        for _ in range(cycles):
+            await asyncio.sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(scenario())
+
+
+def test_watch_submits_cancel_unfilled_when_all_orders_are_filled():
+    submitted = []
+    run_watch([True], submitted)
+    assert submitted == ["cancel_unfilled"]
+
+
+def test_watch_stays_quiet_while_orders_are_unfilled():
+    submitted = []
+    run_watch([False, False, False], submitted)
+    assert submitted == []
+
+
+def test_watch_survives_a_failing_check():
+    """판정이 터져도 감시는 계속 돌아야 한다 — 다음 바퀴에 다시 본다."""
+    submitted = []
+    answers = [None, True]  # None이면 예외를 던진다
+
+    def check():
+        value = answers.pop(0) if answers else False
+        if value is None:
+            raise RuntimeError("조회 실패")
+        return value
+
+    runtime = SimpleNamespace(
+        workflow=SimpleNamespace(buy_orders_filled=check),
+        runner=SimpleNamespace(submit=lambda action: submitted.append(action) or True),
+    )
+
+    async def scenario():
+        task = asyncio.create_task(watch_buy_result(runtime, interval_seconds=0))
+        for _ in range(6):
+            await asyncio.sleep(0)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(scenario())
+
+    assert submitted == ["cancel_unfilled"]
