@@ -80,18 +80,13 @@ CLOSEOUT_SETTLE_SECONDS = 60
 CASH_REFRESH_INTERVAL_SECONDS = 60
 
 
-def _off_loop(func: Callable[[], None]):
-    """오래 걸리는 동기 작업을 별도 스레드로 넘기는 스케줄러 작업으로 감싼다.
+def _submit(runtime: "Runtime", action: str) -> Callable[[], None]:
+    """스케줄 잡을 실행 통로 접수로 바꾼다 — 버튼과 같은 큐를 탄다."""
 
-    데이터 수집(99종목)과 LLM 호출은 합쳐 30초 이상 걸린다. 이벤트 루프에서 그대로
-    실행하면 그 시간 동안 WebSocket PING에 응답하지 못해 서버가 연결을 끊는다.
-    주문·포지션을 건드리지 않는 작업만 이렇게 넘긴다.
-    """
+    def job() -> None:
+        runtime.runner.submit(action)
 
-    async def runner() -> None:
-        await asyncio.get_running_loop().run_in_executor(None, func)
-
-    return runner
+    return job
 
 
 def _trading_days_only(job, name: str):
@@ -130,6 +125,9 @@ class Runtime:
     scheduler: TimeScheduler
     ws_client: WebSocketClient
     workflow: DailyWorkflow
+    # 스케줄 잡과 UI 버튼이 공유하는 실행 통로. build_runtime이 Runtime을 만든 뒤에
+    # 채운다 — ActionRunner가 runtime을 참조해야 해서 순서를 뒤집을 수 없다.
+    runner: Optional[ActionRunner] = None
 
 
 def build_runtime(settings: Settings) -> Runtime:
@@ -190,26 +188,35 @@ def build_runtime(settings: Settings) -> Runtime:
     )
 
     # 매수/강제청산은 실시간 익절·손절 감시와 직렬화되도록 루프 스레드에서 그대로 실행하고,
-    # 오래 걸리는 수집·LLM·리포트는 루프를 막지 않도록 별도 스레드로 넘긴다.
-    # 모든 작업은 거래일에만 돌도록 감싼다 (_trading_days_only 참고).
+    # 오래 걸리는 수집·LLM·리포트는 루프를 막지 않도록 별도 스레드로 넘긴다 — 이 배분은
+    # 이제 ActionRunner가 ManualStep.touches_orders를 보고 결정한다.
+    # 모든 작업은 거래일에만 돌도록 감싼다 (_trading_days_only 참고). 거래일 가드는
+    # 스케줄 쪽에만 있다 — UI 버튼은 지금처럼 요일과 무관하게 눌린다.
     scheduler = TimeScheduler()
-    for trigger_time, job, name in (
-        (DAILY_RESET_TIME, engine.reset_for_new_day, "daily_reset"),
-        (settings.recommend_time, _off_loop(workflow.recommend_and_notify), "llm_recommend"),
-        (settings.buy_time, workflow.execute_buys, "execute_buys"),
-        (CANCEL_UNFILLED_TIME, workflow.cancel_unfilled_buys, "cancel_unfilled_buys"),
-        (FORCE_CLOSE_TIME, close_out(workflow, engine), "close_out"),
-        (REPORT_TIME, _off_loop(workflow.send_final_report), "daily_report"),
-    ):
-        scheduler.add_job(trigger_time, _trading_days_only(job, name), name=name)
-
-    return Runtime(
+    runtime = Runtime(
         settings=settings,
         engine=engine,
         scheduler=scheduler,
         ws_client=ws_client,
         workflow=workflow,
     )
+    runtime.runner = ActionRunner(runtime)
+
+    for trigger_time, action in (
+        (DAILY_RESET_TIME, "daily_reset"),
+        (settings.recommend_time, "recommend"),
+        (settings.buy_time, "buy"),
+        (CANCEL_UNFILLED_TIME, "cancel_unfilled"),
+        (FORCE_CLOSE_TIME, "close_out"),
+        (REPORT_TIME, "daily_report"),
+    ):
+        scheduler.add_job(
+            trigger_time,
+            _trading_days_only(_submit(runtime, action), action),
+            name=action,
+        )
+
+    return runtime
 
 
 def is_trading_day(now: Optional[datetime] = None) -> bool:
@@ -392,6 +399,7 @@ async def run(runtime: Runtime) -> None:
     runtime.engine.start()
     # 구독은 연결 전에 걸어도 된다 — WebSocketClient.connect가 접속 직후 복구해 보낸다
     adopt_carried_over_positions(runtime)
+    runner_task = asyncio.create_task(runtime.runner.run())
     watchdog = asyncio.create_task(watch_quote_stall(runtime))
     closeout_watch = asyncio.create_task(watch_closeout_report(runtime))
     cash_watch = asyncio.create_task(watch_cash_refresh(runtime))
@@ -400,6 +408,7 @@ async def run(runtime: Runtime) -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        runner_task.cancel()
         watchdog.cancel()
         closeout_watch.cancel()
         cash_watch.cancel()

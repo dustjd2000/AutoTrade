@@ -217,3 +217,35 @@ def test_busy_is_false_once_the_queue_drains():
     assert runner.busy is False
     drain(runner, ["recommend"])
     assert runner.busy is False
+
+
+# ── 스케줄 등록 ─────────────────────────────────────────────
+SCHEDULED_KEYS = [
+    "daily_reset",
+    "recommend",
+    "buy",
+    "cancel_unfilled",
+    "close_out",
+    "daily_report",
+]
+
+
+def test_every_scheduled_key_is_a_known_action():
+    assert set(SCHEDULED_KEYS) <= set(ACTION_LABELS)
+
+
+def test_submitting_every_scheduled_key_runs_the_daily_flow():
+    """스케줄러가 넣는 여섯 키가 전부 접수되고 하루 흐름 순서대로 돈다."""
+    calls = []
+    runner = ActionRunner(make_runtime(calls))
+
+    assert drain(runner, SCHEDULED_KEYS) == [True] * len(SCHEDULED_KEYS)
+    assert calls == [
+        "daily_reset",
+        "recommend",
+        "buy",
+        "cancel_unfilled",
+        "cancel_unfilled",
+        "sell_all:day_end",
+        "final_report",
+    ]
