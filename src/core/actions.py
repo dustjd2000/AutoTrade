@@ -4,9 +4,10 @@
 모듈이다. 두 경로가 서로의 실행 여부를 모르면 09:07에 누른 ① 버튼의 LLM 호출이 도는
 사이에 09:08 매수가 발동해, 추천이 덜 끝난 채 매수가 나갈 수 있다.
 """
+import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -166,3 +167,109 @@ def manual_steps(runtime, action: str, tickers: Iterable[str] = ()) -> List[Manu
     if action not in step_factories:
         raise ValueError(f"Unknown manual action: {action}")
     return step_factories[action]()
+
+
+class ActionRunner:
+    """하루 흐름의 각 단계를 한 줄로 세워 실행하는 통로.
+
+    스케줄러 잡과 UI '즉시 실행' 버튼이 이 큐 하나를 공유한다. 두 경로가 각자 workflow
+    메서드를 직접 부르던 때는 서로의 실행 여부를 몰라, 09:07에 누른 ① 버튼의 LLM 호출이
+    도는 사이 09:08 매수가 발동할 수 있었다.
+
+    충돌하면 **거부가 아니라 순차 대기**다. 거부하면 그날 매수나 청산이 통째로 빠진다.
+    다만 같은 액션이 이미 큐에 있으면 넣지 않는다 — 같은 메일이 두 번 나가거나 취소가
+    되풀이되는 것을 막는다.
+
+    `submit`은 이벤트 루프 스레드에서만 부른다. UI 스레드는 `loop.call_soon_threadsafe`로
+    넘긴다 (EngineThread.run_action 참고).
+    """
+
+    def __init__(self, runtime):
+        self._runtime = runtime
+        self._queue: List[Tuple[str, tuple]] = []
+        # 큐에 있거나 지금 실행 중인 액션 — 중복 접수를 막는 열쇠다
+        self._pending: set = set()
+        self._wakeup = asyncio.Event()
+        self._idle = asyncio.Event()
+        self._idle.set()
+        # UI 스레드가 정지 전에 읽는다 (MainWindow._stop_engine) — 단순 bool이라 잠금이 없다
+        self.busy = False
+        self.on_started: Optional[Callable[[str], None]] = None
+        self.on_finished: Optional[Callable[[str, bool, str], None]] = None
+
+    def submit(self, action: str, tickers: Iterable[str] = ()) -> bool:
+        """실행을 큐에 넣는다. 접수했으면 True.
+
+        모르는 액션이거나 같은 액션이 이미 대기·실행 중이면 False다.
+        """
+        if action not in ACTION_LABELS:
+            logger.error("알 수 없는 실행 액션: %s", action)
+            return False
+        if action in self._pending:
+            logger.info("이미 대기 중이라 건너뜁니다: %s", ACTION_LABELS[action])
+            return False
+
+        self._pending.add(action)
+        self._queue.append((action, tuple(tickers)))
+        self.busy = True
+        self._idle.clear()
+        self._wakeup.set()
+        logger.info("실행 접수: %s (대기 %d건)", ACTION_LABELS[action], len(self._queue))
+        return True
+
+    async def run(self) -> None:
+        """큐를 소비한다. `runtime.run`이 태스크로 띄우고 종료할 때 취소한다."""
+        while True:
+            if not self._queue:
+                self.busy = False
+                self._idle.set()
+                await self._wakeup.wait()
+                self._wakeup.clear()
+                continue
+
+            action, tickers = self._queue.pop(0)
+            try:
+                await self._execute(action, tickers)
+            finally:
+                # 실행이 끝난 뒤에 풀어야 도는 중에 같은 액션이 또 들어오지 않는다
+                self._pending.discard(action)
+
+    async def wait_idle(self) -> None:
+        """큐가 비고 실행 중인 것이 없을 때까지 기다린다 (정지 전에 쓴다)."""
+        await self._idle.wait()
+
+    async def _execute(self, action: str, tickers: tuple) -> None:
+        try:
+            steps = manual_steps(self._runtime, action, tickers)
+        except ValueError:
+            logger.error("알 수 없는 실행 액션: %s", action)
+            return
+
+        self._notify(self.on_started, action)
+        loop = asyncio.get_running_loop()
+        try:
+            for step in steps:
+                logger.info("[실행] %s — 시작", step.label)
+                if step.touches_orders:
+                    # 실시간 익절/손절 콜백과 겹치지 않도록 루프 스레드에서 직접 실행한다
+                    result = step.run()
+                    if asyncio.iscoroutine(result):
+                        await result
+                else:
+                    # 수집·LLM·메일은 수십 초가 걸려 루프를 막으면 WebSocket이 끊긴다
+                    await loop.run_in_executor(None, step.run)
+                logger.info("[실행] %s — 완료", step.label)
+            self._notify(self.on_finished, action, True, "")
+        except Exception as e:
+            logger.exception("[실행] 실행 중 오류가 발생했습니다: %s", action)
+            self._notify(self.on_finished, action, False, f"{type(e).__name__}: {e}")
+
+    @staticmethod
+    def _notify(callback, *args) -> None:
+        """생명주기 알림. 콜백이 터져도 실행 흐름을 끊지 않는다."""
+        if callback is None:
+            return
+        try:
+            callback(*args)
+        except Exception:
+            logger.exception("실행 상태 알림에 실패했습니다.")
