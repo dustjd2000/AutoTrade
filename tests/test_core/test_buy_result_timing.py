@@ -80,6 +80,35 @@ def test_zero_filled_quantity_is_false():
     assert workflow.buy_orders_filled(TODAY) is False
 
 
+def test_order_with_both_complete_and_incomplete_rows_is_false():
+    """같은 주문번호로 완전체결 행과 미체결 잔량이 남은 행이 함께 잡히면, 후자를 무시하지 않는다.
+
+    ka10076이 한 주문번호에 행을 몇 개 싣는지는 확인된 바가 없다 — 완전체결 행 하나만
+    보고 True로 판정하면 다른 행이 알려주는 살아 있는 잔량을 놓치고 주문을 취소해 버린다.
+    """
+    workflow, _ = prepare(
+        [ordered("005930", "1", quantity=10)],
+        [
+            fill("1", "005930", filled=10, unfilled=0),
+            fill("1", "005930", filled=4, unfilled=6),
+        ],
+    )
+    assert workflow.buy_orders_filled(TODAY) is False
+
+
+def test_filled_quantity_short_of_ordered_quantity_is_false():
+    """미체결 잔량이 0으로 보여도 체결수량이 주문수량에 못 미치면 완료로 보지 않는다.
+
+    HTS에서 취소된 부분체결은 oso_qty가 빈 값으로 와 0으로 읽히므로(to_int), 주문수량과
+    대조하지 않으면 실제로는 절반만 체결된 주문을 전량 체결로 오판한다.
+    """
+    workflow, _ = prepare(
+        [ordered("005930", "1", quantity=10)],
+        [fill("1", "005930", filled=6, unfilled=0)],
+    )
+    assert workflow.buy_orders_filled(TODAY) is False
+
+
 def test_sell_fill_with_the_same_order_id_is_ignored():
     """매도 체결이 같은 주문번호로 잡혀도 매수 판정에 쓰지 않는다."""
     workflow, _ = prepare(

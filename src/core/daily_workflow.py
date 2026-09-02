@@ -691,18 +691,27 @@ class DailyWorkflow:
         답하지 못한다 — 이월 보유 종목이나 다른 인스턴스가 산 물량을 자기 체결로 오인해
         살아 있는 주문을 1시간 4분 일찍 취소했다 (PRD 10절).
 
-        `_fill_buy_prices`와 같은 조회를 같은 방식으로 읽으므로, 여기서 True가 서면
-        `cancel_unfilled_buys` 안에서 체결가가 그대로 채워진다.
+        `_fill_buy_prices`와 같은 조회를 같은 방식으로 읽지만, 판정은 그보다 엄격하다.
+        ka10076이 한 주문번호에 행을 몇 개 실어 보내는지는 확인된 바가 없다(PRD 10절,
+        `_cancel_targets`의 주석) — 한 주문에 완전체결 행과 미체결 잔량이 남은 행이 함께
+        잡히는 경우, 완전체결 행 하나만 보고 True로 판정하면 살아 있는 주문을 취소해
+        버릴 수 있다. 그래서 **같은 주문번호의 모든 BUY 행을 함께 본다**: 그중 하나라도
+        미체결 잔량(`unfilled_quantity > 0`)이 남아 있으면 그 주문은 아직 진행 중이고,
+        전부 잔량이 없어도 **가장 큰 체결수량이 주문수량(`BuyRecord.quantity`) 이상**이어야
+        완료로 본다 — `unfilled_quantity`는 키움 응답의 `oso_qty`를 파싱한 값인데, 필드가
+        비어 있으면 0으로 읽혀(`to_int`) HTS에서 취소된 부분체결도 "미체결 없음"으로
+        보이기 때문이다. 이 이중 조건이 전부 충족된 주문만 정산 완료로 센다.
 
         기록이 없거나(메일이 이미 나갔거나 주문이 없던 날) 접수 행이 없으면 **API를 부르지
-        않고** False다. 부분체결·미체결이 남았거나, 조회 결과에 흔적조차 없는 주문이 있거나,
-        조회가 실패하면 역시 False — 그런 날은 종전대로 10:10이 마무리한다.
+        않고** False다. 부분체결·미체결이 남았거나, 체결수량이 주문수량에 못 미치거나,
+        조회 결과에 흔적조차 없는 주문이 있거나, 조회가 실패하면 역시 False — 그런 날은
+        종전대로 10:10이 마무리한다.
         """
         state = self._read_buy_records(today or date.today())
         if state is None:
             return False
 
-        pending = {r.order_id for r in state.records if r.order_id and r.outcome.is_ordered}
+        pending = {r.order_id: r for r in state.records if r.order_id and r.outcome.is_ordered}
         if not pending:
             return False
 
@@ -714,14 +723,23 @@ class DailyWorkflow:
             )
             return False
 
-        settled = {
-            fill.order_id
-            for fill in fills
-            if fill.side == OrderSide.BUY
-            and fill.filled_quantity > 0
-            and fill.unfilled_quantity == 0
-        }
-        return pending <= settled
+        # 같은 주문번호에 행이 여럿 있을 수 있어(확인되지 않음), 주문번호별로 모아서 본다.
+        unfilled_seen = set()
+        max_filled = {}
+        for fill in fills:
+            if fill.side != OrderSide.BUY or fill.order_id not in pending:
+                continue
+            if fill.unfilled_quantity > 0:
+                unfilled_seen.add(fill.order_id)
+            if fill.filled_quantity > 0:
+                max_filled[fill.order_id] = max(max_filled.get(fill.order_id, 0), fill.filled_quantity)
+
+        for order_id, record in pending.items():
+            if order_id in unfilled_seen:
+                return False
+            if max_filled.get(order_id, 0) < record.quantity:
+                return False
+        return True
 
     def cancel_unfilled_buys(self, today: Optional[date] = None) -> None:
         """10:10 — 목표가에 닿지 않은 매수 주문을 취소하고 매수 결과를 알린다 (PRD 5.5-B 6단계).
