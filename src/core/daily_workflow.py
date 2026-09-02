@@ -683,6 +683,46 @@ class DailyWorkflow:
             f"허용치 {self.gap_down_tolerance_ratio * 100:.1f}%를 초과 하락"
         ), current
 
+    def buy_orders_filled(self, today: Optional[date] = None) -> bool:
+        """오늘 접수한 매수 주문이 남김없이 전량 체결됐는지 — 결과 메일을 앞당길 근거.
+
+        판정은 **당일 체결내역 조회의 주문번호 대조**다. 2026-09-01에 되돌린 구현(cb93b2b)은
+        잔고를 대조했는데, 잔고는 "이 종목을 들고 있는가"에 답할 뿐 "내 주문이 체결됐는가"에
+        답하지 못한다 — 이월 보유 종목이나 다른 인스턴스가 산 물량을 자기 체결로 오인해
+        살아 있는 주문을 1시간 4분 일찍 취소했다 (PRD 10절).
+
+        `_fill_buy_prices`와 같은 조회를 같은 방식으로 읽으므로, 여기서 True가 서면
+        `cancel_unfilled_buys` 안에서 체결가가 그대로 채워진다.
+
+        기록이 없거나(메일이 이미 나갔거나 주문이 없던 날) 접수 행이 없으면 **API를 부르지
+        않고** False다. 부분체결·미체결이 남았거나, 조회 결과에 흔적조차 없는 주문이 있거나,
+        조회가 실패하면 역시 False — 그런 날은 종전대로 10:10이 마무리한다.
+        """
+        state = self._read_buy_records(today or date.today())
+        if state is None:
+            return False
+
+        pending = {r.order_id for r in state.records if r.order_id and r.outcome.is_ordered}
+        if not pending:
+            return False
+
+        try:
+            fills = self.engine.order_client.get_today_fills()
+        except Exception:
+            logger.warning(
+                "매수 체결 확인 조회 실패 — 결과 메일을 10:10에 맡깁니다.", exc_info=True
+            )
+            return False
+
+        settled = {
+            fill.order_id
+            for fill in fills
+            if fill.side == OrderSide.BUY
+            and fill.filled_quantity > 0
+            and fill.unfilled_quantity == 0
+        }
+        return pending <= settled
+
     def cancel_unfilled_buys(self, today: Optional[date] = None) -> None:
         """10:10 — 목표가에 닿지 않은 매수 주문을 취소하고 매수 결과를 알린다 (PRD 5.5-B 6단계).
 
