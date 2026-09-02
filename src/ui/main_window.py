@@ -41,7 +41,7 @@ from src.core.daily_workflow import (
     BUY_ORDERED_STATUS,
     BUY_PENDING_STATUS,
 )
-from src.core.runtime import CONFIRM_ACTIONS, MANUAL_ACTIONS, ORDER_ACTIONS
+from src.core.runtime import ACTION_LABELS, CONFIRM_ACTIONS, MANUAL_ACTIONS, ORDER_ACTIONS
 from src.ui.engine_thread import EngineThread
 from src.ui.env_store import load_env, save_env
 
@@ -1559,10 +1559,13 @@ class MainWindow(QMainWindow):
         return box.exec() == QMessageBox.StandardButton.Yes
 
     def _on_action_started(self, action: str) -> None:
-        self._statusbar.showMessage(f"즉시 실행 중: {MANUAL_ACTIONS.get(action, action)} …")
+        # 스케줄 실행도 이 시그널을 쏘므로, 09:05 추천이 도는 동안에도 버튼이 잠긴다 —
+        # 자동 실행과 겹쳐 누르는 것을 막는다 (버튼 경로의 잠금은 _run_action에도 있다)
+        self._set_actions_enabled(False)
+        self._statusbar.showMessage(f"실행 중: {ACTION_LABELS.get(action, action)} …")
 
     def _on_action_finished(self, action: str, ok: bool, message: str) -> None:
-        label = MANUAL_ACTIONS.get(action, action)
+        label = ACTION_LABELS.get(action, action)
         if ok:
             logger.info("[즉시 실행] %s — 종료", label)
             self._statusbar.showMessage(f"즉시 실행 완료: {label}", 5000)
