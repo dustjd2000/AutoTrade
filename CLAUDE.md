@@ -47,13 +47,15 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   (`settings.recommend_time`/`buy_time`, `.env`의 `RECOMMEND_TIME`·`BUY_TIME`, 기본 09:05·09:08)
   나머지는 코드 상수다. 두 값은 UI에서 고를 수 없고 라벨로 보여주기만 하며, "추천은 개장 후,
   매수는 추천 +3분 이상"을 `Settings.validate()`가 엔진 시작 단계에서 강제한다.
-- 데이터 수집·LLM 호출·메일 발송처럼 오래 걸리는 동기 작업은 `runtime._off_loop`로 별도
-  스레드에 넘긴다 — 안 그러면 그 시간 동안 WebSocket PING에 응답하지 못해 서버가 연결을
-  끊는다.
+- 데이터 수집·LLM 호출·메일 발송처럼 오래 걸리는 동기 작업은 별도 스레드에 넘긴다 — 안
+  그러면 그 시간 동안 WebSocket PING에 응답하지 못해 서버가 연결을 끊는다.
 - 반대로 매수/청산 주문은 **루프 스레드에서 그대로** 실행해, 실시간 익절/손절 감시와
   같은 종목을 동시에 건드리는 경쟁 상태가 생기지 않게 직렬화한다.
-- UI의 "즉시 실행" 버튼(①~④)은 스케줄러가 호출하는 것과 **동일한 함수**를 그 자리에서
-  호출한다 — 별도 코드 경로가 아니다.
+- 스케줄 실행과 UI의 "즉시 실행" 버튼(①~⑤)은 **같은 실행 큐**(`src/core/actions.py`의
+  `ActionRunner`)를 탄다 — 별도 코드 경로가 아니다. 큐는 중복 없는 FIFO라, 실행이 겹치면
+  거부하지 않고 순서대로 기다린다. 단계별로 `touches_orders`를 보고 루프 스레드/별도
+  스레드를 정한다. 단, 버튼 ⑤와 15:35 스케줄은 **다른 함수**를 부른다 — 버튼은
+  `send_daily_report`(항상 발송), 스케줄은 `send_final_report`(하루 한 번).
 
 ### 전략 프레임워크
 - `src/strategy/base.py`의 `BaseStrategy`(`generate_signal(MarketData) -> Signal`)가 실시간
