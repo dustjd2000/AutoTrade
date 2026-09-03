@@ -624,6 +624,58 @@ def test_save_recommendations_rerun_preserves_verification_columns(tmp_path):
     assert row.review == "오전 회복 시도는 맞았습니다."
 
 
+def test_save_recommendations_rerun_drops_unverified_ticker_not_in_new_run(tmp_path):
+    """①을 다시 눌러 종목 구성이 바뀌면, 새 추천에 없는 미검증 종목은 지워져야 한다."""
+    store = make_store(tmp_path)
+    day = date(2026, 9, 3)
+    store.save_recommendations(day, [_rec(ticker="005930"), _rec(ticker="000660", name="SK하이닉스")], "v11")
+
+    store.save_recommendations(day, [_rec(ticker="005930", target_price=68_000)], "v11")
+
+    rows = store.recommendations_for(day)
+    assert [row.ticker for row in rows] == ["005930"]
+    assert rows[0].target_price == 68_000
+
+
+def test_save_recommendations_rerun_keeps_verified_ticker_even_if_dropped(tmp_path):
+    """검증까지 끝난 종목은 다음 ①이 그 종목을 빼도 지워지면 안 된다."""
+    store = make_store(tmp_path)
+    day = date(2026, 9, 3)
+    store.save_recommendations(day, [_rec(ticker="005930")], "v11")
+    store.save_recommendation_outcome(
+        day,
+        "005930",
+        actual_high=72_000.0,
+        actual_low=69_500.0,
+        actual_close=71_000.0,
+        actual_change_rate=1.43,
+        buy_target_hit=True,
+        sell_target_hit=True,
+    )
+    store.save_recommendation_review(day, "005930", "오전 회복 시도는 맞았습니다.")
+
+    store.save_recommendations(day, [_rec(ticker="000660", name="SK하이닉스")], "v11")
+
+    rows = {row.ticker: row for row in store.recommendations_for(day)}
+    assert set(rows) == {"005930", "000660"}
+    verified = rows["005930"]
+    assert verified.actual_close == 71_000.0
+    assert verified.buy_target_hit is True
+    assert verified.review == "오전 회복 시도는 맞았습니다."
+
+
+def test_save_recommendations_empty_list_does_not_delete_existing_rows(tmp_path):
+    """추천이 0개인 재실행(오늘은 일어나지 않지만)은 기존 행을 지우지 않는 조용한 no-op이어야 한다."""
+    store = make_store(tmp_path)
+    day = date(2026, 9, 3)
+    store.save_recommendations(day, [_rec(ticker="005930"), _rec(ticker="000660", name="SK하이닉스")], "v11")
+
+    store.save_recommendations(day, [], "v11")
+
+    rows = store.recommendations_for(day)
+    assert {row.ticker for row in rows} == {"005930", "000660"}
+
+
 def test_recommendations_for_other_day_is_empty(tmp_path):
     store = make_store(tmp_path)
     store.save_recommendations(date(2026, 9, 3), [_rec()], "v11")

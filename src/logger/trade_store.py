@@ -256,12 +256,28 @@ class TradeStore:
     ) -> None:
         """그날 추천 메일에 실린 종목을 남긴다.
 
-        (day, ticker) UNIQUE로 UPSERT한다 — UI ① 버튼을 두 번 눌러도 행이 겹치지 않고,
-        나중 추천이 앞선 추천을 덮어쓴다. 그날 실제로 쓰인 것이 마지막 추천이기 때문이다.
+        (day, ticker) UNIQUE로 UPSERT해 겹치는 종목은 나중 추천이 앞선 추천을 덮어쓴다.
+        그것만으로는 부족하다 — UI ① 버튼을 다시 눌러 LLM이 **다른** 종목을 고르면, 이전
+        실행에만 있던 종목의 행이 UPSERT 대상이 아니라 그대로 남아 그날 행 집합이 여러 번의
+        실행을 합친 합집합이 되어버린다. 그래서 UPSERT에 앞서 그날 행 중 **이번 실행에
+        없는 종목**을 먼저 지워, 재실행 후 남는 집합이 항상 최신 실행과 같아지게 만든다.
+        단, 이미 검증까지 끝난 행(actual_close IS NOT NULL)은 지우지 않는다 — 그건 완결된
+        기록이라 나중 실행이 건드리면 안 된다. recommendations가 빈 리스트면(오늘은
+        `recommend_and_notify`가 그 전에 걸러 호출하지 않는 경우) 지울 기준도 없으므로
+        아무것도 하지 않는다 — 빈 값 하나 때문에 그날 미검증 행을 통째로 날리는 것을 막는다.
         덮어쓸 때 검증 칸(actual_*, *_hit, review)은 건드리지 않는다 — 추천을 다시 돌린
         시점에는 아직 채워져 있지 않고, 채워져 있다면 그것이 더 나중 정보다.
         """
         with closing(self._connect()) as conn:
+            if recommendations:
+                tickers = [r.ticker for r in recommendations]
+                placeholders = ",".join("?" * len(tickers))
+                conn.execute(
+                    f"""DELETE FROM recommendations
+                        WHERE day = ? AND actual_close IS NULL
+                          AND ticker NOT IN ({placeholders})""",
+                    (day.isoformat(), *tickers),
+                )
             conn.executemany(
                 """INSERT INTO recommendations
                    (day, ticker, name, prompt_version, recommend_price, target_price,
