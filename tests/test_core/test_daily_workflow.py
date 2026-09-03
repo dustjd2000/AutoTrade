@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.api.market_data import TodayMetrics
 from src.core import daily_workflow
 from src.core.daily_workflow import DailyWorkflow
 from src.core.events import (
@@ -1371,6 +1372,28 @@ def _recommendation():
     )
 
 
+class FakeMarketData:
+    """collector가 들고 있는 시세 클라이언트의 가짜 — 15:35 검증의 당일 봉 조회 대상."""
+
+    def __init__(self):
+        self.today_metrics = {}
+
+    def get_today_metrics(self, ticker, today=None):
+        return self.today_metrics.get(ticker)
+
+
+class FakeReviewer:
+    """LLM 검증 평가 모듈의 가짜 — review 호출 인자를 기록하고 미리 정한 결과를 돌려준다."""
+
+    def __init__(self):
+        self.result = None
+        self.calls = []
+
+    def review(self, items, timeout_seconds=120.0):
+        self.calls.append(items)
+        return self.result
+
+
 def build_workflow(tmp_path):
     """recommend_and_notify가 진짜 TradeStore에 저장하는지 보는 테스트 전용 조립.
 
@@ -1415,7 +1438,7 @@ def build_workflow(tmp_path):
         unsellable_snapshot=lambda: [],
     )
     return DailyWorkflow(
-        collector=SimpleNamespace(collect=lambda: daily_data),
+        collector=SimpleNamespace(collect=lambda: daily_data, market_data=FakeMarketData()),
         recommender=SimpleNamespace(recommend=lambda d: [_recommendation()]),
         strategy=strategy,
         engine=engine,
@@ -1426,6 +1449,7 @@ def build_workflow(tmp_path):
         ),
         trade_store=TradeStore(db_path=tmp_path / "t.db"),
         email=email,
+        reviewer=FakeReviewer(),
     )
 
 
@@ -1451,3 +1475,74 @@ def test_recommend_and_notify_survives_save_failure(tmp_path):
     workflow.recommend_and_notify(date(2026, 9, 3))
 
     assert workflow.email.sent, "추천 메일이 나가야 한다"
+
+
+def _metrics():
+    return TodayMetrics(
+        ticker="005930", high=72_000.0, low=69_500.0, close=71_000.0, change_rate=1.43
+    )
+
+
+def test_review_recommendations_saves_outcome_and_sends_mail(tmp_path):
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 3)
+    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
+    workflow.collector.market_data.today_metrics = {"005930": _metrics()}
+    workflow.reviewer.result = {"005930": "오전 회복 시도는 맞았습니다."}
+
+    workflow.review_recommendations(day)
+
+    row = workflow.trade_store.recommendations_for(day)[0]
+    assert row.actual_close == 71_000.0
+    assert row.buy_target_hit is True     # 저가 69,500 <= 목표 70,000
+    assert row.sell_target_hit is True    # 고가 72,000 >= 목표 71,400
+    assert row.review == "오전 회복 시도는 맞았습니다."
+    assert "추천 검증" in workflow.email.sent[-1][0]
+
+
+def test_review_recommendations_does_nothing_without_recommendations(tmp_path):
+    workflow = build_workflow(tmp_path)
+    workflow.review_recommendations(date(2026, 9, 3))
+    assert workflow.email.sent == []
+
+
+def test_review_recommendations_survives_candle_lookup_failure(tmp_path):
+    """당일 봉을 못 받은 종목은 실제값을 비워 두고 나머지 흐름은 계속한다."""
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 3)
+    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
+    workflow.collector.market_data.today_metrics = {}   # 전부 None
+
+    workflow.review_recommendations(day)
+
+    row = workflow.trade_store.recommendations_for(day)[0]
+    assert row.actual_close is None
+    assert "당일 봉 조회 실패" in workflow.email.sent[-1][1]
+
+
+def test_review_recommendations_sends_mail_when_llm_fails(tmp_path):
+    """평가 호출이 실패해도 수치까지는 저장하고 메일은 나간다."""
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 3)
+    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
+    workflow.collector.market_data.today_metrics = {"005930": _metrics()}
+    workflow.reviewer.result = None
+
+    workflow.review_recommendations(day)
+
+    row = workflow.trade_store.recommendations_for(day)[0]
+    assert row.actual_close == 71_000.0
+    assert row.review == ""
+    assert workflow.email.sent, "평가가 없어도 검증 메일은 나가야 한다"
+
+
+def test_review_recommendations_skips_llm_for_unverified_stock(tmp_path):
+    """실제값이 없는 종목은 대조할 것이 없으므로 평가 입력에서 빠진다."""
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 3)
+    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
+    workflow.collector.market_data.today_metrics = {}
+
+    workflow.review_recommendations(day)
+
+    assert workflow.reviewer.calls == [], "평가 호출 자체가 없어야 한다"

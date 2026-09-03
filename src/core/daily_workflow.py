@@ -19,6 +19,7 @@ from src.core.events import (
     format_stock,
 )
 from src.data.collector import DataCollector
+from src.llm import reviewer as reviewer_module
 from src.llm.recommender import PROMPT_TEMPLATE_VERSION, LLMRecommender, tick_size
 from src.logger.trade_store import TradeStore
 from src.notification.email import EmailNotifier
@@ -83,6 +84,7 @@ class DailyWorkflow:
         account: AccountClient,
         trade_store: TradeStore,
         email: EmailNotifier,
+        reviewer=None,
         ws_client=None,
         report_mark_path: Optional[Path] = None,
         buy_records_path: Optional[Path] = None,
@@ -96,6 +98,9 @@ class DailyWorkflow:
         self.account = account
         self.trade_store = trade_store
         self.email = email
+        # 15:35 추천 검증의 LLM 평가 모듈 (PRD 5.5-B '추천 검증'). None이면 평가 없이
+        # 수치만 저장하고 메일을 보낸다 — 평가는 읽기용이고 수치가 원본이다.
+        self.reviewer = reviewer
         self.ws_client = ws_client
         # 최종 리포트를 보낸 날짜 — 전량 매도 완료와 15:35 스케줄이 중복 발송하지 않도록
         # 공유하는 표시다 (send_final_report). 매수로 보유가 다시 생기면 초기화된다.
@@ -1119,3 +1124,103 @@ class DailyWorkflow:
         except Exception:
             logger.exception("체결 내역 동기화 실패 — 접수 기준으로 리포트를 발송합니다.")
             return False
+
+    def review_recommendations(self, today: Optional[date] = None) -> None:
+        """15:35 — 오늘 추천한 종목의 실제 움직임을 대조해 저장하고 별도 메일로 보낸다.
+
+        추천 목록은 메모리가 아니라 DB에서 읽는다 — 엔진이 장중에 재시작돼도 그날 검증이
+        빠지지 않는다. 최종 리포트와 별개의 메일인 이유는 `recommendation_review_email`
+        주석 참고 (리포트는 전량 매도 시 15:30 이전에 조기 발송될 수 있다).
+        """
+        today = today or date.today()
+        rows = self.trade_store.recommendations_for(today)
+        if not rows:
+            logger.info("오늘 추천 기록이 없습니다 — 검증을 건너뜁니다 (%s).", today)
+            return
+
+        self._fill_actual_moves(today, rows)
+        self._fill_reviews(today, rows)
+
+        subject, body = templates.recommendation_review_email(rows, today)
+        self.email.send(subject, body)
+        logger.info("추천 검증 메일 발송 (%s, %d종목)", today, len(rows))
+
+    def _fill_actual_moves(self, today: date, rows) -> None:
+        """당일 봉을 조회해 실제 움직임과 목표가 도달 여부를 저장한다 (rows도 제자리 갱신).
+
+        조회에 실패한 종목은 실제값을 비운 채 남긴다 — 한 종목의 일시적 실패로 나머지
+        종목의 검증까지 잃지 않는다 (아침 수집의 같은 규약).
+
+        시세 클라이언트는 collector가 이미 들고 있는 것을 그대로 쓴다. 워크플로가 따로
+        참조를 하나 더 들면 두 경로가 다른 클라이언트를 볼 수 있다.
+        """
+        for row in rows:
+            try:
+                metrics = self.collector.market_data.get_today_metrics(row.ticker, today)
+            except Exception:
+                logger.exception("당일 봉 조회 실패: %s %s", row.ticker, row.name)
+                metrics = None
+            if metrics is None or metrics.close <= 0:
+                continue
+
+            row.actual_high = metrics.high
+            row.actual_low = metrics.low
+            row.actual_close = metrics.close
+            row.actual_change_rate = metrics.change_rate
+            # 저가가 목표 매수가까지 내려왔으면 그 지정가는 체결될 수 있었다는 뜻이다
+            row.buy_target_hit = metrics.low > 0 and metrics.low <= row.target_price
+            row.sell_target_hit = (
+                metrics.high >= row.target_sell_price if row.target_sell_price > 0 else None
+            )
+            try:
+                self.trade_store.save_recommendation_outcome(
+                    today,
+                    row.ticker,
+                    actual_high=row.actual_high,
+                    actual_low=row.actual_low,
+                    actual_close=row.actual_close,
+                    actual_change_rate=row.actual_change_rate,
+                    buy_target_hit=row.buy_target_hit,
+                    sell_target_hit=row.sell_target_hit,
+                )
+            except Exception:
+                logger.exception("추천 검증 결과 저장 실패: %s %s", row.ticker, row.name)
+
+    def _fill_reviews(self, today: date, rows) -> None:
+        """LLM 평가문을 받아 저장한다 (rows도 제자리 갱신). 실패해도 메일 발송을 막지 않는다."""
+        if self.reviewer is None:
+            return
+        items = [
+            reviewer_module.ReviewInput(
+                ticker=row.ticker,
+                name=row.name,
+                outlook=row.outlook,
+                target_price=row.target_price,
+                target_sell_price=row.target_sell_price,
+                recommend_price=row.recommend_price,
+                actual_high=row.actual_high,
+                actual_low=row.actual_low,
+                actual_close=row.actual_close,
+                actual_change_rate=row.actual_change_rate,
+            )
+            # 실제값이 없는 종목은 대조할 것이 없다. 전망이 없는 종목도 평가 대상이 아니다.
+            for row in rows
+            if row.actual_close is not None and row.outlook
+        ]
+        if not items:
+            return
+
+        reviews = self.reviewer.review(items)
+        if not reviews:
+            logger.warning("LLM 검증 평가를 받지 못했습니다 — 수치만으로 메일을 보냅니다.")
+            return
+
+        for row in rows:
+            review = reviews.get(row.ticker, "")
+            if not review:
+                continue
+            row.review = review
+            try:
+                self.trade_store.save_recommendation_review(today, row.ticker, review)
+            except Exception:
+                logger.exception("추천 평가문 저장 실패: %s %s", row.ticker, row.name)

@@ -65,6 +65,7 @@ SCHEDULED_ACTIONS: Dict[str, str] = {
     "daily_reset": "일일 상태 초기화",
     "close_out": "마감 정리 (미체결 취소 + 전량 청산)",
     "daily_report": "최종 리포트 메일 (스케줄)",
+    "review_recommendations": "추천 검증 메일 (스케줄)",
 }
 
 ACTION_LABELS: Dict[str, str] = {**MANUAL_ACTIONS, **SCHEDULED_ACTIONS}
@@ -156,6 +157,14 @@ def manual_steps(runtime, action: str, tickers: Iterable[str] = ()) -> List[Manu
         ],
         "daily_report": lambda: [
             ManualStep(SCHEDULED_ACTIONS["daily_report"], runtime.workflow.send_final_report)
+        ],
+        # 일봉 조회와 LLM 호출이 걸리므로 루프 스레드를 쓰지 않는다 (touches_orders=False).
+        # 주문을 내지 않으므로 실시간 감시와 직렬화할 이유도 없다.
+        "review_recommendations": lambda: [
+            ManualStep(
+                SCHEDULED_ACTIONS["review_recommendations"],
+                runtime.workflow.review_recommendations,
+            )
         ],
     }
     # 일괄 실행은 '진입'까지만 — 청산과 리포트는 스케줄에 맡긴다.
