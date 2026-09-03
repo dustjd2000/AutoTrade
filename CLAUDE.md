@@ -71,7 +71,10 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   LLM이 함께 제시한 **목표 매수가로 지정가** 주문이고, 10:10에 미체결분을 취소하면서
   매수 결과 메일을 보낸다(`cancel_unfilled_buys`). 청산은 `RiskManager.check_portfolio_exit`
   (실시간 시세 콜백, **보유 종목 합산** 순손익 ±설정값 기준 익절/손절)와 15:15 강제청산이
-  담당한다.
+  담당한다. 15:35에는 일일 리포트 다음으로 `DailyWorkflow.review_recommendations`가 그날
+  추천 종목의 목표가 도달 여부와 실제 고가·저가·종가를 대조해 `data/trades.db`의
+  `recommendations` 테이블에 남기고 별도 메일로 보낸다 — 주문에는 쓰이지 않는 사후 기록이다
+  (PRD 5.12절).
 - 새 전략을 추가할 때는 `BaseStrategy`를 구현하는 새 모듈만 추가하면 되고, 나머지
   (주문 실행/리스크/로깅)는 그대로 재사용된다 — 단, 시간 기반 전략이라면 1호 전략처럼
   `DailyWorkflow`류의 오케스트레이션을 별도로 붙여야 한다.
