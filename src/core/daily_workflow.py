@@ -19,7 +19,7 @@ from src.core.events import (
     format_stock,
 )
 from src.data.collector import DataCollector
-from src.llm.recommender import LLMRecommender, tick_size
+from src.llm.recommender import PROMPT_TEMPLATE_VERSION, LLMRecommender, tick_size
 from src.logger.trade_store import TradeStore
 from src.notification.email import EmailNotifier
 from src.notification import chart, templates
@@ -368,11 +368,24 @@ class DailyWorkflow:
         board = self._board_from_recommendations(recommendations)
         self._set_buy_board(today, board)
         self._watch_plan_prices([plan.ticker for plan in board])
+        self._save_recommendations(today, recommendations)
         subject, body = templates.recommendation_email(
             recommendations, today, self.strategy.investable_ratio, self.strategy.target_stock_count
         )
         self.email.send(subject, body)
         logger.info("Recommendation email sent for %s", today)
+
+    def _save_recommendations(self, today: date, recommendations) -> None:
+        """추천을 DB에 남긴다 — 15:35 검증이 읽는 유일한 출처다 (PRD 5.5-B '추천 검증').
+
+        실패해도 삼킨다. 기록은 사후 분석용이고, 매매가 그것 때문에 멈출 이유가 없다.
+        """
+        try:
+            self.trade_store.save_recommendations(
+                today, recommendations, PROMPT_TEMPLATE_VERSION
+            )
+        except Exception:
+            logger.exception("추천 기록 저장에 실패했습니다 — 오늘 검증 메일이 비게 됩니다.")
 
     def _watch_plan_prices(self, tickers: List[str]) -> None:
         """추천 종목의 실시간 시세를 미리 구독한다 — UI '매수 예정' 표 현재가의 출처.

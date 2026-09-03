@@ -14,8 +14,8 @@ from src.core.events import (
     OrderType,
 )
 from src.data.collector import DailyStockData
-from src.llm.recommender import StockRecommendation
-from src.logger.trade_store import DailySummary, MonthlySummary, TradeRow
+from src.llm.recommender import PROMPT_TEMPLATE_VERSION, StockRecommendation
+from src.logger.trade_store import DailySummary, MonthlySummary, TradeRow, TradeStore
 from src.risk.manager import exit_trigger_price
 from src.strategy.llm_momentum import LLMMomentumStrategy
 
@@ -1356,3 +1356,98 @@ def test_dropping_ignores_rows_with_no_live_order():
     assert workflow.drop_buy_plans(["005930"]) == []
 
     assert order_client.cancelled == []
+
+
+def _recommendation():
+    return StockRecommendation(
+        ticker="005930",
+        name="삼성전자",
+        target_price=70_000,
+        target_sell_price=71_400,
+        reason="전일 등락률 +2.15%",
+        setup="rebound",
+        outlook="오전 중 회복 시도",
+        recommend_price=70_500.0,
+    )
+
+
+def build_workflow(tmp_path):
+    """recommend_and_notify가 진짜 TradeStore에 저장하는지 보는 테스트 전용 조립.
+
+    make_workflow와 달리 trade_store는 SimpleNamespace가 아니라 실제 TradeStore다 —
+    save_recommendations로 남긴 값을 recommendations_for로 그대로 읽어 확인해야 한다.
+    """
+    strategy = LLMMomentumStrategy()
+    email = FakeEmail()
+    daily_data = [
+        DailyStockData(
+            ticker="005930",
+            name="삼성전자",
+            prev_close=1000.0,
+            prev_high=1020.0,
+            prev_low=980.0,
+            prev_change_rate=1.0,
+            prev_volume=100,
+            volume_surge=2.0,
+        )
+    ]
+    notifications = []
+    engine = SimpleNamespace(
+        market_data=SimpleNamespace(
+            get_current_price=lambda t: MarketData(ticker=t, price=1000.0, volume=100)
+        ),
+        order_client=FakeOrderClient(),
+        risk_manager=SimpleNamespace(
+            approve=lambda *a, **kw: True,
+            record_order=lambda *a, **kw: None,
+            take_profit_ratio=0.005,
+            stop_loss_ratio=0.02,
+            commission_rate=0.00015,
+            tax_rate=0.0018,
+            slippage_rate=0.001,
+            simple_take_profit_enabled=False,
+            take_profit_enabled=True,
+        ),
+        note_open_position=lambda ticker: None,
+        last_price=lambda ticker: 0.0,
+        position_snapshot=lambda: [],
+        notify=notifications.append,
+        unsellable_snapshot=lambda: [],
+    )
+    return DailyWorkflow(
+        collector=SimpleNamespace(collect=lambda: daily_data),
+        recommender=SimpleNamespace(recommend=lambda d: [_recommendation()]),
+        strategy=strategy,
+        engine=engine,
+        account=SimpleNamespace(
+            get_cash=lambda: 12_000_000,
+            get_positions=lambda: {},
+            get_balance_snapshot=lambda: SimpleNamespace(total_asset=12_000_000, cash=12_000_000),
+        ),
+        trade_store=TradeStore(db_path=tmp_path / "t.db"),
+        email=email,
+    )
+
+
+def test_recommend_and_notify_saves_recommendations(tmp_path):
+    """추천 메일에 실린 것과 같은 목록이 DB에 남는다."""
+    workflow = build_workflow(tmp_path)
+    workflow.recommend_and_notify(date(2026, 9, 3))
+
+    rows = workflow.trade_store.recommendations_for(date(2026, 9, 3))
+    assert [row.ticker for row in rows] == ["005930"]
+    assert rows[0].prompt_version == PROMPT_TEMPLATE_VERSION
+    assert rows[0].outlook == "오전 중 회복 시도"
+
+
+def test_recommend_and_notify_survives_save_failure(tmp_path):
+    """기록 저장이 실패해도 추천 메일은 나가고 매수 흐름이 멈추지 않는다."""
+    workflow = build_workflow(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    workflow.trade_store.save_recommendations = boom
+    workflow.recommend_and_notify(date(2026, 9, 3))
+
+    assert workflow.email.sent, "추천 메일이 나가야 한다"
