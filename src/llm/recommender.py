@@ -11,7 +11,7 @@ from src.data.collector import DailyStockData
 logger = logging.getLogger(__name__)
 
 # 프롬프트 템플릿 버전 — 추천 근거를 나중에 추적할 수 있도록 코드로 버전 관리한다 (PRD 5.5-B).
-PROMPT_TEMPLATE_VERSION = "v10"
+PROMPT_TEMPLATE_VERSION = "v11"
 
 # 목표 매수가가 전일 종가에서 이 비율을 벗어나면 경계로 자른다 (PRD 5.5-B '주문 방식').
 # LLM이 자릿수를 틀리는 것을 막는 가드레일이며, 정상 범위의 판단에는 개입하지 않는다.
@@ -67,6 +67,10 @@ RECOMMENDATION_SCHEMA = {
                         "enum": list(SETUP_TYPES),
                         "description": "이 종목을 고른 셋업 유형",
                     },
+                    "outlook": {
+                        "type": "string",
+                        "description": "오늘 남은 장중 주가 움직임 전망",
+                    },
                 },
                 "required": [
                     "ticker",
@@ -75,6 +79,7 @@ RECOMMENDATION_SCHEMA = {
                     "target_sell_price",
                     "reason",
                     "setup",
+                    "outlook",
                 ],
                 "additionalProperties": False,
             },
@@ -182,6 +187,25 @@ target_sell_price는 목표 매수가에 매수했다고 가정하고, **오늘 
 있는지를 근거로 삼으십시오. 하루 안에 닿지 못할 가격을 적지 말고, 오늘의 현실적인 상단을
 제시하십시오.
 
+## 오늘 전망 작성 지침
+outlook은 **오늘 남은 장중에 이 종목이 어떻게 움직일 것으로 보는지**를 두 문장으로 적는
+칸입니다. reason이 "왜 골랐는가"(과거)라면 outlook은 "앞으로 어떻게 될 것인가"(미래)입니다.
+reason에 쓴 내용을 말만 바꿔 다시 쓰지 마십시오.
+
+- **첫 문장 — 오전 흐름.** 당일 현재가·당일 등락률·당일 거래량을 근거로, 오전 중 어디까지
+  시도할 것으로 보는지 적으십시오. '당일 지표 없음'인 종목은 이 문장을 생략하십시오.
+- **둘째 문장 — 조건부 분기.** 상방과 하방을 **가격과 함께** 조건부로 적으십시오.
+  ("~를 회복하면 ~까지 열려 있고, 회복하지 못하면 ~ 부근까지 되밀릴 수 있습니다")
+
+금지 사항:
+- 오후의 움직임을 단정하지 마십시오. 제공된 것은 일봉과 현재 시각의 현재가뿐이며, 장중
+  시간대별 흐름을 알 수 있는 데이터는 없습니다.
+- 학습 데이터의 기억(종목 평판, 과거 주가)에 의존하지 마십시오 — 절대 규칙 2와 같습니다.
+
+예: "현재 +1.80%로 갭 상승 출발해 당일 거래량이 실려 있어 오전 중 이동평균 82,300원
+회복을 시도할 것으로 봅니다. 회복하면 전일 고가 84,000원까지 열려 있고, 회복하지 못하면
+최근 저가 77,000원 부근까지 되밀릴 수 있습니다."
+
 ## 근거 작성 지침
 reason은 반드시 제공된 데이터의 구체적 수치를 인용해 작성하십시오.
 ("전일 등락률 +2.15%, 전일 거래량 320,450주(평균 대비 3.4배)"처럼 구체적으로.
@@ -210,6 +234,10 @@ class StockRecommendation:
     # `drop_other_setups`가 주문 경로에 들어가기 전에 잘라낸다. ""는 '밝히지 않음'이며
     # 마찬가지로 잘린다 — 유형을 확인하지 못한 추천을 통과시키면 필터가 조용히 꺼진다.
     setup: str = ""
+    # LLM이 본 오늘의 움직임 전망 (PRD 5.5-B '오늘 전망'). 추천 메일 표시와 15:35 검증에만
+    # 쓰고 주문에는 쓰지 않는다 — `target_sell_price`와 같은 방침이다. ""는 '산출 안 됨'이며,
+    # 그 경우 메일에서 줄이 통째로 빠지고 검증 평가에서도 제외된다.
+    outlook: str = ""
 
 
 def build_user_prompt(daily_data: List[DailyStockData], target_count: int = 3) -> str:
@@ -315,6 +343,8 @@ def parse_recommendations(raw_text: str) -> List[StockRecommendation]:
                 reason=item["reason"],
                 # 스키마가 요구하지만 빠져 있어도 파싱은 통과시킨다 — 유형 필터가 걸러낸다
                 setup=item.get("setup", ""),
+                # 스키마가 요구하지만 빠져도 추천을 버리지 않는다 — 주문에 쓰이지 않는 값이다
+                outlook=item.get("outlook", ""),
             )
         )
     return recommendations

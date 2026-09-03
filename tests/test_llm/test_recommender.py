@@ -5,6 +5,7 @@ import pytest
 from src.data.collector import DailyStockData
 from src.llm.recommender import (
     LLMRecommender,
+    RECOMMENDATION_SCHEMA,
     StockRecommendation,
     apply_price_guardrail,
     attach_recommend_price,
@@ -549,3 +550,41 @@ def test_user_prompt_drops_premarket_disclaimer():
     prompt = build_user_prompt([stock(today_price=71_400.0)])
 
     assert "장 시작 전" not in prompt
+
+
+# ── 오늘 전망 (outlook, v11) ───────────────────────────────────────
+
+
+def test_parse_reads_outlook():
+    raw = """{"recommendations": [
+        {"ticker": "005930", "name": "삼성전자", "target_price": 70000,
+         "target_sell_price": 71400, "reason": "전일 등락률 +2.15%",
+         "setup": "rebound",
+         "outlook": "오전 중 이동평균 82,300원 회복 시도, 실패 시 77,000원까지 되밀림"}
+    ]}"""
+    recs = parse_recommendations(raw)
+    assert recs[0].outlook == "오전 중 이동평균 82,300원 회복 시도, 실패 시 77,000원까지 되밀림"
+
+
+def test_parse_without_outlook_keeps_recommendation():
+    """전망이 빠져도 추천 자체는 버리지 않는다 — 주문에 쓰이지 않는 값이다."""
+    raw = """{"recommendations": [
+        {"ticker": "005930", "name": "삼성전자", "target_price": 70000,
+         "target_sell_price": 71400, "reason": "전일 등락률 +2.15%", "setup": "rebound"}
+    ]}"""
+    recs = parse_recommendations(raw)
+    assert len(recs) == 1
+    assert recs[0].outlook == ""
+
+
+def test_schema_requires_outlook():
+    item = RECOMMENDATION_SCHEMA["properties"]["recommendations"]["items"]
+    assert "outlook" in item["properties"]
+    assert "outlook" in item["required"]
+
+
+def test_system_prompt_mentions_outlook_rules():
+    prompt = build_system_prompt(3)
+    assert "오늘 전망" in prompt
+    # 오후 시간대 단정을 금지하는 문구가 살아 있어야 한다
+    assert "오후" in prompt
