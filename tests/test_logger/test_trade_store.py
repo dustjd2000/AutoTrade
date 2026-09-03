@@ -2,6 +2,7 @@ import sqlite3
 from datetime import date, datetime
 
 from src.core.events import FillRecord, OrderResult, OrderSide, OrderStatus
+from src.llm.recommender import StockRecommendation
 from src.logger.trade_store import TradeStore
 
 
@@ -525,3 +526,112 @@ def test_yearly_cumulative_series_ends_at_yearly_net_pnl(tmp_path):
 
 def test_yearly_cumulative_series_empty_without_trades(tmp_path):
     assert make_store(tmp_path).yearly_cumulative_series(2026, up_to=DAY) == []
+
+
+def _rec(ticker="005930", name="삼성전자", **kwargs):
+    defaults = dict(
+        target_price=70_000,
+        target_sell_price=71_400,
+        reason="전일 등락률 +2.15%",
+        setup="rebound",
+        outlook="오전 중 회복 시도",
+        recommend_price=70_500.0,
+    )
+    defaults.update(kwargs)
+    return StockRecommendation(ticker=ticker, name=name, **defaults)
+
+
+def test_save_and_read_recommendations(tmp_path):
+    store = make_store(tmp_path)
+    day = date(2026, 9, 3)
+    store.save_recommendations(day, [_rec()], "v11")
+
+    rows = store.recommendations_for(day)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.ticker == "005930"
+    assert row.outlook == "오전 중 회복 시도"
+    assert row.prompt_version == "v11"
+    assert row.recommend_price == 70_500.0
+    # 아직 검증 전이므로 실제값은 비어 있다
+    assert row.actual_close is None
+    assert row.buy_target_hit is None
+    assert row.review == ""
+
+
+def test_save_recommendations_is_idempotent_per_day_and_ticker(tmp_path):
+    """① 버튼을 두 번 눌러도 행이 겹치지 않고, 나중 추천이 앞선 추천을 덮어쓴다."""
+    store = make_store(tmp_path)
+    day = date(2026, 9, 3)
+    store.save_recommendations(day, [_rec(target_price=70_000)], "v11")
+    store.save_recommendations(day, [_rec(target_price=68_000)], "v11")
+
+    rows = store.recommendations_for(day)
+    assert len(rows) == 1
+    assert rows[0].target_price == 68_000
+
+
+def test_recommendations_for_other_day_is_empty(tmp_path):
+    store = make_store(tmp_path)
+    store.save_recommendations(date(2026, 9, 3), [_rec()], "v11")
+    assert store.recommendations_for(date(2026, 9, 2)) == []
+
+
+def test_save_recommendation_outcome(tmp_path):
+    store = make_store(tmp_path)
+    day = date(2026, 9, 3)
+    store.save_recommendations(day, [_rec()], "v11")
+    store.save_recommendation_outcome(
+        day,
+        "005930",
+        actual_high=72_000.0,
+        actual_low=69_500.0,
+        actual_close=71_000.0,
+        actual_change_rate=1.43,
+        buy_target_hit=True,
+        sell_target_hit=True,
+    )
+
+    row = store.recommendations_for(day)[0]
+    assert row.actual_high == 72_000.0
+    assert row.actual_low == 69_500.0
+    assert row.actual_close == 71_000.0
+    assert row.actual_change_rate == 1.43
+    assert row.buy_target_hit is True
+    assert row.sell_target_hit is True
+
+
+def test_save_recommendation_outcome_keeps_unknown_sell_hit_null(tmp_path):
+    """목표 매도가가 산출되지 않은(0) 종목은 '미도달'이 아니라 '판정 안 함'이다."""
+    store = make_store(tmp_path)
+    day = date(2026, 9, 3)
+    store.save_recommendations(day, [_rec(target_sell_price=0)], "v11")
+    store.save_recommendation_outcome(
+        day,
+        "005930",
+        actual_high=72_000.0,
+        actual_low=69_500.0,
+        actual_close=71_000.0,
+        actual_change_rate=1.43,
+        buy_target_hit=True,
+        sell_target_hit=None,
+    )
+    assert store.recommendations_for(day)[0].sell_target_hit is None
+
+
+def test_save_recommendation_review(tmp_path):
+    store = make_store(tmp_path)
+    day = date(2026, 9, 3)
+    store.save_recommendations(day, [_rec()], "v11")
+    store.save_recommendation_review(day, "005930", "오전 회복 시도는 맞았습니다.")
+    assert store.recommendations_for(day)[0].review == "오전 회복 시도는 맞았습니다."
+
+
+def test_recommendations_do_not_touch_trades_table(tmp_path):
+    """추천 기록은 체결 집계와 별개다 — 일일 리포트 숫자가 흔들리면 안 된다."""
+    store = make_store(tmp_path)
+    day = date(2026, 9, 3)
+    store.save_recommendations(day, [_rec()], "v11")
+    summary = store.daily_summary(day)
+    assert summary.buy_count == 0
+    assert summary.sell_count == 0

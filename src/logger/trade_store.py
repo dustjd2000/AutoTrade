@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from src.core.events import FillRecord, OrderResult, OrderSide, OrderStatus, format_stock
+# 순환 참조 없음 — recommender는 config.settings와 src.data.collector만 본다.
+from src.llm.recommender import StockRecommendation
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,33 @@ MIGRATIONS = (
     ("tax", "ALTER TABLE trades ADD COLUMN tax REAL"),
     ("exit_reason", "ALTER TABLE trades ADD COLUMN exit_reason TEXT"),
 )
+
+# 추천 기록 — 추천 시각에 앞부분을 넣고, 15:35 검증이 뒷부분(actual_*, *_hit, review)을 채운다.
+# trades와 달리 체결이 아니라 '무엇을 추천했고 실제로 어떻게 움직였나'를 남기는 표다.
+# 미체결로 사지 못한 종목도 여기에는 남아, "목표 매수가가 현실적이었나"를 되짚는 표본이 된다.
+RECOMMENDATION_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS recommendations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    name TEXT,
+    prompt_version TEXT,
+    recommend_price REAL,
+    target_price INTEGER,
+    target_sell_price INTEGER,
+    setup TEXT,
+    reason TEXT,
+    outlook TEXT,
+    actual_high REAL,
+    actual_low REAL,
+    actual_close REAL,
+    actual_change_rate REAL,
+    buy_target_hit INTEGER,
+    sell_target_hit INTEGER,
+    review TEXT,
+    UNIQUE (day, ticker)
+);
+"""
 
 # 부분체결도 실제 매매이므로 집계에 포함한다
 FILLED_STATUSES = (OrderStatus.FILLED.value, OrderStatus.PARTIALLY_FILLED.value)
@@ -151,6 +180,37 @@ class DailyPoint:
     cumulative: float   # 기간 시작부터 그 점까지 누적 순손익
 
 
+@dataclass
+class RecommendationRow:
+    """추천 한 건과 그날의 실제 결과 (PRD 5.5-B '추천 검증').
+
+    actual_* 와 *_hit 이 None이면 아직 검증 전이거나 당일 봉 조회에 실패한 종목이다.
+    review가 ""면 LLM 평가를 받지 못한 것이며, 둘 다 메일에서 해당 줄이 빠진다.
+    """
+
+    day: date
+    ticker: str
+    name: str
+    prompt_version: str
+    recommend_price: float
+    target_price: int
+    target_sell_price: int
+    setup: str
+    reason: str
+    outlook: str
+    actual_high: Optional[float] = None
+    actual_low: Optional[float] = None
+    actual_close: Optional[float] = None
+    actual_change_rate: Optional[float] = None
+    buy_target_hit: Optional[bool] = None
+    sell_target_hit: Optional[bool] = None
+    review: str = ""
+
+    @property
+    def label(self) -> str:
+        return format_stock(self.ticker, self.name)
+
+
 class TradeStore:
     """매수/매도 체결 내역을 SQLite에 영속 저장한다.
 
@@ -166,6 +226,7 @@ class TradeStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as conn:
             conn.execute(SCHEMA)
+            conn.execute(RECOMMENDATION_SCHEMA_SQL)
             self._migrate(conn)
             conn.commit()
 
@@ -181,6 +242,124 @@ class TradeStore:
             if column not in existing:
                 conn.execute(ddl)
                 logger.info("trades 테이블에 %s 컬럼을 추가했습니다.", column)
+
+    # ── 추천 기록 (PRD 5.5-B '추천 검증') ────────────────────
+    def save_recommendations(
+        self, day: date, recommendations: List[StockRecommendation], prompt_version: str
+    ) -> None:
+        """그날 추천 메일에 실린 종목을 남긴다.
+
+        (day, ticker) UNIQUE로 UPSERT한다 — UI ① 버튼을 두 번 눌러도 행이 겹치지 않고,
+        나중 추천이 앞선 추천을 덮어쓴다. 그날 실제로 쓰인 것이 마지막 추천이기 때문이다.
+        덮어쓸 때 검증 칸(actual_*, *_hit, review)은 건드리지 않는다 — 추천을 다시 돌린
+        시점에는 아직 채워져 있지 않고, 채워져 있다면 그것이 더 나중 정보다.
+        """
+        with closing(self._connect()) as conn:
+            conn.executemany(
+                """INSERT INTO recommendations
+                   (day, ticker, name, prompt_version, recommend_price, target_price,
+                    target_sell_price, setup, reason, outlook)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(day, ticker) DO UPDATE SET
+                       name = excluded.name,
+                       prompt_version = excluded.prompt_version,
+                       recommend_price = excluded.recommend_price,
+                       target_price = excluded.target_price,
+                       target_sell_price = excluded.target_sell_price,
+                       setup = excluded.setup,
+                       reason = excluded.reason,
+                       outlook = excluded.outlook""",
+                [
+                    (
+                        day.isoformat(),
+                        r.ticker,
+                        r.name,
+                        prompt_version,
+                        r.recommend_price,
+                        r.target_price,
+                        r.target_sell_price,
+                        r.setup,
+                        r.reason,
+                        r.outlook,
+                    )
+                    for r in recommendations
+                ],
+            )
+            conn.commit()
+
+    def recommendations_for(self, day: date) -> List[RecommendationRow]:
+        """그날 추천 목록. 추천이 없었으면 빈 리스트."""
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT * FROM recommendations WHERE day = ? ORDER BY id",
+                (day.isoformat(),),
+            ).fetchall()
+        return [
+            RecommendationRow(
+                day=day,
+                ticker=row["ticker"],
+                name=row["name"] or "",
+                prompt_version=row["prompt_version"] or "",
+                recommend_price=row["recommend_price"] or 0.0,
+                target_price=row["target_price"] or 0,
+                target_sell_price=row["target_sell_price"] or 0,
+                setup=row["setup"] or "",
+                reason=row["reason"] or "",
+                outlook=row["outlook"] or "",
+                actual_high=row["actual_high"],
+                actual_low=row["actual_low"],
+                actual_close=row["actual_close"],
+                actual_change_rate=row["actual_change_rate"],
+                buy_target_hit=_optional_bool(row["buy_target_hit"]),
+                sell_target_hit=_optional_bool(row["sell_target_hit"]),
+                review=row["review"] or "",
+            )
+            for row in rows
+        ]
+
+    def save_recommendation_outcome(
+        self,
+        day: date,
+        ticker: str,
+        actual_high: float,
+        actual_low: float,
+        actual_close: float,
+        actual_change_rate: float,
+        buy_target_hit: bool,
+        sell_target_hit: Optional[bool],
+    ) -> None:
+        """장 마감 후 실제 움직임을 같은 행에 채운다.
+
+        sell_target_hit이 None인 것은 목표 매도가가 산출되지 않아(0) 판정할 것이 없는
+        경우다 — 0/1이 아니라 NULL로 남겨 '도달 못함'과 구분한다.
+        """
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """UPDATE recommendations
+                   SET actual_high = ?, actual_low = ?, actual_close = ?,
+                       actual_change_rate = ?, buy_target_hit = ?, sell_target_hit = ?
+                   WHERE day = ? AND ticker = ?""",
+                (
+                    actual_high,
+                    actual_low,
+                    actual_close,
+                    actual_change_rate,
+                    int(buy_target_hit),
+                    None if sell_target_hit is None else int(sell_target_hit),
+                    day.isoformat(),
+                    ticker,
+                ),
+            )
+            conn.commit()
+
+    def save_recommendation_review(self, day: date, ticker: str, review: str) -> None:
+        """LLM 평가문을 같은 행에 채운다. 평가를 받지 못한 종목은 부르지 않는다."""
+        with closing(self._connect()) as conn:
+            conn.execute(
+                "UPDATE recommendations SET review = ? WHERE day = ? AND ticker = ?",
+                (review, day.isoformat(), ticker),
+            )
+            conn.commit()
 
     def record_fill(
         self,
@@ -558,3 +737,8 @@ def _weighted_average(pairs: List[Tuple[Optional[float], Optional[int]]]) -> flo
     if total_qty <= 0:
         return 0.0
     return sum((p or 0.0) * (q or 0) for p, q in pairs) / total_qty
+
+
+def _optional_bool(value) -> Optional[bool]:
+    """SQLite의 0/1/NULL을 bool/None으로. NULL은 '판정하지 않음'이라 False와 구분해야 한다."""
+    return None if value is None else bool(value)
