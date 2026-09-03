@@ -1359,15 +1359,21 @@ def test_dropping_ignores_rows_with_no_live_order():
     assert order_client.cancelled == []
 
 
-def _recommendation():
+def _recommendation(
+    ticker="005930",
+    name="삼성전자",
+    target_price=70_000,
+    target_sell_price=71_400,
+    outlook="오전 중 회복 시도",
+):
     return StockRecommendation(
-        ticker="005930",
-        name="삼성전자",
-        target_price=70_000,
-        target_sell_price=71_400,
+        ticker=ticker,
+        name=name,
+        target_price=target_price,
+        target_sell_price=target_sell_price,
         reason="전일 등락률 +2.15%",
         setup="rebound",
-        outlook="오전 중 회복 시도",
+        outlook=outlook,
         recommend_price=70_500.0,
     )
 
@@ -1377,8 +1383,13 @@ class FakeMarketData:
 
     def __init__(self):
         self.today_metrics = {}
+        # 이 집합에 든 종목코드는 today_metrics를 보지 않고 조회 자체가 터진 것처럼 군다
+        # (candle-lookup exception path — None을 돌려주는 것과는 다른 분기다).
+        self.raise_for = set()
 
     def get_today_metrics(self, ticker, today=None):
+        if ticker in self.raise_for:
+            raise RuntimeError("candle lookup failed")
         return self.today_metrics.get(ticker)
 
 
@@ -1546,3 +1557,119 @@ def test_review_recommendations_skips_llm_for_unverified_stock(tmp_path):
     workflow.review_recommendations(day)
 
     assert workflow.reviewer.calls == [], "평가 호출 자체가 없어야 한다"
+
+
+def test_review_recommendations_survives_candle_lookup_exception(tmp_path):
+    """한 종목의 일봉 조회가 예외로 터져도 나머지 종목의 검증은 계속된다.
+
+    today_metrics를 비워 None을 돌려주는 것(존재하는 다른 테스트)과는 다른 분기다 —
+    여기서는 get_today_metrics 자체가 raise한다.
+    """
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 3)
+    boom = _recommendation(ticker="000660", name="SK하이닉스")
+    ok = _recommendation(ticker="005930", name="삼성전자")
+    workflow.trade_store.save_recommendations(day, [boom, ok], "v11")
+    workflow.collector.market_data.today_metrics = {"005930": _metrics()}
+    workflow.collector.market_data.raise_for = {"000660"}
+
+    workflow.review_recommendations(day)
+
+    rows = {row.ticker: row for row in workflow.trade_store.recommendations_for(day)}
+    assert rows["000660"].actual_close is None
+    assert rows["005930"].actual_close == 71_000.0
+    assert workflow.email.sent, "조회 실패 종목이 있어도 메일은 나가야 한다"
+
+
+def test_review_recommendations_leaves_zero_close_unfilled(tmp_path):
+    """당일 봉 종가가 0으로 온 경우도 조회 실패와 같이 취급해 값을 채우지 않는다."""
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 3)
+    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
+    workflow.collector.market_data.today_metrics = {
+        "005930": TodayMetrics(ticker="005930", high=72_000.0, low=69_500.0, close=0.0, change_rate=0.0)
+    }
+
+    workflow.review_recommendations(day)
+
+    row = workflow.trade_store.recommendations_for(day)[0]
+    assert row.actual_close is None
+
+
+def test_review_recommendations_survives_outcome_save_failure(tmp_path):
+    """실제 움직임 저장이 실패해도 흐름이 멈추지 않고 메일은 나간다."""
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 3)
+    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
+    workflow.collector.market_data.today_metrics = {"005930": _metrics()}
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    workflow.trade_store.save_recommendation_outcome = boom
+    workflow.review_recommendations(day)
+
+    assert workflow.email.sent, "저장이 실패해도 검증 메일은 나가야 한다"
+
+
+def test_review_recommendations_survives_review_save_failure(tmp_path):
+    """평가문 저장이 실패해도 흐름이 멈추지 않고 메일은 나간다."""
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 3)
+    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
+    workflow.collector.market_data.today_metrics = {"005930": _metrics()}
+    workflow.reviewer.result = {"005930": "오전 회복 시도는 맞았습니다."}
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    workflow.trade_store.save_recommendation_review = boom
+    workflow.review_recommendations(day)
+
+    assert workflow.email.sent, "평가문 저장이 실패해도 검증 메일은 나가야 한다"
+
+
+def test_review_recommendations_without_reviewer_saves_numbers_and_sends_mail(tmp_path):
+    """reviewer가 None이면 LLM을 부르지 않고도 수치는 저장하고 메일은 나간다."""
+    workflow = build_workflow(tmp_path)
+    workflow.reviewer = None
+    day = date(2026, 9, 3)
+    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
+    workflow.collector.market_data.today_metrics = {"005930": _metrics()}
+
+    workflow.review_recommendations(day)
+
+    row = workflow.trade_store.recommendations_for(day)[0]
+    assert row.actual_close == 71_000.0
+    assert row.review == ""
+    assert workflow.email.sent, "reviewer가 없어도 검증 메일은 나가야 한다"
+
+
+def test_review_recommendations_leaves_unmatched_ticker_review_blank(tmp_path):
+    """reviewer가 일부 종목만 평가해 돌려주면, 나머지 종목의 review는 빈 채로 남는다."""
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 3)
+    first = _recommendation(ticker="005930", name="삼성전자")
+    second = _recommendation(ticker="000660", name="SK하이닉스", target_price=100_000, target_sell_price=102_000)
+    workflow.trade_store.save_recommendations(day, [first, second], "v11")
+    workflow.collector.market_data.today_metrics = {
+        "005930": _metrics(),
+        "000660": TodayMetrics(ticker="000660", high=103_000.0, low=99_000.0, close=101_000.0, change_rate=1.0),
+    }
+    workflow.reviewer.result = {"005930": "오전 회복 시도는 맞았습니다."}  # 000660은 빠져 있다
+
+    original_save_review = workflow.trade_store.save_recommendation_review
+    saved_tickers = []
+
+    def spy_save_review(day, ticker, review):
+        saved_tickers.append(ticker)
+        original_save_review(day, ticker, review)
+
+    workflow.trade_store.save_recommendation_review = spy_save_review
+
+    workflow.review_recommendations(day)
+
+    rows = {row.ticker: row for row in workflow.trade_store.recommendations_for(day)}
+    assert rows["005930"].review == "오전 회복 시도는 맞았습니다."
+    assert rows["000660"].review == ""
+    assert saved_tickers == ["005930"], "평가를 받지 못한 종목은 저장을 부르지 않는다"
