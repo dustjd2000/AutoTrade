@@ -35,6 +35,21 @@ class PreviousDayMetrics:
 
 
 @dataclass
+class TodayMetrics:
+    """당일 일봉(ka10086)에서 뽑은 그날의 실제 움직임 (PRD 5.5-B '추천 검증').
+
+    `PreviousDayMetrics`가 당일 봉을 걸러내는 것과 정반대로, 여기서는 당일 봉만 쓴다.
+    장 마감(15:30) 뒤에만 부른다 — 장중에 부르면 진행 중인 값이 잡힌다.
+    """
+
+    ticker: str
+    high: float
+    low: float
+    close: float
+    change_rate: float  # 전일 종가 대비 %. 전일 봉이 없으면 0 (산출 안 됨)
+
+
+@dataclass
 class StockMaster:
     """종목 마스터 최소 정보 — 거래 가능한 종목인지 확인하는 용도.
 
@@ -205,6 +220,49 @@ class MarketDataClient:
             recent_high=max(highs) if highs else 0.0,
             recent_low=min(lows) if lows else 0.0,
             moving_average=sum(closes) / len(closes) if closes else 0.0,
+        )
+
+    def get_today_metrics(
+        self, ticker: str, today: Optional[date] = None
+    ) -> Optional[TodayMetrics]:
+        """당일 봉의 고가·저가·종가와 전일 종가 대비 등락률. 당일 봉이 없으면 None.
+
+        마감 동시호가(15:20~15:30) 체결이 반영된 뒤에 불러야 종가가 확정된 값이다
+        (runtime.REPORT_TIME 주석 참고).
+        """
+        candles = self.get_ohlcv(ticker, period="D", count=DAILY_CANDLE_COUNT)
+        today_str = (today or date.today()).strftime("%Y%m%d")
+        current = None
+        previous = None
+        for candle in candles:
+            day = str(_first_present(candle, "date", "dt") or "").strip()
+            if current is None:
+                if day == today_str:
+                    current = candle
+                continue
+            previous = candle
+            break
+        if current is None:
+            logger.warning("당일 일봉을 찾지 못했습니다: %s", ticker)
+            return None
+
+        # 키움은 가격에 등락 방향 부호를 붙여 보내므로 절댓값을 취한다
+        close = abs(to_float(_first_present(current, "close_pric", "cur_prc")))
+        prev_close = (
+            abs(to_float(_first_present(previous, "close_pric", "cur_prc")))
+            if previous is not None
+            else 0.0
+        )
+        return TodayMetrics(
+            ticker=ticker,
+            high=abs(to_float(_first_present(current, "high_pric"))),
+            low=abs(to_float(_first_present(current, "low_pric"))),
+            close=close,
+            change_rate=(
+                (close - prev_close) / prev_close * 100
+                if close > 0 and prev_close > 0
+                else 0.0
+            ),
         )
 
     def get_orderbook(self, ticker: str) -> dict:

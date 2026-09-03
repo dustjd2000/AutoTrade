@@ -211,3 +211,43 @@ def test_previous_day_metrics_keeps_high_and_low():
     result = client.get_previous_day_metrics("005930", today=date(2026, 8, 6))
 
     assert (result.high, result.low) == (72000.0, 69000.0)
+
+
+# ── 당일 지표 (ka10086 일봉 1회, 장 마감 후) ─────────────────────
+def test_get_today_metrics_reads_todays_candle():
+    client = make_client(
+        {
+            "daly_stkpc": [
+                candle("20260903", close="+71000", high="+72000", low="69500"),
+                candle("20260902", close="70000"),
+            ]
+        }
+    )
+
+    metrics = client.get_today_metrics("005930", today=date(2026, 9, 3))
+
+    assert metrics.high == 72_000.0
+    assert metrics.low == 69_500.0
+    assert metrics.close == 71_000.0
+    assert metrics.change_rate == pytest.approx(1.4286, abs=1e-3)
+
+
+def test_get_today_metrics_returns_none_without_todays_candle():
+    """장 마감 전이거나 휴장일이라 당일 봉이 없으면 None — 0으로 채우지 않는다."""
+    client = make_client({"daly_stkpc": [candle("20260902", close="70000")]})
+
+    assert client.get_today_metrics("005930", today=date(2026, 9, 3)) is None
+
+
+def test_get_today_metrics_without_previous_close_leaves_change_rate_zero():
+    client = make_client(
+        {
+            "daly_stkpc": [
+                candle("20260903", close="71000", high="72000", low="69500"),
+            ]
+        }
+    )
+
+    metrics = client.get_today_metrics("005930", today=date(2026, 9, 3))
+
+    assert metrics.change_rate == 0.0
