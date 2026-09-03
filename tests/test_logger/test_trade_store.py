@@ -3,11 +3,34 @@ from datetime import date, datetime
 
 from src.core.events import FillRecord, OrderResult, OrderSide, OrderStatus
 from src.llm.recommender import StockRecommendation
+from src.logger import trade_store as trade_store_module
 from src.logger.trade_store import TradeStore
 
 
 def make_store(tmp_path):
     return TradeStore(db_path=tmp_path / "trades.db")
+
+
+def test_migrate_adds_missing_column_to_existing_recommendations_table(tmp_path, monkeypatch):
+    """recommendations 테이블도 trades처럼 기존 DB에 컬럼을 뒤늦게 붙일 수 있어야 한다.
+
+    RECOMMENDATION_MIGRATIONS를 타지 않으면 CREATE TABLE IF NOT EXISTS가 이미 있는 DB에는
+    조용히 no-op되어, 다음에 컬럼을 추가해도 기존 DB에는 영영 생기지 않는다.
+    """
+    db_path = tmp_path / "trades.db"
+    TradeStore(db_path=db_path)  # 컬럼 없이 기존 DB를 먼저 만들어 둔다
+
+    monkeypatch.setattr(
+        trade_store_module,
+        "RECOMMENDATION_MIGRATIONS",
+        (("note", "ALTER TABLE recommendations ADD COLUMN note TEXT"),),
+    )
+
+    TradeStore(db_path=db_path)  # 같은 DB로 재시작 — 새 컬럼이 뒤따라 붙어야 한다
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(recommendations)")}
+    assert "note" in columns
 
 
 def make_result(side, status, filled_price, timestamp, filled_quantity=10):

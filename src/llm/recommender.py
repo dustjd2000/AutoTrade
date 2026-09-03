@@ -549,7 +549,7 @@ class LLMRecommender:
         attach_recommend_price(recommendations, daily_data)
         warn_invalid_sell_targets(recommendations)
         # 매수가와 매도가를 함께 남긴다 — 나중에 실제 고가와 대조해 목표 매도가가
-        # 쓸 만했는지 되짚을 유일한 근거다 (DB에는 남지 않는다)
+        # 쓸 만했는지 되짚을 근거다 (2026-09-03부터 recommendations 테이블에도 영구 저장된다)
         logger.info(
             "LLM recommended %d stock(s) (prompt_version=%s): %s",
             len(recommendations),

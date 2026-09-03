@@ -1,3 +1,4 @@
+from datetime import date
 from types import SimpleNamespace
 
 from src.llm.reviewer import (
@@ -7,6 +8,7 @@ from src.llm.reviewer import (
     build_review_user_prompt,
     parse_reviews,
 )
+from src.logger.trade_store import RecommendationRow
 
 
 def item(ticker="005930", **kwargs):
@@ -50,6 +52,48 @@ def test_user_prompt_includes_actual_numbers_and_outlook():
 
 def test_system_prompt_forbids_advice():
     assert "조언" in build_review_system_prompt()
+
+
+def test_user_prompt_renders_from_real_recommendation_row():
+    """RecommendationRow → ReviewInput → build_review_user_prompt 경로를 실제 타입으로
+    잇는다 — 지금까지 이 경로는 양쪽 다 가짜(item())로만 테스트돼, RecommendationRow의
+    필드가 ReviewInput이 기대하는 값과 어긋나도 아무 테스트도 잡아내지 못했다."""
+    row = RecommendationRow(
+        day=date(2026, 9, 3),
+        ticker="005930",
+        name="삼성전자",
+        prompt_version="v11",
+        recommend_price=70_500.0,
+        target_price=70_000,
+        target_sell_price=71_400,
+        setup="rebound",
+        reason="전일 등락률 +2.15%",
+        outlook="오전 중 이동평균 82,300원 회복 시도",
+        actual_high=72_000.0,
+        actual_low=69_500.0,
+        actual_close=71_000.0,
+        actual_change_rate=1.43,
+        buy_target_hit=True,
+        sell_target_hit=True,
+    )
+    review_input = ReviewInput(
+        ticker=row.ticker,
+        name=row.name,
+        outlook=row.outlook,
+        target_price=row.target_price,
+        target_sell_price=row.target_sell_price,
+        recommend_price=row.recommend_price,
+        actual_high=row.actual_high,
+        actual_low=row.actual_low,
+        actual_close=row.actual_close,
+        actual_change_rate=row.actual_change_rate,
+    )
+
+    prompt = build_review_user_prompt([review_input])
+
+    assert "005930" in prompt
+    assert "72,000" in prompt
+    assert "이동평균 82,300원 회복 시도" in prompt
 
 
 def test_review_returns_none_when_api_raises():

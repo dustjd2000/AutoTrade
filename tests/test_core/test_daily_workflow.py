@@ -16,7 +16,7 @@ from src.core.events import (
 )
 from src.data.collector import DailyStockData
 from src.llm.recommender import PROMPT_TEMPLATE_VERSION, StockRecommendation
-from src.logger.trade_store import DailySummary, MonthlySummary, TradeRow, TradeStore
+from src.logger.trade_store import DailySummary, MonthlySummary, RecommendationRow, TradeRow, TradeStore
 from src.risk.manager import exit_trigger_price
 from src.strategy.llm_momentum import LLMMomentumStrategy
 
@@ -129,7 +129,10 @@ def make_workflow(recommendations=None, collected=True, cash=12_000_000):
             get_positions=lambda: {},
             get_balance_snapshot=lambda: SimpleNamespace(total_asset=cash, cash=cash),
         ),
-        trade_store=SimpleNamespace(record_fill=lambda *a, **kw: None),
+        trade_store=SimpleNamespace(
+            record_fill=lambda *a, **kw: None,
+            save_recommendations=lambda *a, **kw: None,
+        ),
         email=email,
     )
     return workflow, email, order_client, notifications, strategy
@@ -1559,6 +1562,52 @@ def test_review_recommendations_skips_llm_for_unverified_stock(tmp_path):
     assert workflow.reviewer.calls == [], "평가 호출 자체가 없어야 한다"
 
 
+def test_review_recommendations_survives_review_call_raising(tmp_path):
+    """평가 호출 자체가 예외로 죽어도(예: 포맷 문자열이 None을 만나 TypeError) 검증
+    메일은 나가야 한다 — LLMReviewer.review는 build_review_user_prompt를 try 밖에서
+    부르므로 그 안에서 던진 예외가 그대로 새어나올 수 있다."""
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 3)
+    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
+    workflow.collector.market_data.today_metrics = {"005930": _metrics()}
+
+    def boom(items, timeout_seconds=120.0):
+        raise TypeError("unsupported format string passed to NoneType.__format__")
+
+    workflow.reviewer.review = boom
+    workflow.review_recommendations(day)
+
+    assert workflow.email.sent, "평가 호출이 실패해도 검증 메일은 나가야 한다"
+
+
+def test_fill_reviews_skips_when_any_actual_field_missing(tmp_path):
+    """actual_close만 있고 나머지 실제값이 없는 행은 평가 입력에서 빠져야 한다 —
+    ReviewInput이 네 수치를 모두 쓰므로, 하나라도 없으면 build_review_user_prompt의
+    포맷 문자열이 TypeError로 죽는다."""
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 3)
+    row = RecommendationRow(
+        day=day,
+        ticker="005930",
+        name="삼성전자",
+        prompt_version="v11",
+        recommend_price=70_500.0,
+        target_price=70_000,
+        target_sell_price=71_400,
+        setup="rebound",
+        reason="전일 등락률 +2.15%",
+        outlook="오전 중 회복 시도",
+        actual_high=None,
+        actual_low=None,
+        actual_close=71_000.0,
+        actual_change_rate=None,
+    )
+
+    workflow._fill_reviews(day, [row])
+
+    assert workflow.reviewer.calls == [], "실제값이 일부만 있는 행은 평가 대상이 아니다"
+
+
 def test_review_recommendations_survives_candle_lookup_exception(tmp_path):
     """한 종목의 일봉 조회가 예외로 터져도 나머지 종목의 검증은 계속된다.
 
@@ -1588,6 +1637,23 @@ def test_review_recommendations_leaves_zero_close_unfilled(tmp_path):
     workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
     workflow.collector.market_data.today_metrics = {
         "005930": TodayMetrics(ticker="005930", high=72_000.0, low=69_500.0, close=0.0, change_rate=0.0)
+    }
+
+    workflow.review_recommendations(day)
+
+    row = workflow.trade_store.recommendations_for(day)[0]
+    assert row.actual_close is None
+
+
+def test_review_recommendations_leaves_blank_high_or_low_unfilled(tmp_path):
+    """고가·저가가 빈 응답(0.0)으로 와도 종가가 멀쩡하면 그 0.0을 실제 저가처럼 저장해서는
+    안 된다 — market_data.to_float("")가 0.0을 돌려주는 것과 조회 실패를 구분하지 못하면
+    '미도달 (매수 무산)'이 사실인 것처럼 메일에 찍힌다."""
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 3)
+    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
+    workflow.collector.market_data.today_metrics = {
+        "005930": TodayMetrics(ticker="005930", high=0.0, low=69_500.0, close=71_000.0, change_rate=1.43)
     }
 
     workflow.review_recommendations(day)

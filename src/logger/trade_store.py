@@ -70,6 +70,10 @@ CREATE TABLE IF NOT EXISTS recommendations (
 );
 """
 
+# recommendations 테이블에 뒤늦게 추가될 컬럼들 — 지금은 비어 있다. trades와 같은 패턴을
+# 갖춰 둬야 다음 컬럼 추가 때 CREATE TABLE IF NOT EXISTS가 조용히 no-op되는 함정을 피한다.
+RECOMMENDATION_MIGRATIONS: Tuple[Tuple[str, str], ...] = ()
+
 # 부분체결도 실제 매매이므로 집계에 포함한다
 FILLED_STATUSES = (OrderStatus.FILLED.value, OrderStatus.PARTIALLY_FILLED.value)
 
@@ -227,7 +231,8 @@ class TradeStore:
         with closing(self._connect()) as conn:
             conn.execute(SCHEMA)
             conn.execute(RECOMMENDATION_SCHEMA_SQL)
-            self._migrate(conn)
+            self._migrate(conn, "trades", MIGRATIONS)
+            self._migrate(conn, "recommendations", RECOMMENDATION_MIGRATIONS)
             conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
@@ -236,12 +241,14 @@ class TradeStore:
         return conn
 
     @staticmethod
-    def _migrate(conn: sqlite3.Connection) -> None:
-        existing = {row["name"] for row in conn.execute("PRAGMA table_info(trades)")}
-        for column, ddl in MIGRATIONS:
+    def _migrate(
+        conn: sqlite3.Connection, table: str, migrations: Tuple[Tuple[str, str], ...]
+    ) -> None:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for column, ddl in migrations:
             if column not in existing:
                 conn.execute(ddl)
-                logger.info("trades 테이블에 %s 컬럼을 추가했습니다.", column)
+                logger.info("%s 테이블에 %s 컬럼을 추가했습니다.", table, column)
 
     # ── 추천 기록 (PRD 5.5-B '추천 검증') ────────────────────
     def save_recommendations(

@@ -86,6 +86,18 @@ def _outlook_line(r: StockRecommendation) -> str:
     return f"   오늘 전망: {r.outlook}"
 
 
+def _price_move_line(row: RecommendationRow) -> str:
+    """검증 메일의 '추천 시각가 → 종가' 한 줄. 산출되지 않은 값(0)은 그 조각만 뺀다.
+
+    recommend_price==0은 추천 시각 현재가 조회 실패(당일 지표 없음)를, actual_change_rate==0은
+    전일 봉이 없어 등락률을 못 낸 것을 뜻한다(TodayMetrics docstring) — 둘 다 실제로 0원/0%인
+    것과 구분되지 않아, 있는 그대로 적으면 사실이 아닌 값처럼 읽힌다.
+    """
+    prefix = f"추천 시각가: {row.recommend_price:,.0f}원 → " if row.recommend_price > 0 else ""
+    rate = f" ({row.actual_change_rate:+.2f}%)" if row.actual_change_rate != 0 else ""
+    return f"   {prefix}종가: {row.actual_close:,.0f}원{rate}"
+
+
 def recommendation_review_email(
     rows: List[RecommendationRow], today: date
 ) -> tuple[str, str]:
@@ -104,10 +116,7 @@ def recommendation_review_email(
         if row.actual_close is None:
             lines.extend(["   당일 봉 조회 실패 — 실제 움직임을 확인하지 못했습니다.", ""])
             continue
-        lines.append(
-            f"   추천 시각가: {row.recommend_price:,.0f}원 → "
-            f"종가: {row.actual_close:,.0f}원 ({row.actual_change_rate:+.2f}%)"
-        )
+        lines.append(_price_move_line(row))
         lines.append(f"   당일 고가/저가: {row.actual_high:,.0f}원 / {row.actual_low:,.0f}원")
         lines.append(
             f"   목표 매수가: {row.target_price:,}원 — "

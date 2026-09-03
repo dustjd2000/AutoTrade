@@ -1160,7 +1160,9 @@ class DailyWorkflow:
             except Exception:
                 logger.exception("당일 봉 조회 실패: %s %s", row.ticker, row.name)
                 metrics = None
-            if metrics is None or metrics.close <= 0:
+            # 고가·저가가 빈 문자열로 와도 to_float가 0.0을 돌려주므로(market_data.py), 종가만
+            # 보면 그 0.0을 진짜 저가로 착각해 저장한다 — 셋 다 봐야 "빈 응답"을 걸러낸다.
+            if metrics is None or metrics.close <= 0 or metrics.high <= 0 or metrics.low <= 0:
                 continue
 
             row.actual_high = metrics.high
@@ -1204,13 +1206,25 @@ class DailyWorkflow:
                 actual_change_rate=row.actual_change_rate,
             )
             # 실제값이 없는 종목은 대조할 것이 없다. 전망이 없는 종목도 평가 대상이 아니다.
+            # ReviewInput이 네 수치를 모두 쓰므로 넷 다 채워졌는지 본다 — 하나만 보면 나머지
+            # 셋 중 None이 남아 있을 때 build_review_user_prompt의 포맷 문자열이 TypeError로 죽는다.
             for row in rows
-            if row.actual_close is not None and row.outlook
+            if (
+                row.actual_high is not None
+                and row.actual_low is not None
+                and row.actual_close is not None
+                and row.actual_change_rate is not None
+                and row.outlook
+            )
         ]
         if not items:
             return
 
-        reviews = self.reviewer.review(items)
+        try:
+            reviews = self.reviewer.review(items)
+        except Exception:
+            logger.exception("LLM 검증 평가 호출이 실패했습니다 — 수치만으로 메일을 보냅니다.")
+            return
         if not reviews:
             logger.warning("LLM 검증 평가를 받지 못했습니다 — 수치만으로 메일을 보냅니다.")
             return

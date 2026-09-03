@@ -535,6 +535,25 @@ def test_review_email_shows_actuals_and_hits():
     assert "평가: 오전 회복 시도는 맞았습니다." in body
 
 
+def test_review_email_omits_recommend_price_when_lookup_failed():
+    """recommend_price가 0이면(추천 시각 현재가 조회 실패) '추천 시각가: 0원'을 찍지 않는다."""
+    body = templates.recommendation_review_email(
+        [_row(recommend_price=0.0)], date(2026, 9, 3)
+    )[1]
+    assert "추천 시각가" not in body
+    assert "종가: 71,000원 (+1.43%)" in body
+
+
+def test_review_email_omits_change_rate_when_not_produced():
+    """actual_change_rate가 0이면(전일 봉이 없어 산출 안 됨) '(+0.00%)'를 찍지 않는다 —
+    실제로 등락률이 0%인 것과 구분되지 않아 '평평했다'로 잘못 읽힌다."""
+    body = templates.recommendation_review_email(
+        [_row(actual_change_rate=0.0)], date(2026, 9, 3)
+    )[1]
+    assert "   추천 시각가: 70,500원 → 종가: 71,000원\n" in body
+    assert "(+0.00%)" not in body
+
+
 def test_review_email_marks_missed_targets():
     body = templates.recommendation_review_email(
         [_row(buy_target_hit=False, sell_target_hit=False)], date(2026, 9, 3)
