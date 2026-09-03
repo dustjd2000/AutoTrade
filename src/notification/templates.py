@@ -11,7 +11,7 @@ from src.core.events import (
     format_stock,
 )
 from src.llm.recommender import StockRecommendation
-from src.logger.trade_store import DailySummary, MonthlySummary, TradeRow
+from src.logger.trade_store import DailySummary, MonthlySummary, RecommendationRow, TradeRow
 from src.notification import chart
 from src.risk.manager import exit_trigger_price
 
@@ -84,6 +84,50 @@ def _outlook_line(r: StockRecommendation) -> str:
     if not r.outlook:
         return ""
     return f"   오늘 전망: {r.outlook}"
+
+
+def recommendation_review_email(
+    rows: List[RecommendationRow], today: date
+) -> tuple[str, str]:
+    """15:35 추천 검증 이메일 (PRD 5.5-B '추천 검증').
+
+    일일 리포트와 별개의 메일이다 — 리포트는 보유 종목이 전부 매도되면 15:30 이전에 조기
+    발송될 수 있고, 그때는 당일 고가·저가·종가가 아직 확정되지 않는다.
+
+    표가 없어 HTML을 함께 만들지 않는다. (제목, 평문)만 돌려준다.
+    """
+    subject = f"[AutoTrade] {today:%Y-%m-%d} 추천 검증 {len(rows)}종목"
+
+    lines = [f"{today:%Y-%m-%d} 추천 종목의 실제 움직임입니다.", ""]
+    for i, row in enumerate(rows, start=1):
+        lines.append(f"{i}. {row.label}")
+        if row.actual_close is None:
+            lines.extend(["   당일 봉 조회 실패 — 실제 움직임을 확인하지 못했습니다.", ""])
+            continue
+        lines.append(
+            f"   추천 시각가: {row.recommend_price:,.0f}원 → "
+            f"종가: {row.actual_close:,.0f}원 ({row.actual_change_rate:+.2f}%)"
+        )
+        lines.append(f"   당일 고가/저가: {row.actual_high:,.0f}원 / {row.actual_low:,.0f}원")
+        lines.append(
+            f"   목표 매수가: {row.target_price:,}원 — "
+            + ("도달" if row.buy_target_hit else "미도달 (매수 무산)")
+        )
+        if row.target_sell_price > 0 and row.sell_target_hit is not None:
+            lines.append(
+                f"   목표 매도가: {row.target_sell_price:,}원 — "
+                + ("도달" if row.sell_target_hit else "미도달")
+            )
+        if row.outlook:
+            lines.append(f"   전망: {row.outlook}")
+        if row.review:
+            lines.append(f"   평가: {row.review}")
+        lines.append("")
+
+    lines.append("※ 목표 매수가·매도가와 전망은 참고 수치이며 주문에 사용되지 않습니다.")
+    lines.append("※ 목표 매수가 '도달'은 당일 저가가 그 가격까지 내려왔다는 뜻이며, 실제 매수")
+    lines.append("   여부는 09:08 갭 판정과 10:10 미체결 취소가 따로 정합니다.")
+    return subject, "\n".join(lines)
 
 
 def buy_result_email(execution: BuyExecution) -> tuple[str, str, str]:

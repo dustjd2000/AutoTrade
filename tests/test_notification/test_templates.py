@@ -2,7 +2,7 @@ from datetime import date, datetime
 
 from src.core.events import BuyExecution, BuyOutcome, BuyRecord, UnsellableView
 from src.llm.recommender import StockRecommendation
-from src.logger.trade_store import DailySummary, MonthlySummary, TradeRow
+from src.logger.trade_store import DailySummary, MonthlySummary, RecommendationRow, TradeRow
 from src.notification import templates
 
 DAY = date(2026, 7, 29)
@@ -498,3 +498,80 @@ def test_monthly_chart_is_embedded_only_when_given():
 
     _, _, without = render()
     assert "<img" not in without
+
+
+def _row(**kwargs):
+    defaults = dict(
+        day=date(2026, 9, 3),
+        ticker="005930",
+        name="삼성전자",
+        prompt_version="v11",
+        recommend_price=70_500.0,
+        target_price=70_000,
+        target_sell_price=71_400,
+        setup="rebound",
+        reason="전일 등락률 +2.15%",
+        outlook="오전 중 회복 시도",
+        actual_high=72_000.0,
+        actual_low=69_500.0,
+        actual_close=71_000.0,
+        actual_change_rate=1.43,
+        buy_target_hit=True,
+        sell_target_hit=True,
+        review="오전 회복 시도는 맞았습니다.",
+    )
+    defaults.update(kwargs)
+    return RecommendationRow(**defaults)
+
+
+def test_review_email_shows_actuals_and_hits():
+    subject, body = templates.recommendation_review_email([_row()], date(2026, 9, 3))
+    assert "2026-09-03 추천 검증 1종목" in subject
+    assert "추천 시각가: 70,500원 → 종가: 71,000원 (+1.43%)" in body
+    assert "당일 고가/저가: 72,000원 / 69,500원" in body
+    assert "목표 매수가: 70,000원 — 도달" in body
+    assert "목표 매도가: 71,400원 — 도달" in body
+    assert "전망: 오전 중 회복 시도" in body
+    assert "평가: 오전 회복 시도는 맞았습니다." in body
+
+
+def test_review_email_marks_missed_targets():
+    body = templates.recommendation_review_email(
+        [_row(buy_target_hit=False, sell_target_hit=False)], date(2026, 9, 3)
+    )[1]
+    assert "목표 매수가: 70,000원 — 미도달 (매수 무산)" in body
+    assert "목표 매도가: 71,400원 — 미도달" in body
+
+
+def test_review_email_omits_sell_target_when_not_produced():
+    body = templates.recommendation_review_email(
+        [_row(target_sell_price=0, sell_target_hit=None)], date(2026, 9, 3)
+    )[1]
+    assert "목표 매도가" not in body
+
+
+def test_review_email_marks_lookup_failure():
+    body = templates.recommendation_review_email(
+        [
+            _row(
+                actual_high=None,
+                actual_low=None,
+                actual_close=None,
+                actual_change_rate=None,
+                buy_target_hit=None,
+                sell_target_hit=None,
+                review="",
+            )
+        ],
+        date(2026, 9, 3),
+    )[1]
+    assert "당일 봉 조회 실패" in body
+    assert "당일 고가/저가" not in body
+    assert "평가:" not in body
+
+
+def test_review_email_omits_empty_review():
+    body = templates.recommendation_review_email([_row(review="")], date(2026, 9, 3))[1]
+    assert "평가:" not in body
+    # 수치는 그대로 남는다
+    assert "당일 고가/저가" in body
