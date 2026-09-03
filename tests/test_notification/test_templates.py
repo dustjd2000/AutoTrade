@@ -461,6 +461,34 @@ def test_recommendation_email_omits_the_sell_target_when_unavailable():
     assert "목표 매도가" not in body
 
 
+def test_recommendation_email_shows_outlook():
+    rec = StockRecommendation(
+        ticker="005930",
+        name="삼성전자",
+        target_price=70_000,
+        target_sell_price=71_400,
+        reason="전일 등락률 +2.15%",
+        setup="rebound",
+        outlook="오전 중 이동평균 회복 시도, 실패 시 77,000원까지 되밀림",
+    )
+    _, body = templates.recommendation_email([rec], date(2026, 9, 3), 0.5, 3)
+    assert "오늘 전망: 오전 중 이동평균 회복 시도, 실패 시 77,000원까지 되밀림" in body
+    assert "※ 오늘 전망은 LLM의 참고 수치이며 주문에 사용되지 않습니다." in body
+
+
+def test_recommendation_email_omits_empty_outlook():
+    rec = StockRecommendation(
+        ticker="005930",
+        name="삼성전자",
+        target_price=70_000,
+        target_sell_price=71_400,
+        reason="전일 등락률 +2.15%",
+        setup="rebound",
+    )
+    _, body = templates.recommendation_email([rec], date(2026, 9, 3), 0.5, 3)
+    assert "오늘 전망" not in body
+
+
 def test_monthly_chart_is_embedded_only_when_given():
     """그래프 PNG는 CID 인라인 첨부로 붙는다 — Gmail이 본문 <svg>는 지운다."""
     _, text, html = render(chart_cid="monthly-cumulative")

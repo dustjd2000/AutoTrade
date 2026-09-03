@@ -39,6 +39,9 @@ def recommendation_email(
         sell_line = _sell_target_line(r)
         if sell_line:
             lines.append(sell_line)
+        outlook_line = _outlook_line(r)
+        if outlook_line:
+            lines.append(outlook_line)
         lines.extend([f"   추천 근거: {r.reason}", ""])
 
     if len(recommendations) < target_stock_count:
@@ -57,6 +60,9 @@ def recommendation_email(
             "※ 목표 매도가는 LLM의 참고 수치이며 주문에 사용되지 않습니다 — 실제 매도는 "
             "순손익 기준 익절·손절과 15:15 강제청산이 담당합니다."
         )
+    # 전망 줄을 한 줄도 싣지 못했으면 이 주석도 뺀다 — 메일에 없는 값을 설명하는 꼴이 된다
+    if any(_outlook_line(r) for r in recommendations):
+        lines.append("※ 오늘 전망은 LLM의 참고 수치이며 주문에 사용되지 않습니다.")
     lines.append("※ 이 추천은 사전 유효성 검증(거래정지·상장폐지 등)을 거치지 않았습니다.")
     return subject, "\n".join(lines)
 
@@ -71,6 +77,13 @@ def _sell_target_line(r: StockRecommendation) -> str:
         return ""
     gain = (r.target_sell_price - r.target_price) / r.target_price * 100
     return f"   목표 매도가: {r.target_sell_price:,}원 (매수가 대비 {gain:+.2f}%, 참고용)"
+
+
+def _outlook_line(r: StockRecommendation) -> str:
+    """추천 메일의 오늘 전망 한 줄. 산출되지 않았으면("") 빈 문자열이라 줄이 통째로 빠진다."""
+    if not r.outlook:
+        return ""
+    return f"   오늘 전망: {r.outlook}"
 
 
 def buy_result_email(execution: BuyExecution) -> tuple[str, str, str]:
