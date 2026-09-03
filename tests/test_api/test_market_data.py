@@ -251,3 +251,24 @@ def test_get_today_metrics_without_previous_close_leaves_change_rate_zero():
     metrics = client.get_today_metrics("005930", today=date(2026, 9, 3))
 
     assert metrics.change_rate == 0.0
+
+
+def test_get_today_metrics_skips_a_leading_row_that_is_not_todays():
+    """응답 맨 앞이 당일 봉이 아닐 수도 있다 — 그 다음 봉을 candles[1]로 단정하면 틀린다.
+    previous는 '당일 봉 바로 다음 행'이어야 한다."""
+    client = make_client(
+        {
+            "daly_stkpc": [
+                candle("20260904", close="73000"),
+                candle("20260903", close="+71000", high="+72000", low="69500"),
+                candle("20260902", close="70000"),
+            ]
+        }
+    )
+
+    metrics = client.get_today_metrics("005930", today=date(2026, 9, 3))
+
+    assert metrics.high == 72_000.0
+    assert metrics.low == 69_500.0
+    assert metrics.close == 71_000.0
+    assert metrics.change_rate == pytest.approx(1.4286, abs=1e-3)
