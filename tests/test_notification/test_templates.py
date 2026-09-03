@@ -575,3 +575,35 @@ def test_review_email_omits_empty_review():
     assert "평가:" not in body
     # 수치는 그대로 남는다
     assert "당일 고가/저가" in body
+
+
+def test_review_email_omits_sell_target_when_price_missing_but_judged():
+    """target_sell_price가 0이면 sell_target_hit이 있어도(=판정됨) 줄이 빠진다."""
+    body = templates.recommendation_review_email(
+        [_row(target_sell_price=0, sell_target_hit=True)], date(2026, 9, 3)
+    )[1]
+    assert "목표 매도가" not in body
+
+
+def test_review_email_omits_sell_target_when_not_judged():
+    """target_sell_price가 있어도 sell_target_hit이 None(판정 안 함)이면 줄이 빠진다 —
+    '미도달'로 잘못 찍혀서는 안 된다."""
+    body = templates.recommendation_review_email(
+        [_row(target_sell_price=71_400, sell_target_hit=None)], date(2026, 9, 3)
+    )[1]
+    assert "목표 매도가" not in body
+
+
+def test_review_email_omits_outlook_on_verified_row():
+    body = templates.recommendation_review_email([_row(outlook="")], date(2026, 9, 3))[1]
+    assert "전망:" not in body
+    # 수치는 그대로 남는다
+    assert "당일 고가/저가" in body
+
+
+def test_review_email_with_no_rows():
+    subject, body = templates.recommendation_review_email([], date(2026, 9, 3))
+    assert "2026-09-03 추천 검증 0종목" in subject
+    assert "2026-09-03 추천 종목의 실제 움직임입니다." in body
+    assert "※ 목표 매수가·매도가와 전망은 참고 수치이며 주문에 사용되지 않습니다." in body
+    assert "1." not in body
