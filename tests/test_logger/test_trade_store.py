@@ -571,6 +571,36 @@ def test_save_recommendations_is_idempotent_per_day_and_ticker(tmp_path):
     assert rows[0].target_price == 68_000
 
 
+def test_save_recommendations_rerun_preserves_verification_columns(tmp_path):
+    """15:35 검증 후 ①을 다시 눌러도 그 결과가 지워지면 안 된다."""
+    store = make_store(tmp_path)
+    day = date(2026, 9, 3)
+    store.save_recommendations(day, [_rec(target_price=70_000)], "v11")
+    store.save_recommendation_outcome(
+        day,
+        "005930",
+        actual_high=72_000.0,
+        actual_low=69_500.0,
+        actual_close=71_000.0,
+        actual_change_rate=1.43,
+        buy_target_hit=True,
+        sell_target_hit=True,
+    )
+    store.save_recommendation_review(day, "005930", "오전 회복 시도는 맞았습니다.")
+
+    store.save_recommendations(day, [_rec(target_price=68_000)], "v11")
+
+    row = store.recommendations_for(day)[0]
+    assert row.target_price == 68_000  # 추천 재실행분은 덮어쓴다
+    assert row.actual_high == 72_000.0
+    assert row.actual_low == 69_500.0
+    assert row.actual_close == 71_000.0
+    assert row.actual_change_rate == 1.43
+    assert row.buy_target_hit is True
+    assert row.sell_target_hit is True
+    assert row.review == "오전 회복 시도는 맞았습니다."
+
+
 def test_recommendations_for_other_day_is_empty(tmp_path):
     store = make_store(tmp_path)
     store.save_recommendations(date(2026, 9, 3), [_rec()], "v11")
