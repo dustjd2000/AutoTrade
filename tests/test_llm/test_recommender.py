@@ -1,3 +1,4 @@
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -636,3 +637,14 @@ def test_sections_argument_replaces_only_that_section():
 def test_missing_or_blank_section_falls_back_to_default():
     prompt = build_system_prompt(3, sections={"outlook": "   "})
     assert DEFAULT_PROMPT_SECTIONS["outlook"] in prompt
+
+
+def test_default_prompt_text_is_pinned():
+    """기본 프롬프트가 실수로 바뀌는 것을 막는다 — 이 프롬프트가 실전 매수 종목을 정한다.
+
+    일부러 문구를 고쳤다면 아래 해시를 새 값으로 갱신하면 된다. 갱신 없이 이 테스트가
+    깨졌다면 의도치 않은 변경이다 (2026-09-08 리팩터에서 닫는 따옴표 하나가 빠졌던 것과
+    같은 종류).
+    """
+    digest = hashlib.sha256(build_system_prompt(3).encode("utf-8")).hexdigest()
+    assert digest == "516ab82ed8d984de8a0d4fc952732a8e82bfb7020bb1a69cb67ea36ab473b7ae"
