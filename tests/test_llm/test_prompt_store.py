@@ -61,6 +61,18 @@ def test_blank_file_falls_back_to_default(tmp_path):
     assert store.load_sections()["outlook"] == DEFAULT_PROMPT_SECTIONS["outlook"]
 
 
+def test_invalid_utf8_file_falls_back_to_default(tmp_path):
+    """섹션 파일이 깨진 인코딩이어도(쓰다가 죽어 반쪽 바이트가 남는 경우 포함) 그 절만
+    기본값으로 폴백하고, 나머지 절은 영향받지 않는다."""
+    store = PromptStore(tmp_path / "prompt")
+    store.save({"outlook": "## 오늘 전망 작성 지침\n새 내용"}, reason="시험")
+    (tmp_path / "prompt" / "outlook.md").write_bytes(b"\xff\xfe\xfa")
+
+    sections = store.load_sections()
+    assert sections["outlook"] == DEFAULT_PROMPT_SECTIONS["outlook"]
+    assert set(sections) == set(PROMPT_SECTION_ORDER)
+
+
 def test_load_sections_always_has_all_five_keys(tmp_path):
     store = PromptStore(tmp_path / "prompt")
     store.save({"outlook": "## 오늘 전망 작성 지침\n새 내용"}, reason="시험")
