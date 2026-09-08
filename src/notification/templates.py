@@ -170,6 +170,8 @@ def prompt_tuning_email(
             f" - {s.version}: {s.count}건 | 목표 매수가 도달 {s.buy_hit}건 | "
             f"목표 매도가 도달 {s.sell_hit}건 | 평균 등락률 {s.avg_change_rate:+.2f}%"
         )
+    if not stats:
+        lines.append(" - (비교할 이전 성과 데이터 없음)")
 
     for key in sorted(after):
         lines.extend(["", f"## 바뀐 절: {key}", "", "[이전]", before.get(key, "(없음)"), "", "[이후]", after[key]])

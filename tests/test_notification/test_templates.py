@@ -654,3 +654,27 @@ def test_prompt_tuning_email_lists_every_changed_section():
     )
     assert "outlook" in body and "reason" in body
     assert "후" in body and "후2" in body
+
+
+def test_prompt_tuning_email_shows_placeholder_when_stats_are_empty():
+    """비교할 이전 버전 성과가 없어도 근거 절이 제목만 있고 속은 빈 채로 남으면 안 된다."""
+    _, body = templates.prompt_tuning_email(
+        date(2026, 9, 8), "v11", "v12", "이유",
+        [],
+        before={"outlook": "전"},
+        after={"outlook": "후"},
+    )
+    assert "## 근거 — 버전별 성과" in body
+    assert "(비교할 이전 성과 데이터 없음)" in body
+
+
+def test_prompt_tuning_email_shows_placeholder_for_newly_added_section():
+    """before에 없던 절(새로 생긴 절)은 [이전]에 안내 문구가, [이후]에 새 전문이 그대로 나와야 한다."""
+    _, body = templates.prompt_tuning_email(
+        date(2026, 9, 8), "v11", "v12", "이유",
+        [VersionStats("v11", 12, 9, 2, 1.25)],
+        before={},
+        after={"outlook": "새로 생긴 절 전문"},
+    )
+    assert "[이전]\n(없음)" in body
+    assert "[이후]\n새로 생긴 절 전문" in body
