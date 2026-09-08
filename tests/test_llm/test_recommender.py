@@ -201,6 +201,8 @@ def _fake_recommender(response) -> LLMRecommender:
             messages=SimpleNamespace(create=lambda **kwargs: response)
         )
     )
+    # recommend()이 프롬프트 절과 버전을 저장소에서 읽으므로, 파일이 없는 상태를 흉내낸 가짜를 준다
+    recommender.prompt_store = SimpleNamespace(load_sections=lambda: {}, load_version=lambda: "v0")
     return recommender
 
 
@@ -648,3 +650,19 @@ def test_default_prompt_text_is_pinned():
     """
     digest = hashlib.sha256(build_system_prompt(3).encode("utf-8")).hexdigest()
     assert digest == "516ab82ed8d984de8a0d4fc952732a8e82bfb7020bb1a69cb67ea36ab473b7ae"
+
+
+# ── PromptStore 연동 (파일 프롬프트, PRD '프롬프트 자동 수정') ─────────────
+def test_recommender_uses_prompt_store_sections(tmp_path):
+    """파일에 저장된 절이 실제 요청의 시스템 프롬프트에 들어간다."""
+    from src.llm.prompt_store import PromptStore
+
+    store = PromptStore(tmp_path / "prompt")
+    store.save({"outlook": "## 오늘 전망 작성 지침\n파일에서 온 내용입니다"}, reason="시험")
+
+    recommender = LLMRecommender.__new__(LLMRecommender)
+    recommender.settings = SimpleNamespace(llm_model="claude-opus-5", target_stock_count=3)
+    recommender.prompt_store = store
+
+    assert "파일에서 온 내용입니다" in recommender._system_prompt()
+    assert recommender.prompt_version == store.load_version()

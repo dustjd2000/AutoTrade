@@ -20,7 +20,7 @@ from src.core.events import (
 )
 from src.data.collector import DataCollector
 from src.llm import reviewer as reviewer_module
-from src.llm.recommender import PROMPT_TEMPLATE_VERSION, LLMRecommender, tick_size
+from src.llm.recommender import LLMRecommender, tick_size
 from src.logger.trade_store import TradeStore
 from src.notification.email import EmailNotifier
 from src.notification import chart, templates
@@ -387,7 +387,7 @@ class DailyWorkflow:
         """
         try:
             self.trade_store.save_recommendations(
-                today, recommendations, PROMPT_TEMPLATE_VERSION
+                today, recommendations, self.recommender.prompt_version
             )
         except Exception:
             logger.exception("추천 기록 저장에 실패했습니다 — 오늘 검증 메일이 비게 됩니다.")

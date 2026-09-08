@@ -477,9 +477,25 @@ def warn_invalid_sell_targets(recommendations: List[StockRecommendation]) -> Non
 class LLMRecommender:
     """1호 전략의 LLM 추천 모듈 — Anthropic Claude API 사용 (PRD 10절 확정, 2026-07-27)."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, prompt_store=None):
+        # 순환 import를 피해 여기서 가져온다 — prompt_store.py가 이 모듈의 상수
+        # (PROMPT_SECTION_ORDER 등)를 참조하므로, 모듈 최상단에서 서로 import하면 순환이 된다.
+        from src.llm.prompt_store import PromptStore
+
         self.settings = settings
         self._client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        # 편집 가능한 다섯 절의 출처. 파일이 없으면 코드 기본값으로 폴백하므로 첫 실행도 정상이다.
+        self.prompt_store = prompt_store if prompt_store is not None else PromptStore()
+
+    @property
+    def prompt_version(self) -> str:
+        """이번 추천에 실제로 쓰인 프롬프트 버전 — 검증 집계의 기준이다."""
+        return self.prompt_store.load_version()
+
+    def _system_prompt(self) -> str:
+        return build_system_prompt(
+            self.settings.target_stock_count, self.prompt_store.load_sections()
+        )
 
     def recommend(
         self, daily_data: List[DailyStockData], timeout_seconds: float = 120.0
@@ -490,7 +506,7 @@ class LLMRecommender:
         # 어떤 입력으로 그 추천이 나왔는지 남긴다 — 추천이 타당했는지 되짚을 유일한 근거다
         logger.info(
             "LLM 요청 (prompt_version=%s, 후보 %d종목):\n%s",
-            PROMPT_TEMPLATE_VERSION,
+            self.prompt_version,
             len(daily_data),
             user_prompt,
         )
@@ -498,7 +514,7 @@ class LLMRecommender:
             response = self._client.with_options(timeout=timeout_seconds).messages.create(
                 model=self.settings.llm_model,
                 max_tokens=MAX_TOKENS,
-                system=build_system_prompt(target_count),
+                system=self._system_prompt(),
                 messages=[{"role": "user", "content": user_prompt}],
                 # 응답 형식을 API가 스키마로 강제한다 (설명이 섞이거나 코드펜스가 붙는 것을 방지)
                 output_config={
@@ -544,7 +560,7 @@ class LLMRecommender:
             # 형식은 정상이지만 확신 가는 종목이 없다는 결과 — 파싱 실패와는 구분해 남긴다
             logger.warning(
                 "LLM recommended 0 stock(s) (prompt_version=%s) — no confident picks today.",
-                PROMPT_TEMPLATE_VERSION,
+                self.prompt_version,
             )
             return None
 
@@ -558,7 +574,7 @@ class LLMRecommender:
             logger.warning(
                 "낙폭 되돌림 구간의 종목이 없습니다 — 오늘 매수를 스킵합니다 "
                 "(prompt_version=%s).",
-                PROMPT_TEMPLATE_VERSION,
+                self.prompt_version,
             )
             return None
 
@@ -570,7 +586,7 @@ class LLMRecommender:
         logger.info(
             "LLM recommended %d stock(s) (prompt_version=%s): %s",
             len(recommendations),
-            PROMPT_TEMPLATE_VERSION,
+            self.prompt_version,
             [f"{r.ticker}@{r.target_price:,}→{r.target_sell_price:,}" for r in recommendations],
         )
         return recommendations

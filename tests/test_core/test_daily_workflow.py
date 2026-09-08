@@ -121,7 +121,9 @@ def make_workflow(recommendations=None, collected=True, cash=12_000_000):
 
     workflow = DailyWorkflow(
         collector=SimpleNamespace(collect=lambda: daily_data),
-        recommender=SimpleNamespace(recommend=lambda d: recommendations),
+        recommender=SimpleNamespace(
+            recommend=lambda d: recommendations, prompt_version=PROMPT_TEMPLATE_VERSION
+        ),
         strategy=strategy,
         engine=engine,
         account=SimpleNamespace(
@@ -1453,7 +1455,9 @@ def build_workflow(tmp_path):
     )
     return DailyWorkflow(
         collector=SimpleNamespace(collect=lambda: daily_data, market_data=FakeMarketData()),
-        recommender=SimpleNamespace(recommend=lambda d: [_recommendation()]),
+        recommender=SimpleNamespace(
+            recommend=lambda d: [_recommendation()], prompt_version=PROMPT_TEMPLATE_VERSION
+        ),
         strategy=strategy,
         engine=engine,
         account=SimpleNamespace(
@@ -1489,6 +1493,17 @@ def test_recommend_and_notify_survives_save_failure(tmp_path):
     workflow.recommend_and_notify(date(2026, 9, 3))
 
     assert workflow.email.sent, "추천 메일이 나가야 한다"
+
+
+def test_recommend_and_notify_saves_the_file_prompt_version(tmp_path):
+    """저장되는 prompt_version은 코드 상수가 아니라 recommender가 실제로 쓴 버전이다."""
+    workflow = build_workflow(tmp_path)
+    workflow.recommender.prompt_version = "v99"
+
+    workflow.recommend_and_notify(date(2026, 9, 8))
+
+    rows = workflow.trade_store.recommendations_for(date(2026, 9, 8))
+    assert rows[0].prompt_version == "v99"
 
 
 def _metrics():
