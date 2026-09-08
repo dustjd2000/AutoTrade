@@ -51,6 +51,13 @@ def test_sanitize_drops_short_or_blank_body():
     assert sanitize_sections({"outlook": "   "}) == {}
 
 
+def test_sanitize_drops_non_string_body():
+    """모델이 문자열이 아닌 값을 줘도(스키마는 소프트 제약일 뿐) 예외 없이 걸러야 한다."""
+    assert sanitize_sections({"outlook": 123}) == {}
+    assert sanitize_sections({"outlook": ["가", "나"]}) == {}
+    assert sanitize_sections({"outlook": {"key": "값"}}) == {}
+
+
 def test_sanitize_discards_everything_when_over_the_limit():
     """걸러내기 전 원본 개수로 센다 — 잘못된 절을 섞어 제한을 우회할 수 없어야 한다."""
     raw = {"outlook": LONG, "reason": LONG, "역할": "x"}
@@ -87,4 +94,78 @@ def test_tune_returns_none_when_api_raises():
             raise RuntimeError("network down")
 
     tuner._client = Boom()
+    assert tuner.tune([], [], DEFAULT_PROMPT_SECTIONS, "") is None
+
+
+class FakeBlock:
+    """`response.content`의 텍스트 블록 하나를 흉내낸다."""
+
+    def __init__(self, text, type_="text"):
+        self.type = type_
+        self.text = text
+
+
+class FakeResponse:
+    """`messages.create(...)`가 돌려주는 응답 객체를 흉내낸다."""
+
+    def __init__(self, stop_reason="end_turn", content=None):
+        self.stop_reason = stop_reason
+        self.content = content if content is not None else []
+
+
+class FakeMessages:
+    def __init__(self, response):
+        self._response = response
+
+    def create(self, **kwargs):
+        return self._response
+
+
+class FakeClient:
+    """`self._client.with_options(...).messages.create(...)` 경로를 흉내내며 고정 응답을 돌려준다."""
+
+    def __init__(self, response):
+        self.messages = FakeMessages(response)
+
+    def with_options(self, **kwargs):
+        return self
+
+
+def _tuner_with_response(response):
+    tuner = PromptTuner.__new__(PromptTuner)
+    tuner.settings = SimpleNamespace(anthropic_api_key="k", llm_model="claude-opus-5")
+    tuner._client = FakeClient(response)
+    return tuner
+
+
+def test_tune_returns_none_when_stop_reason_is_max_tokens():
+    """사고 토큰에 예산을 다 쓰고 잘린 응답은 예외 없이 None으로 끝나야 한다."""
+    tuner = _tuner_with_response(
+        FakeResponse(stop_reason="max_tokens", content=[FakeBlock("아무 텍스트")])
+    )
+    assert tuner.tune([], [], DEFAULT_PROMPT_SECTIONS, "") is None
+
+
+def test_tune_returns_none_when_stop_reason_is_refusal():
+    """모델이 응답을 거부한 경우도 예외 없이 None으로 끝나야 한다."""
+    tuner = _tuner_with_response(FakeResponse(stop_reason="refusal", content=[]))
+    assert tuner.tune([], [], DEFAULT_PROMPT_SECTIONS, "") is None
+
+
+def test_tune_returns_none_when_response_text_is_empty():
+    """텍스트 블록이 공백뿐이면(또는 없으면) 예외 없이 None으로 끝나야 한다."""
+    tuner = _tuner_with_response(
+        FakeResponse(stop_reason="end_turn", content=[FakeBlock("   ")])
+    )
+    assert tuner.tune([], [], DEFAULT_PROMPT_SECTIONS, "") is None
+
+
+def test_tune_returns_none_when_response_text_is_malformed_json():
+    """parse_tune_response가 던지는 예외가 tune() 밖으로 새어나가지 않고 None으로 끝나야 한다."""
+    tuner = _tuner_with_response(
+        FakeResponse(
+            stop_reason="end_turn",
+            content=[FakeBlock("이 자리에 답을 드릴 수 없습니다.")],
+        )
+    )
     assert tuner.tune([], [], DEFAULT_PROMPT_SECTIONS, "") is None

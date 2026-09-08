@@ -106,6 +106,9 @@ def sanitize_sections(raw: Dict[str, str]) -> Dict[str, str]:
         if key not in PROMPT_SECTION_ORDER:
             logger.warning("고칠 수 없는 절이라 무시합니다: %s", key)
             continue
+        if not isinstance(text, str):
+            logger.warning("절 본문이 문자열이 아니라 무시합니다: %s (%s)", key, type(text).__name__)
+            continue
         body = (text or "").strip()
         if len(body) < MIN_SECTION_LENGTH:
             logger.warning("본문이 너무 짧아 무시합니다: %s (%d자)", key, len(body))
