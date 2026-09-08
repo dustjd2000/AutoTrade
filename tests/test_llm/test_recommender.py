@@ -4,7 +4,9 @@ import pytest
 
 from src.data.collector import DailyStockData
 from src.llm.recommender import (
+    DEFAULT_PROMPT_SECTIONS,
     LLMRecommender,
+    PROMPT_SECTION_ORDER,
     RECOMMENDATION_SCHEMA,
     StockRecommendation,
     apply_price_guardrail,
@@ -588,3 +590,49 @@ def test_system_prompt_mentions_outlook_rules():
     assert "오늘 전망" in prompt
     # 오후 시간대 단정을 금지하는 문구가 살아 있어야 한다
     assert "오후" in prompt
+
+
+def test_prompt_sections_have_exactly_the_five_editable_keys():
+    assert PROMPT_SECTION_ORDER == (
+        "judgment_criteria", "buy_target", "sell_target", "outlook", "reason"
+    )
+    assert set(DEFAULT_PROMPT_SECTIONS) == set(PROMPT_SECTION_ORDER)
+
+
+def test_each_default_section_carries_its_own_header():
+    """헤더를 코드가 따로 붙이지 않고 절 본문이 들고 있어야 에이전트가 헤더까지 고칠 수 있다."""
+    for key, text in DEFAULT_PROMPT_SECTIONS.items():
+        assert text.lstrip().startswith("## "), key
+
+
+def test_default_prompt_keeps_locked_and_editable_sections_in_order():
+    prompt = build_system_prompt(3)
+    headers = [
+        "## 역할",
+        "## 절대 규칙",
+        "## 추천 유형 (setup)",
+        "## 판단 기준",
+        "## 목표 매수가 작성 지침",
+        "## 목표 매도가 작성 지침",
+        "## 오늘 전망 작성 지침",
+        "## 근거 작성 지침",
+    ]
+    positions = [prompt.find(h) for h in headers]
+    assert all(p != -1 for p in positions), positions
+    assert positions == sorted(positions)
+    # 잠긴 절의 보간이 살아 있어야 한다
+    assert "코스피 대형주 3종목" in prompt
+
+
+def test_sections_argument_replaces_only_that_section():
+    prompt = build_system_prompt(3, sections={"outlook": "## 오늘 전망 작성 지침\n바뀐 내용"})
+    assert "바뀐 내용" in prompt
+    # 넘기지 않은 절은 기본값이 그대로
+    assert DEFAULT_PROMPT_SECTIONS["reason"] in prompt
+    # 넘긴 절의 기본값은 사라진다
+    assert DEFAULT_PROMPT_SECTIONS["outlook"] not in prompt
+
+
+def test_missing_or_blank_section_falls_back_to_default():
+    prompt = build_system_prompt(3, sections={"outlook": "   "})
+    assert DEFAULT_PROMPT_SECTIONS["outlook"] in prompt
