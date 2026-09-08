@@ -1,7 +1,7 @@
 import unicodedata
 from datetime import date
 from html import escape
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from src.core.events import (
     BuyExecution,
@@ -136,6 +136,49 @@ def recommendation_review_email(
     lines.append("※ 목표 매수가·매도가와 전망은 참고 수치이며 주문에 사용되지 않습니다.")
     lines.append("※ 목표 매수가 '도달'은 당일 저가가 그 가격까지 내려왔다는 뜻이며, 실제 매수")
     lines.append("   여부는 09:08 갭 판정과 10:10 미체결 취소가 따로 정합니다.")
+    return subject, "\n".join(lines)
+
+
+def prompt_tuning_email(
+    today: date,
+    old_version: str,
+    new_version: str,
+    reason: str,
+    stats: List["VersionStats"],
+    before: Dict[str, str],
+    after: Dict[str, str],
+) -> tuple[str, str]:
+    """추천 프롬프트를 자동 수정한 날 나가는 이메일 (PRD '프롬프트 자동 수정').
+
+    고친 날만 발송한다 — 고치지 않은 날은 호출되지 않는다. 사람이 개입할 유일한 지점이므로
+    되돌리는 방법을 본문에 함께 적는다.
+
+    표가 없어 HTML을 함께 만들지 않는다. (제목, 평문)만 돌려준다.
+    """
+    subject = f"[AutoTrade] {today:%Y-%m-%d} 추천 프롬프트 수정 ({old_version} → {new_version})"
+
+    lines = [
+        f"{today:%Y-%m-%d} 추천 프롬프트를 자동으로 수정했습니다 ({old_version} → {new_version}).",
+        "",
+        "## 수정 이유",
+        reason or "(없음)",
+        "",
+        "## 근거 — 버전별 성과",
+    ]
+    for s in stats:
+        lines.append(
+            f" - {s.version}: {s.count}건 | 목표 매수가 도달 {s.buy_hit}건 | "
+            f"목표 매도가 도달 {s.sell_hit}건 | 평균 등락률 {s.avg_change_rate:+.2f}%"
+        )
+
+    for key in sorted(after):
+        lines.extend(["", f"## 바뀐 절: {key}", "", "[이전]", before.get(key, "(없음)"), "", "[이후]", after[key]])
+
+    lines.extend([
+        "",
+        f"※ 되돌리려면 data/prompt/history/{old_version}/ 의 파일들을 data/prompt/ 로 복사하십시오.",
+        "※ 수정된 프롬프트는 다음 거래일 추천부터 적용됩니다 (엔진 재시작 불필요).",
+    ])
     return subject, "\n".join(lines)
 
 

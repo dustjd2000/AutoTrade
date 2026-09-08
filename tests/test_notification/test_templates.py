@@ -2,6 +2,7 @@ from datetime import date, datetime
 
 from src.core.events import BuyExecution, BuyOutcome, BuyRecord, UnsellableView
 from src.llm.recommender import StockRecommendation
+from src.llm.tuner import VersionStats
 from src.logger.trade_store import DailySummary, MonthlySummary, RecommendationRow, TradeRow
 from src.notification import templates
 
@@ -626,3 +627,30 @@ def test_review_email_with_no_rows():
     assert "2026-09-03 추천 종목의 실제 움직임입니다." in body
     assert "※ 목표 매수가·매도가와 전망은 참고 수치이며 주문에 사용되지 않습니다." in body
     assert "1." not in body
+
+
+# ── prompt_tuning_email ───────────────────────────────────────
+def test_prompt_tuning_email_shows_versions_reason_and_diff():
+    subject, body = templates.prompt_tuning_email(
+        date(2026, 9, 8), "v11", "v12", "목표 매도가 도달이 12건 중 2건뿐이라 완화했습니다.",
+        [VersionStats("v11", 12, 9, 2, 1.25)],
+        before={"outlook": "## 오늘 전망 작성 지침\n예전 내용"},
+        after={"outlook": "## 오늘 전망 작성 지침\n새 내용"},
+    )
+    assert "2026-09-08 추천 프롬프트 수정 (v11 → v12)" in subject
+    assert "목표 매도가 도달이 12건 중 2건뿐이라 완화했습니다." in body
+    assert "v11: 12건" in body
+    assert "예전 내용" in body
+    assert "새 내용" in body
+    assert "data/prompt/history/v11" in body
+
+
+def test_prompt_tuning_email_lists_every_changed_section():
+    _, body = templates.prompt_tuning_email(
+        date(2026, 9, 8), "v11", "v12", "이유",
+        [VersionStats("v11", 12, 9, 2, 1.25)],
+        before={"outlook": "## 오늘 전망\n전", "reason": "## 근거\n전2"},
+        after={"outlook": "## 오늘 전망\n후", "reason": "## 근거\n후2"},
+    )
+    assert "outlook" in body and "reason" in body
+    assert "후" in body and "후2" in body
