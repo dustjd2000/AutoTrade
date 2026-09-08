@@ -740,3 +740,47 @@ def test_recommendations_do_not_touch_trades_table(tmp_path):
     summary = store.daily_summary(day)
     assert summary.buy_count == 0
     assert summary.sell_count == 0
+
+
+def _verify(store, day, ticker, close=71_000.0):
+    store.save_recommendation_outcome(
+        day, ticker,
+        actual_high=72_000.0, actual_low=69_500.0, actual_close=close,
+        actual_change_rate=1.43, buy_target_hit=True, sell_target_hit=False,
+    )
+
+
+def test_recent_recommendations_returns_only_verified_rows(tmp_path):
+    store = make_store(tmp_path)
+    day = date(2026, 9, 4)
+    store.save_recommendations(day, [_rec("005930"), _rec("000660", name="SK하이닉스")], "v11")
+    _verify(store, day, "005930")
+
+    rows = store.recent_recommendations(10)
+    assert [r.ticker for r in rows] == ["005930"]
+
+
+def test_recent_recommendations_limits_to_the_latest_distinct_days(tmp_path):
+    store = make_store(tmp_path)
+    for offset, day in enumerate([date(2026, 9, 1), date(2026, 9, 2), date(2026, 9, 3)]):
+        store.save_recommendations(day, [_rec("005930")], "v11")
+        _verify(store, day, "005930")
+
+    rows = store.recent_recommendations(2)
+    assert sorted({r.day for r in rows}) == [date(2026, 9, 2), date(2026, 9, 3)]
+
+
+def test_recent_recommendations_is_ordered_oldest_first(tmp_path):
+    store = make_store(tmp_path)
+    for day in [date(2026, 9, 3), date(2026, 9, 1), date(2026, 9, 2)]:
+        store.save_recommendations(day, [_rec("005930")], "v11")
+        _verify(store, day, "005930")
+
+    rows = store.recent_recommendations(10)
+    assert [r.day for r in rows] == [date(2026, 9, 1), date(2026, 9, 2), date(2026, 9, 3)]
+
+
+def test_recent_recommendations_empty_when_nothing_verified(tmp_path):
+    store = make_store(tmp_path)
+    store.save_recommendations(date(2026, 9, 4), [_rec("005930")], "v11")
+    assert store.recent_recommendations(10) == []

@@ -317,28 +317,30 @@ class TradeStore:
                 "SELECT * FROM recommendations WHERE day = ? ORDER BY id",
                 (day.isoformat(),),
             ).fetchall()
-        return [
-            RecommendationRow(
-                day=day,
-                ticker=row["ticker"],
-                name=row["name"] or "",
-                prompt_version=row["prompt_version"] or "",
-                recommend_price=row["recommend_price"] or 0.0,
-                target_price=row["target_price"] or 0,
-                target_sell_price=row["target_sell_price"] or 0,
-                setup=row["setup"] or "",
-                reason=row["reason"] or "",
-                outlook=row["outlook"] or "",
-                actual_high=row["actual_high"],
-                actual_low=row["actual_low"],
-                actual_close=row["actual_close"],
-                actual_change_rate=row["actual_change_rate"],
-                buy_target_hit=_optional_bool(row["buy_target_hit"]),
-                sell_target_hit=_optional_bool(row["sell_target_hit"]),
-                review=row["review"] or "",
-            )
-            for row in rows
-        ]
+        return [_recommendation_row(row) for row in rows]
+
+    def recent_recommendations(self, day_count: int = 10) -> List[RecommendationRow]:
+        """최근 `day_count` 거래일의 **검증이 끝난** 추천 (오래된 날부터).
+
+        프롬프트 자동 수정 에이전트의 입력이다 (PRD '프롬프트 자동 수정'). 검증 전 행은
+        대조할 실제값이 없어 제외한다 — 오늘 추천은 15:35 검증 뒤에야 여기에 들어온다.
+
+        `recommendations` 테이블에는 거래일만 들어가므로 '최근 N개의 서로 다른 날짜'가
+        곧 최근 N거래일이다.
+        """
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """SELECT * FROM recommendations
+                   WHERE actual_close IS NOT NULL
+                     AND day IN (
+                         SELECT DISTINCT day FROM recommendations
+                         WHERE actual_close IS NOT NULL
+                         ORDER BY day DESC LIMIT ?
+                     )
+                   ORDER BY day, id""",
+                (day_count,),
+            ).fetchall()
+        return [_recommendation_row(row) for row in rows]
 
     def save_recommendation_outcome(
         self,
@@ -765,3 +767,26 @@ def _weighted_average(pairs: List[Tuple[Optional[float], Optional[int]]]) -> flo
 def _optional_bool(value) -> Optional[bool]:
     """SQLite의 0/1/NULL을 bool/None으로. NULL은 '판정하지 않음'이라 False와 구분해야 한다."""
     return None if value is None else bool(value)
+
+
+def _recommendation_row(row) -> RecommendationRow:
+    """`recommendations` 한 행을 dataclass로. 두 조회가 공유한다."""
+    return RecommendationRow(
+        day=date.fromisoformat(row["day"]),
+        ticker=row["ticker"],
+        name=row["name"] or "",
+        prompt_version=row["prompt_version"] or "",
+        recommend_price=row["recommend_price"] or 0.0,
+        target_price=row["target_price"] or 0,
+        target_sell_price=row["target_sell_price"] or 0,
+        setup=row["setup"] or "",
+        reason=row["reason"] or "",
+        outlook=row["outlook"] or "",
+        actual_high=row["actual_high"],
+        actual_low=row["actual_low"],
+        actual_close=row["actual_close"],
+        actual_change_rate=row["actual_change_rate"],
+        buy_target_hit=_optional_bool(row["buy_target_hit"]),
+        sell_target_hit=_optional_bool(row["sell_target_hit"]),
+        review=row["review"] or "",
+    )
