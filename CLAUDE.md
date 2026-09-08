@@ -42,7 +42,8 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   진입점이고, "▶ 시작" 버튼을 눌러야 `EngineThread`(QThread)가 뜬다. 창을 닫으면 엔진도
   함께 정지한다.
 - `EngineThread`가 자신만의 asyncio 이벤트 루프를 새로 만들어 소유하고, 그 위에서
-  `src/core/runtime.py`의 `TimeScheduler`(시간 기반 08:40/추천 시각/매수 시각/10:10/15:15/15:35)와
+  `src/core/runtime.py`의 `TimeScheduler`(시간 기반 08:40/추천 시각/매수 시각/10:10/15:15/
+  15:35 — 15:35에는 리포트 → 추천 검증 → 프롬프트 자동 수정 세 단계가 등록 순서대로 돈다)와
   `WebSocketClient` 콜백(실시간 시세 기반)이 함께 돈다. 이 중 **추천 시각과 매수 시각만 설정값**이고
   (`settings.recommend_time`/`buy_time`, `.env`의 `RECOMMEND_TIME`·`BUY_TIME`, 기본 09:05·09:08)
   나머지는 코드 상수다. 두 값은 UI에서 고를 수 없고 라벨로 보여주기만 하며, "추천은 개장 후,
@@ -76,7 +77,9 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   담당한다. 15:35에는 일일 리포트 다음으로 `DailyWorkflow.review_recommendations`가 그날
   추천 종목의 목표가 도달 여부와 실제 고가·저가·종가를 대조해 `data/trades.db`의
   `recommendations` 테이블에 남기고 별도 메일로 보낸다 — 주문에는 쓰이지 않는 사후 기록이다
-  (PRD 5.12절).
+  (PRD 5.12절). 그 **다음**으로 `DailyWorkflow.tune_prompt`가 최근 10거래일의 검증 결과를
+  버전별로 묶어 LLM에 넘기고, 추천 프롬프트의 판단·서술 지침 다섯 절을 **사람 승인 없이**
+  고친다 (PRD 5.13절). 고친 날만 메일이 나가고, 고치지 않는 날이 정상이다.
 - 새 전략을 추가할 때는 `BaseStrategy`를 구현하는 새 모듈만 추가하면 되고, 나머지
   (주문 실행/리스크/로깅)는 그대로 재사용된다 — 단, 시간 기반 전략이라면 1호 전략처럼
   `DailyWorkflow`류의 오케스트레이션을 별도로 붙여야 한다.
@@ -84,6 +87,11 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
 ### 설정은 `.env` 하나로 통일
 - `config/settings.py`의 `Settings` dataclass가 `os.getenv` 기본값 조합으로 모든 설정을
   담는다. 별도 JSON/YAML 설정 파일은 쓰지 않는다.
+- **예외가 하나 있다: `data/prompt/`.** 추천 프롬프트의 판단·서술 지침 다섯 절이 여기 파일로
+  있고, 15:35 자동 수정 에이전트가 덧쓴다 (PRD 5.13절). 사용자가 정하는 **설정이 아니라
+  에이전트가 갱신하는 런타임 상태**라 `.env`가 아니라 `data/` 아래에 둔다. 매 추천마다 파일을
+  읽으므로 **엔진 재시작 없이** 다음 추천에 반영되고, 파일이 없으면 코드의
+  `DEFAULT_PROMPT_SECTIONS`로 폴백한다 — `/data/`는 gitignore 대상이라 코드 쪽이 정본이다.
 - UI가 다루는 값은 `src/ui/env_store.py`(`load_env`/`save_env`)로 `.env`를 직접 파싱해
   읽고 쓴다 — `python-dotenv`는 파일 쓰기를 지원하지 않아 자체 구현한 것.
 - 엔진은 **시작 시점에 읽은 `Settings`를 그대로 들고 돈다.** 그래서 "설정 저장" 시 값이
