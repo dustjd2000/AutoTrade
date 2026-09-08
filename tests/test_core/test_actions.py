@@ -21,6 +21,7 @@ def make_runtime(calls):
         send_final_report=lambda: calls.append("final_report"),
         drop_buy_plans=lambda tickers: calls.append(f"drop_plan:{','.join(tickers)}"),
         review_recommendations=lambda: calls.append("review_recommendations"),
+        tune_prompt=lambda: calls.append("tune_prompt"),
     )
     engine = SimpleNamespace(
         force_close_all_positions=lambda reason="day_end": calls.append(f"sell_all:{reason}"),
@@ -87,6 +88,19 @@ def test_review_recommendations_step_is_scheduled_only():
 def test_review_recommendations_step_runs_off_the_loop_thread():
     runtime = make_runtime([])
     steps = manual_steps(runtime, "review_recommendations")
+    assert len(steps) == 1
+    assert steps[0].touches_orders is False
+
+
+def test_tune_prompt_step_is_scheduled_only():
+    assert "tune_prompt" in SCHEDULED_ACTIONS
+    assert "tune_prompt" not in MANUAL_ACTIONS
+    assert "tune_prompt" not in ORDER_ACTIONS
+
+
+def test_tune_prompt_step_runs_off_the_loop_thread():
+    runtime = make_runtime([])
+    steps = manual_steps(runtime, "tune_prompt")
     assert len(steps) == 1
     assert steps[0].touches_orders is False
 

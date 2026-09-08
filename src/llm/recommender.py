@@ -185,14 +185,13 @@ reason은 반드시 제공된 데이터의 구체적 수치를 인용해 작성�
 }
 
 
-def build_system_prompt(target_count: int, sections: Optional[Dict[str, str]] = None) -> str:
-    """시스템 프롬프트를 조립한다. `sections`로 편집 가능한 절을 갈아끼울 수 있다.
+def build_locked_prompt_text(target_count: int) -> str:
+    """고칠 수 없는 세 절(역할·절대 규칙·추천 유형).
 
-    넘기지 않았거나 비어 있는 절은 `DEFAULT_PROMPT_SECTIONS`로 폴백한다 — 파일이 깨져도
-    추천이 멈추지 않아야 한다 (PRD '프롬프트 자동 수정').
+    자동 수정 에이전트에게 참고용으로 이 함수의 결과를 그대로 넘긴다. 텍스트를 복사해 두면
+    에이전트가 보는 규칙과 추천이 실제로 쓰는 규칙이 어긋난다 (PRD '프롬프트 자동 수정').
     """
-    provided = sections or {}
-    locked = f"""당신은 한국 주식시장(코스피) 단기 모멘텀을 분석하는 애널리스트입니다.
+    return f"""당신은 한국 주식시장(코스피) 단기 모멘텀을 분석하는 애널리스트입니다.
 
 ## 역할
 사용자가 제공하는 **전일 마감 데이터와 당일 장중 데이터를** 근거로, **최근 낙폭을 되돌리는 구간에
@@ -224,7 +223,15 @@ def build_system_prompt(target_count: int, sections: Optional[Dict[str, str]] = 
 **이번 요청에서 추천할 종목은 `rebound`뿐입니다.** 나머지 두 유형은 유형 판정을 정직하게 하기
 위한 선택지이며, 그렇게 판단한 종목은 목록에서 빼십시오."""
 
-    parts = [locked]
+
+def build_system_prompt(target_count: int, sections: Optional[Dict[str, str]] = None) -> str:
+    """시스템 프롬프트를 조립한다. `sections`로 편집 가능한 절을 갈아끼울 수 있다.
+
+    넘기지 않았거나 비어 있는 절은 `DEFAULT_PROMPT_SECTIONS`로 폴백한다 — 파일이 깨져도
+    추천이 멈추지 않아야 한다 (PRD '프롬프트 자동 수정').
+    """
+    provided = sections or {}
+    parts = [build_locked_prompt_text(target_count)]
     for key in PROMPT_SECTION_ORDER:
         text = (provided.get(key) or "").strip()
         parts.append(text or DEFAULT_PROMPT_SECTIONS[key])

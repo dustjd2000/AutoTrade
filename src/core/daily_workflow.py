@@ -20,7 +20,9 @@ from src.core.events import (
 )
 from src.data.collector import DataCollector
 from src.llm import reviewer as reviewer_module
-from src.llm.recommender import LLMRecommender, tick_size
+from src.llm import tuner as tuner_module
+from src.llm.prompt_store import PromptStore
+from src.llm.recommender import LLMRecommender, build_locked_prompt_text, tick_size
 from src.logger.trade_store import TradeStore
 from src.notification.email import EmailNotifier
 from src.notification import chart, templates
@@ -85,6 +87,8 @@ class DailyWorkflow:
         trade_store: TradeStore,
         email: EmailNotifier,
         reviewer=None,
+        tuner=None,
+        prompt_store=None,
         ws_client=None,
         report_mark_path: Optional[Path] = None,
         buy_records_path: Optional[Path] = None,
@@ -101,6 +105,9 @@ class DailyWorkflow:
         # 15:35 추천 검증의 LLM 평가 모듈 (PRD 5.5-B '추천 검증'). None이면 평가 없이
         # 수치만 저장하고 메일을 보낸다 — 평가는 읽기용이고 수치가 원본이다.
         self.reviewer = reviewer
+        # 프롬프트 자동 수정 (PRD '프롬프트 자동 수정'). tuner가 None이면 단계 자체를 건너뛴다.
+        self.tuner = tuner
+        self.prompt_store = prompt_store if prompt_store is not None else PromptStore()
         self.ws_client = ws_client
         # 최종 리포트를 보낸 날짜 — 전량 매도 완료와 15:35 스케줄이 중복 발송하지 않도록
         # 공유하는 표시다 (send_final_report). 매수로 보유가 다시 생기면 초기화된다.
@@ -1238,3 +1245,77 @@ class DailyWorkflow:
                 self.trade_store.save_recommendation_review(today, row.ticker, review)
             except Exception:
                 logger.exception("추천 평가문 저장 실패: %s %s", row.ticker, row.name)
+
+    def tune_prompt(self, today: Optional[date] = None) -> None:
+        """15:35 — 최근 추천 성과를 보고 추천 프롬프트의 다섯 절을 자동으로 고친다.
+
+        추천 검증 **다음**에 돈다 — 그날 검증이 끝나야 판단 재료가 완성된다. 고친 날만
+        메일이 나가고, 고치지 않는 날이 정상 동작이다 (PRD '프롬프트 자동 수정').
+
+        어떤 실패도 매매 흐름을 막지 않는다. 고치지 못하면 다음 거래일 추천은 이전
+        프롬프트로 그대로 돈다.
+        """
+        today = today or date.today()
+        if self.tuner is None:
+            return
+
+        rows = self.trade_store.recent_recommendations()
+        if not rows:
+            logger.info("검증된 추천이 없습니다 — 프롬프트 수정을 건너뜁니다 (%s).", today)
+            return
+
+        stats = tuner_module.group_by_version(rows)
+        before = self.prompt_store.load_sections()
+        old_version = self.prompt_store.load_version()
+        locked_text = build_locked_prompt_text(self.strategy.target_stock_count)
+
+        result = self.tuner.tune(stats, rows, before, locked_text, self._why_history())
+        if result is None or not result.change:
+            logger.info(
+                "프롬프트를 고치지 않습니다 (%s): %s",
+                today,
+                getattr(result, "reason", "판단 실패"),
+            )
+            return
+
+        sections = tuner_module.sanitize_sections(result.sections)
+        if not sections:
+            logger.warning("수정안이 안전장치에 전부 걸렸습니다 — 그대로 둡니다 (%s).", today)
+            return
+
+        try:
+            new_version = self.prompt_store.save(sections, result.reason)
+        except OSError:
+            logger.exception("프롬프트 파일 쓰기에 실패했습니다 — 그대로 둡니다.")
+            return
+
+        after = self.prompt_store.load_sections()
+        subject, body = templates.prompt_tuning_email(
+            today,
+            old_version,
+            new_version,
+            result.reason,
+            stats,
+            {key: before[key] for key in sections},
+            {key: after[key] for key in sections},
+        )
+        self.email.send(subject, body)
+        logger.info("프롬프트 수정 메일 발송 (%s, %s → %s)", today, old_version, new_version)
+
+    def _why_history(self) -> str:
+        """직전 변경들의 이유. 에이전트가 자기 수정을 되돌리는 것을 막는 입력이다.
+
+        이력 폴더가 없으면 빈 문자열 — 첫 실행이 그 상태다.
+        """
+        history_dir = self.prompt_store.prompt_dir / "history"
+        try:
+            versions = sorted(path for path in history_dir.iterdir() if path.is_dir())
+        except OSError:
+            return ""
+        entries = []
+        for path in versions[-5:]:
+            try:
+                entries.append(f"- {path.name}: {(path / 'why.md').read_text(encoding='utf-8')}")
+            except OSError:
+                continue
+        return "\n".join(entries)

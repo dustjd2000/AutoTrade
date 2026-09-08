@@ -15,6 +15,7 @@ from src.core.events import (
     OrderType,
 )
 from src.data.collector import DailyStockData
+from src.llm.prompt_store import PromptStore
 from src.llm.recommender import PROMPT_TEMPLATE_VERSION, StockRecommendation
 from src.logger.trade_store import DailySummary, MonthlySummary, RecommendationRow, TradeRow, TradeStore
 from src.risk.manager import exit_trigger_price
@@ -1410,6 +1411,18 @@ class FakeReviewer:
         return self.result
 
 
+class FakeTuner:
+    """PromptTuner 대역 — result를 그대로 돌려주고 호출 여부를 calls에 남긴다."""
+
+    def __init__(self):
+        self.result = None
+        self.calls = []
+
+    def tune(self, stats, rows, sections, locked_text, why_history="", timeout_seconds=120.0):
+        self.calls.append(rows)
+        return self.result
+
+
 def build_workflow(tmp_path):
     """recommend_and_notify가 진짜 TradeStore에 저장하는지 보는 테스트 전용 조립.
 
@@ -1468,6 +1481,8 @@ def build_workflow(tmp_path):
         trade_store=TradeStore(db_path=tmp_path / "t.db"),
         email=email,
         reviewer=FakeReviewer(),
+        tuner=FakeTuner(),
+        prompt_store=PromptStore(tmp_path / "prompt"),
     )
 
 
@@ -1754,3 +1769,114 @@ def test_review_recommendations_leaves_unmatched_ticker_review_blank(tmp_path):
     assert rows["005930"].review == "오전 회복 시도는 맞았습니다."
     assert rows["000660"].review == ""
     assert saved_tickers == ["005930"], "평가를 받지 못한 종목은 저장을 부르지 않는다"
+
+
+# ── tune_prompt (프롬프트 자동 수정) ─────────────────────
+LONG_OUTLOOK = "## 오늘 전망 작성 지침\n" + ("가" * 80)
+
+
+def _verified_recommendation(workflow, day):
+    """검증까지 끝난 추천 한 건을 DB에 넣는다 — tune_prompt의 입력 조건이다."""
+    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
+    workflow.trade_store.save_recommendation_outcome(
+        day,
+        "005930",
+        actual_high=72_000.0,
+        actual_low=69_500.0,
+        actual_close=71_000.0,
+        actual_change_rate=1.43,
+        buy_target_hit=True,
+        sell_target_hit=False,
+    )
+
+
+def test_tune_prompt_applies_change_and_sends_mail(tmp_path):
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 8)
+    _verified_recommendation(workflow, day)
+    workflow.tuner.result = SimpleNamespace(
+        change=True, reason="근거", sections={"outlook": LONG_OUTLOOK}
+    )
+
+    workflow.tune_prompt(day)
+
+    assert workflow.prompt_store.load_sections()["outlook"] == LONG_OUTLOOK
+    assert workflow.prompt_store.load_version() == "v12"
+    assert "추천 프롬프트 수정" in workflow.email.sent[-1][0]
+
+
+def test_tune_prompt_does_nothing_when_change_is_false(tmp_path):
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 8)
+    _verified_recommendation(workflow, day)
+    workflow.tuner.result = SimpleNamespace(change=False, reason="표본이 얇다", sections={})
+
+    workflow.tune_prompt(day)
+
+    assert workflow.prompt_store.load_version() == PROMPT_TEMPLATE_VERSION
+    assert workflow.email.sent == []
+
+
+def test_tune_prompt_skips_when_nothing_verified(tmp_path):
+    """검증된 추천이 없으면 LLM을 부르지도 않는다."""
+    workflow = build_workflow(tmp_path)
+    workflow.tune_prompt(date(2026, 9, 8))
+    assert workflow.tuner.calls == []
+    assert workflow.email.sent == []
+
+
+def test_tune_prompt_discards_a_change_that_fails_sanitizing(tmp_path):
+    """안전장치에 전부 걸리면 change=True여도 아무것도 바뀌지 않고 메일도 안 나간다."""
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 8)
+    _verified_recommendation(workflow, day)
+    workflow.tuner.result = SimpleNamespace(
+        change=True, reason="근거", sections={"역할": LONG_OUTLOOK}
+    )
+
+    workflow.tune_prompt(day)
+
+    assert workflow.prompt_store.load_version() == PROMPT_TEMPLATE_VERSION
+    assert workflow.email.sent == []
+
+
+def test_tune_prompt_survives_llm_failure(tmp_path):
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 8)
+    _verified_recommendation(workflow, day)
+    workflow.tuner.result = None
+
+    workflow.tune_prompt(day)
+
+    assert workflow.prompt_store.load_version() == PROMPT_TEMPLATE_VERSION
+    assert workflow.email.sent == []
+
+
+def test_tune_prompt_survives_file_write_failure(tmp_path):
+    """파일 쓰기가 실패해도 예외가 새지 않고 메일도 나가지 않는다."""
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 8)
+    _verified_recommendation(workflow, day)
+    workflow.tuner.result = SimpleNamespace(
+        change=True, reason="근거", sections={"outlook": LONG_OUTLOOK}
+    )
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    workflow.prompt_store.save = boom
+    workflow.tune_prompt(day)
+
+    assert workflow.email.sent == []
+
+
+def test_tune_prompt_skips_without_a_tuner(tmp_path):
+    """tuner가 없으면 단계 자체를 건너뛴다 — DB도 읽지 않는다."""
+    workflow = build_workflow(tmp_path)
+    workflow.tuner = None
+    _verified_recommendation(workflow, date(2026, 9, 8))
+
+    workflow.tune_prompt(date(2026, 9, 8))
+
+    assert workflow.email.sent == []
+    assert workflow.prompt_store.load_version() == PROMPT_TEMPLATE_VERSION

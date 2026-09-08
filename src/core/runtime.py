@@ -36,6 +36,7 @@ from src.data.collector import DataCollector, LargeCapUniverse
 from src.data.disclosure import DisclosureClient
 from src.llm.recommender import LLMRecommender
 from src.llm.reviewer import LLMReviewer
+from src.llm.tuner import PromptTuner
 from src.logger.trade_store import TradeStore
 from src.notification.alert import AlertNotifier
 from src.notification.email import EmailNotifier
@@ -189,6 +190,7 @@ def build_runtime(settings: Settings) -> Runtime:
         trade_store=trade_store,
         email=email,
         reviewer=LLMReviewer(settings),
+        tuner=PromptTuner(settings),
         buy_price_tolerance_ratio=settings.buy_price_tolerance_ratio,
         gap_down_tolerance_ratio=settings.gap_down_tolerance_ratio,
         ws_client=ws_client,
@@ -218,6 +220,8 @@ def build_runtime(settings: Settings) -> Runtime:
         (REPORT_TIME, "daily_report"),
         # 리포트 다음에 등록한다 — 같은 시각의 두 잡은 등록 순서대로 큐에 들어간다
         (REPORT_TIME, "review_recommendations"),
+        # 검증 다음에 등록한다 — 그날 검증 결과가 이 단계의 판단 재료다
+        (REPORT_TIME, "tune_prompt"),
     ):
         scheduler.add_job(
             trigger_time,
