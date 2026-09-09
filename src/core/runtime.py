@@ -7,7 +7,7 @@ import asyncio
 import inspect
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, time as dt_time
+from datetime import date, datetime, time as dt_time, timedelta
 from typing import Callable, List, Optional
 
 from config.settings import Settings
@@ -32,8 +32,10 @@ from src.core.actions import (  # noqa: F401  (재수출)
 )
 from src.core.daily_workflow import DailyWorkflow
 from src.core.engine import TradingEngine
+from src.core.events import ExitReason
 from src.data.collector import DataCollector, LargeCapUniverse
 from src.data.disclosure import DisclosureClient
+from src.llm.exit_advisor import ExitAdvisor, HoldingView
 from src.llm.recommender import LLMRecommender
 from src.llm.reviewer import LLMReviewer
 from src.llm.tuner import PromptTuner
@@ -86,6 +88,12 @@ BUY_RESULT_CHECK_INTERVAL_SECONDS = 60
 # 시세 틱과 달리 예수금은 자연스러운 갱신 계기가 없어 별도 주기로 돈다.
 CASH_REFRESH_INTERVAL_SECONDS = 60
 
+# AI 매도 판단 — 매수 체결 뒤 이 시간이 지나야 첫 판단을 한다. 체결 직후에는 근거가 없다.
+AI_EXIT_START_DELAY_MINUTES = 15
+# 15:15 강제청산 직전에는 부르지 않는다 — 어차피 곧 팔린다.
+AI_EXIT_END_TIME = dt_time(15, 0)
+AI_EXIT_POLL_SECONDS = 30.0
+
 
 def _submit(runtime: "Runtime", action: str) -> Callable[[], None]:
     """스케줄 잡을 실행 통로 접수로 바꾼다 — 버튼과 같은 큐를 탄다."""
@@ -132,6 +140,8 @@ class Runtime:
     scheduler: TimeScheduler
     ws_client: WebSocketClient
     workflow: DailyWorkflow
+    # 보유 종목을 지금 전량 정리할지 판단하는 LLM 모듈 (PRD 5.5-B 'AI 매도 판단').
+    exit_advisor: ExitAdvisor
     # 스케줄 잡과 UI 버튼이 공유하는 실행 통로. build_runtime이 Runtime을 만든 뒤에
     # 채운다 — ActionRunner가 runtime을 참조해야 해서 순서를 뒤집을 수 없다.
     runner: Optional[ActionRunner] = None
@@ -195,6 +205,7 @@ def build_runtime(settings: Settings) -> Runtime:
         gap_down_tolerance_ratio=settings.gap_down_tolerance_ratio,
         ws_client=ws_client,
     )
+    exit_advisor = ExitAdvisor(settings)
 
     # 매수/강제청산은 실시간 익절·손절 감시와 직렬화되도록 루프 스레드에서 그대로 실행하고,
     # 오래 걸리는 수집·LLM·리포트는 루프를 막지 않도록 별도 스레드로 넘긴다 — 이 배분은
@@ -208,6 +219,7 @@ def build_runtime(settings: Settings) -> Runtime:
         scheduler=scheduler,
         ws_client=ws_client,
         workflow=workflow,
+        exit_advisor=exit_advisor,
     )
     runtime.runner = ActionRunner(runtime)
 
@@ -427,6 +439,200 @@ async def watch_cash_refresh(
         await asyncio.get_running_loop().run_in_executor(None, runtime.engine.refresh_cash)
 
 
+def ai_exit_window_open(settings: Settings, now: Optional[datetime] = None) -> bool:
+    """지금이 AI 매도 판단 호출 창 안인지 (매수 시각 +`AI_EXIT_START_DELAY_MINUTES`분 ~ `AI_EXIT_END_TIME`).
+
+    창 시작이 고정 시각이 아닌 이유는 매수 시각(`settings.buy_time`)이 설정값이기 때문이다.
+    """
+    now = now or datetime.now()
+    start = datetime.combine(now.date(), settings.buy_time) + timedelta(
+        minutes=AI_EXIT_START_DELAY_MINUTES
+    )
+    end = datetime.combine(now.date(), AI_EXIT_END_TIME)
+    return start <= now <= end
+
+
+def ai_exit_call_limit(settings: Settings) -> int:
+    """하루 동안 허용할 AI 매도 판단 최대 호출 횟수.
+
+    호출 창(매수 시각 +`AI_EXIT_START_DELAY_MINUTES`분 ~ `AI_EXIT_END_TIME`) 길이를 호출
+    주기(`settings.ai_exit_interval_minutes`)로 나눈 슬롯 수다 (창이 열리는 순간의 호출을
+    포함하도록 +1). 엔진을 하루에 여러 번 재시작해도 누적 호출이 이 값을 넘지 않도록
+    막는다 — `TradingEngine._ai_exit_calls`는 재시작해도 유지되고 08:40 reset_for_new_day
+    에서만 비워지므로, 이 상한이 없으면 재시작할 때마다 사실상 무제한으로 호출된다.
+    """
+    start_minutes = (
+        settings.buy_time.hour * 60 + settings.buy_time.minute + AI_EXIT_START_DELAY_MINUTES
+    )
+    end_minutes = AI_EXIT_END_TIME.hour * 60 + AI_EXIT_END_TIME.minute
+    window_minutes = end_minutes - start_minutes
+    if window_minutes <= 0:
+        return 0
+    return window_minutes // settings.ai_exit_interval_minutes + 1
+
+
+def ai_exit_due(
+    runtime: Runtime,
+    now: Optional[datetime] = None,
+    last_called_at: Optional[datetime] = None,
+) -> bool:
+    """이번 사이클에 AI 매도 판단을 부를 조건인지 (PRD 5.5-B 'AI 매도 판단').
+
+    아래를 전부 만족해야 True다. 하나라도 아니면 그 사이클은 건너뛴다.
+    거래일 → `engine.ai_exit_enabled` → 호출 창 안 → 마지막 호출로부터 주기 경과 →
+    보유 종목 있음 → 하루 호출 상한 안.
+    """
+    now = now or datetime.now()
+    if not is_trading_day(now):
+        return False
+
+    engine = runtime.engine
+    if not engine.ai_exit_enabled:
+        return False
+
+    if not ai_exit_window_open(runtime.settings, now):
+        return False
+
+    if last_called_at is not None:
+        elapsed_minutes = (now - last_called_at).total_seconds() / 60
+        if elapsed_minutes < runtime.settings.ai_exit_interval_minutes:
+            return False
+
+    if not engine.open_tickers:
+        return False
+
+    if engine.ai_exit_calls >= ai_exit_call_limit(runtime.settings):
+        return False
+
+    return True
+
+
+async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) -> None:
+    """AI 매도 판단 한 사이클을 실행한다 — 궤적에 점을 남기고 필요하면 전량 매도한다.
+
+    호출 전에 `ai_exit_due`로 이번 사이클을 돌 조건인지 먼저 확인해야 한다. 이 함수
+    자체는 보유 종목 유무 등을 다시 확인하지 않는다 (게이트와 실행을 분리해 각각 따로
+    테스트하기 위함).
+    """
+    now = now or datetime.now()
+    engine = runtime.engine
+    holdings = engine.exit_candidates()
+    if not holdings:
+        return
+
+    try:
+        portfolio_return = engine.risk_manager.portfolio_return(holdings)
+        if portfolio_return is None:
+            logger.info("AI 매도 판단 — 합산 순손익률을 계산할 수 없어 이번 주기를 건너뜁니다.")
+            return
+
+        per_ticker = {p.ticker: engine.position_net_return(p) for p in holdings}
+        prices = {p.ticker: p.current_price for p in holdings}
+
+        # partial은 이번 점을 더하기 '전' 상태를 봐야 한다 — 엔진을 켠 뒤 첫 사이클에서만
+        # True가 되어, 궤적에 과거가 없다는 사실을 이번 한 번만 프롬프트에 알린다.
+        partial = engine.exit_trace.partial
+        engine.exit_trace.append(now, portfolio_return, per_ticker, prices)
+        trace = engine.exit_trace.points()
+
+        recommendations = (
+            {r.ticker: r for r in engine.trade_store.recommendations_for(now.date())}
+            if engine.trade_store is not None
+            else {}
+        )
+        holdings_view = []
+        for p in holdings:
+            rec = recommendations.get(p.ticker)
+            holdings_view.append(
+                HoldingView(
+                    ticker=p.ticker,
+                    name=p.name or "",
+                    quantity=p.quantity,
+                    avg_price=p.avg_price,
+                    current_price=p.current_price,
+                    net_return=per_ticker[p.ticker],
+                    # 이월 포지션처럼 그날 추천이 아닌 종목은 아침 근거가 없다 — 빈 문자열로 둔다.
+                    outlook=rec.outlook if rec is not None else "",
+                    reason=rec.reason if rec is not None else "",
+                )
+            )
+
+        minutes_to_close = max(
+            0,
+            int((datetime.combine(now.date(), FORCE_CLOSE_TIME) - now).total_seconds() // 60),
+        )
+
+        # 하루 호출 상한은 '시도'를 센다 — 응답이 실패해도 LLM 호출 자체는 이미 나갔다.
+        engine.note_ai_exit_call()
+        # LLM 호출은 별도 스레드로 넘긴다 — ExitAdvisor.decide는 최대 120초까지 걸릴 수
+        # 있어(timeout_seconds), 이벤트 루프에서 그대로 기다리면 그동안 WebSocket PING
+        # 응답이 끊기고 실시간 손절 콜백도 멈춘다.
+        decision = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: runtime.exit_advisor.decide(
+                holdings_view,
+                trace,
+                portfolio_return,
+                engine.risk_manager.stop_loss_ratio,
+                engine.risk_manager.take_profit_ratio,
+                minutes_to_close,
+                partial,
+            ),
+        )
+    except Exception:
+        logger.exception("AI 매도 판단 사이클 처리 중 오류 — 이번 주기는 매도하지 않습니다.")
+        return
+
+    if decision is None or not decision.sell:
+        logger.info(
+            "AI 매도 판단: 보유 유지 (%s)", decision.reason if decision is not None else "판단 실패"
+        )
+        return
+
+    # 매도 주문은 루프 스레드에서 그대로 실행해 실시간 손절 감시와 직렬화한다. LLM 응답을
+    # 기다리는 동안(최대 120초) 손절이 먼저 정리했을 수 있어, 판단 시점 스냅샷을 그대로
+    # 팔지 않고 매도 직전에 보유 종목을 다시 읽는다 (force_close_all_positions와 같은 이유).
+    fresh_holdings = engine.exit_candidates(force=True)
+    if not fresh_holdings:
+        logger.info("AI 매도 판단: 전량 매도로 판단했지만 그 사이 보유 종목이 이미 정리되었습니다.")
+        return
+
+    logger.warning("AI 매도 판단: 전량 매도 (%s)", decision.reason)
+    engine._execute_portfolio_exit(fresh_holdings, ExitReason.AI_JUDGMENT)
+
+
+async def maybe_run_ai_exit_cycle(
+    runtime: Runtime,
+    now: Optional[datetime] = None,
+    last_called_at: Optional[datetime] = None,
+) -> Optional[datetime]:
+    """게이트(`ai_exit_due`)를 통과할 때만 한 사이클(`run_ai_exit_cycle`)을 실행한다.
+
+    다음 게이트 판정에 쓸 `last_called_at`을 돌려준다 — 건너뛰면 받은 값을 그대로 돌려준다.
+    """
+    now = now or datetime.now()
+    if not ai_exit_due(runtime, now, last_called_at):
+        return last_called_at
+    await run_ai_exit_cycle(runtime, now)
+    return now
+
+
+async def watch_ai_exit(runtime: Runtime, poll_seconds: float = AI_EXIT_POLL_SECONDS) -> None:
+    """설정된 주기마다 보유 종목을 지금 정리할지 AI에 묻는다 (PRD 5.5-B 'AI 매도 판단').
+
+    익절 자동 청산이 빠진 자리를 대신한다. 손절은 실시간 시세 콜백에서 그대로 도므로,
+    이 워처가 멈춰도 하방은 지켜진다.
+
+    LLM 호출은 별도 스레드로 넘긴다 — 20초 넘게 걸려 이벤트 루프를 막으면 WebSocket
+    PING에 응답하지 못해 시세가 끊긴다. 매도 주문만 루프 스레드에서 실행해 실시간
+    손절 감시와 직렬화한다.
+    """
+    last_called_at: Optional[datetime] = None
+    while True:
+        await asyncio.sleep(poll_seconds)
+        last_called_at = await maybe_run_ai_exit_cycle(runtime, datetime.now(), last_called_at)
+
+
 def adopt_carried_over_positions(runtime: Runtime) -> List[str]:
     """시작 시점에 남아 있는 보유 종목을 오늘의 매도 대상으로 편입한다.
 
@@ -469,6 +675,7 @@ async def run(runtime: Runtime) -> None:
     closeout_watch = asyncio.create_task(watch_closeout_report(runtime))
     buy_result_watch = asyncio.create_task(watch_buy_result(runtime))
     cash_watch = asyncio.create_task(watch_cash_refresh(runtime))
+    ai_exit_watch = asyncio.create_task(watch_ai_exit(runtime))
     try:
         await asyncio.gather(runtime.ws_client.connect(), runtime.scheduler.run())
     except asyncio.CancelledError:
@@ -479,6 +686,7 @@ async def run(runtime: Runtime) -> None:
         closeout_watch.cancel()
         buy_result_watch.cancel()
         cash_watch.cancel()
+        ai_exit_watch.cancel()
         request_stop(runtime)
         await runtime.ws_client.disconnect()
         logger.info("매매 런타임이 종료되었습니다.")

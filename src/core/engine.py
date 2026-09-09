@@ -22,6 +22,7 @@ from src.core.events import (
     ExitReason,
     UnsellableView,
 )
+from src.core.exit_trace import ExitTrace
 from src.logger.trade_store import TradeStore
 from src.notification.alert import AlertNotifier
 
@@ -141,6 +142,15 @@ class TradingEngine:
         # 보유 목록이 매도로 비워진 시각. 15:35를 기다리지 않고 결과 리포트를 보내는
         # 근거가 된다 (runtime.closeout_report_due).
         self._closed_out_at: Optional[datetime] = None
+        # AI 매도 판단 (PRD 5.5-B) — 익절 자동 청산이 빠진 자리를 대신한다.
+        # 순손익 궤적. 메모리에만 두고 08:40 reset_for_new_day에서 비운다 (runtime.watch_ai_exit).
+        self.exit_trace = ExitTrace()
+        # UI 체크박스가 켜고 끈다 — stop_loss_enabled가 risk_manager에 붙은 것과 같은 자리다.
+        # 기본은 켬. .env에 저장하지 않으므로 재시작하면 항상 켬으로 돌아간다.
+        self.ai_exit_enabled = True
+        # 오늘 AI 매도 판단을 부른 횟수 (하루 호출 상한 판정용). 엔진을 재시작해도 유지되고
+        # 08:40 reset_for_new_day에서만 비워진다 — 재시작으로 상한을 우회하지 못하게 한다.
+        self._ai_exit_calls = 0
 
     @property
     def open_tickers(self) -> List[str]:
@@ -159,6 +169,15 @@ class TradingEngine:
     def closed_out_at(self) -> Optional[datetime]:
         """보유 목록이 매도로 비워진 시각. 아직 비지 않았거나 다시 매수했으면 None."""
         return self._closed_out_at
+
+    @property
+    def ai_exit_calls(self) -> int:
+        """오늘 AI 매도 판단을 부른 횟수 (runtime.watch_ai_exit의 하루 호출 상한 판정용)."""
+        return self._ai_exit_calls
+
+    def note_ai_exit_call(self) -> None:
+        """AI 매도 판단을 한 번 불렀음을 기록한다 (하루 호출 상한 카운터, 08:40에만 초기화)."""
+        self._ai_exit_calls += 1
 
     def cash_snapshot(self) -> Optional[float]:
         """마지막으로 조회한 예수금 (UI 스레드에서 호출 — API를 호출하지 않는다).
@@ -409,6 +428,31 @@ class TradingEngine:
         holdings = [p for t, p in self._positions.items() if t not in self._exiting]
         return self.risk_manager.portfolio_net_pnl(holdings)
 
+    def exit_candidates(self, force: bool = False) -> List[Position]:
+        """AI 매도 판단 대상 보유 종목 — 이미 매도 주문을 낸 종목은 뺀다.
+
+        `_check_portfolio_exit`(실시간 손절 경로)이 쓰는 것과 같은 필터이지만, 그 경로는
+        이번 작업(AI 매도 판단)에서 손대지 않기로 해 로직을 공유하지 않고 별도로 둔다.
+
+        `force=True`는 실제로 매도를 실행하기 직전처럼 최신 잔고가 필요한 경우다 — AI
+        판단은 LLM 응답을 최대 120초까지 기다리는데, 그 사이 손절이 먼저 정리했을 수
+        있다. 캐시를 그대로 믿으면 이미 판 종목을 또 팔려고 시도한다
+        (force_close_all_positions·close_positions와 같은 이유).
+        """
+        positions = self._get_positions(force=force)
+        return [p for t, p in positions.items() if t not in self._exiting]
+
+    def position_net_return(self, position: Position) -> float:
+        """종목 순손익률 (비율, 0.004 = +0.40%). AI 매도 판단의 HoldingView.net_return과
+        순손익 궤적(ExitTrace)의 종목별 값에 쓴다.
+
+        position_snapshot의 net_pnl_percent와 같은 계산이되 100으로 나누지 않은 비율값이다.
+        """
+        cost = position.avg_price * position.quantity
+        if cost <= 0:
+            return 0.0
+        return self.risk_manager.position_net_pnl(position) / cost
+
     def reset_for_new_day(self) -> None:
         """장 시작 전 일일 리스크 카운터를 초기화한다.
 
@@ -429,6 +473,9 @@ class TradingEngine:
         self._unsellable = {}
         self._zero_sellable.clear()
         self._closed_out_at = None
+        # 순손익 궤적은 하루치라 다음 날로 넘기지 않는다 — 어제 궤적으로 오늘을 판단하면 안 된다.
+        self.exit_trace.clear()
+        self._ai_exit_calls = 0
         logger.info("새 거래일 준비 — 일일 손실 한도와 매매 중지 상태를 초기화했습니다.")
 
     def start(self) -> None:
