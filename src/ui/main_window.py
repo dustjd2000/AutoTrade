@@ -35,7 +35,12 @@ from PyQt6.QtWidgets import (
 
 from dotenv import load_dotenv
 
-from config.settings import DEFAULT_BUY_TIME_HHMM, DEFAULT_RECOMMEND_TIME_HHMM, Settings
+from config.settings import (
+    AI_EXIT_INTERVAL_CHOICES,
+    DEFAULT_BUY_TIME_HHMM,
+    DEFAULT_RECOMMEND_TIME_HHMM,
+    Settings,
+)
 from src.core.daily_workflow import (
     BUY_DROPPABLE_STATUSES,
     BUY_ORDERED_STATUS,
@@ -425,7 +430,7 @@ class MainWindow(QMainWindow):
         fund_form.addRow("총 매수가능 금액", self._investable_amount)
         fund_risk_row.addWidget(fund_box, 1)
 
-        risk_box = QGroupBox("리스크 관리 (익절 / 손절 / 갭 허용치)")  # 갭은 상승·하락 두 값이다
+        risk_box = QGroupBox("리스크 관리 (익절 목표 / 손절 / 갭 허용치)")  # 갭은 상승·하락 두 값이다
         risk_form = QFormLayout(risk_box)
         risk_form.setSpacing(8)
         risk_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -437,7 +442,7 @@ class MainWindow(QMainWindow):
         # 수수료·세금·슬리피지를 뺀 '순손익률' 기준이며, 보유 종목을 합산한 값으로
         # 판정한다. 종목별 판정은 단순익절 하나뿐이다.
         self._exit_percent = QLineEdit()
-        self._exit_percent.setPlaceholderText("예: 2 (합산 순손익 +2%면 익절 / -2%면 손절)")
+        self._exit_percent.setPlaceholderText("예: 2 (손절 -2%는 자동 / 익절 목표 +2%는 AI 참고선)")
         self._exit_percent.setValidator(QDoubleValidator(0.0, 100.0, 2))
         # 09:08 현재가가 목표 매수가보다 이만큼 넘게 높으면 그 종목을 건너뛴다
         self._buy_price_tolerance = QLineEdit()
@@ -448,42 +453,44 @@ class MainWindow(QMainWindow):
         self._gap_down_tolerance.setPlaceholderText("예: 1 (전일 종가 -1% 미만 시 매수 안 함, 0=끔)")
         self._gap_down_tolerance.setValidator(QDoubleValidator(0.0, 100.0, 2))
 
-        # 적용 여부 체크박스 — 끄면 그 라인은 감시하지 않는다. `.env`에 저장하지 않고
+        # 적용 여부 체크박스 — 끄면 그 경로는 동작하지 않는다. `.env`에 저장하지 않고
         # 엔진을 재시작하지도 않는다(끄고 싶은 순간에 감시 공백이 생기면 안 된다).
-        # **기본은 손절 + 합산 퍼센트 익절이다** (확정 2026-08-18, PRD 5.5-B "퍼센트 익절
-        # 기본 적용"). 단순익절이 기본 해제로 바뀌었다 — 익절선이 0(비용 제외 후 이익이면
-        # 즉시)이라 상방을 너무 이르게 잘랐고, 익절(%) 입력값으로 폭을 정하는 쪽을 택했다.
-        self._take_profit_enabled = QCheckBox("익절")
-        self._take_profit_enabled.setChecked(True)
+        # **기본은 AI 매도 판단 + 손절이다** (확정 2026-09-09, PRD 5.5-B "AI 매도 판단").
+        # 익절 자동 청산과 단순익절은 걷어냈다 — 고정 익절선이 상방을 자른다는 것이 실매매
+        # 27건 대조에서 관찰됐고(PRD 10절), 그 자리를 주기적 AI 판단이 대신한다.
+        self._ai_exit_enabled = QCheckBox("AI 매도 판단")
+        self._ai_exit_enabled.setChecked(True)
         self._stop_loss_enabled = QCheckBox("손절")
         self._stop_loss_enabled.setChecked(True)
-        # 단순익절 — 익절선을 입력값(%)이 아니라 0으로 두고 종목별로 판정한다. 위 '적용'
-        # (합산 퍼센트 익절)과는 배타적이라 한쪽을 켜면 다른 쪽이 꺼진다. 둘 다 끄면 익절 없음.
-        self._simple_take_profit_enabled = QCheckBox("단순익절적용")
-        self._simple_take_profit_enabled.setChecked(False)
-        self._simple_take_profit_enabled.setToolTip(
-            "종목마다 따로 봅니다 — 그 종목의 순손익이 0을 넘으면(비용을 빼고 조금이라도 "
-            "이익이면) 그 종목만 즉시 매도하고 나머지는 계속 보유합니다."
-        )
-        self._take_profit_enabled.setToolTip(
-            "보유 종목을 합산한 순손익이 +입력값(%)에 닿으면 전량 매도합니다."
+        self._ai_exit_enabled.setToolTip(
+            "호출 주기마다 보유 종목 전체를 AI가 보고 전량 매도할지 정합니다. "
+            "끄면 이익 실현 쪽 청산이 통째로 없어져 15:15 강제청산까지 갑니다."
         )
         self._stop_loss_enabled.setToolTip(
-            "보유 종목을 합산한 순손익이 -입력값(%)에 닿으면 전량 매도합니다."
+            "보유 종목을 합산한 순손익이 -입력값(%)에 닿으면 실시간으로 전량 매도합니다."
         )
-        self._take_profit_enabled.toggled.connect(self._on_take_profit_toggled)
-        self._simple_take_profit_enabled.toggled.connect(self._on_simple_take_profit_toggled)
+        self._ai_exit_enabled.toggled.connect(self._on_exit_flag_toggled)
         self._stop_loss_enabled.toggled.connect(self._on_exit_flag_toggled)
 
+        # AI 호출 주기 — 하루 호출 수가 여기서 갈리므로 비용도 함께 갈린다.
+        # `.env`에 저장하는 값이라 바뀌면 엔진이 재시작된다 (체크박스와 다른 점이다).
+        self._ai_exit_interval = _NoScrollComboBox()
+        for minutes in AI_EXIT_INTERVAL_CHOICES:
+            label = f"{minutes // 60}시간" if minutes >= 60 else f"{minutes}분"
+            self._ai_exit_interval.addItem(label, minutes)
+        self._ai_exit_interval.setToolTip(
+            "AI 매도 판단을 얼마나 자주 부를지. 짧을수록 되돌림을 빨리 잡지만 호출 비용이 늘어납니다."
+        )
+
         risk_form.addRow(
-            "익절/손절 (%)",
+            "익절 목표 / 손절 (%)",
             _with_toggle(
                 self._exit_percent,
-                self._take_profit_enabled,
+                self._ai_exit_enabled,
                 self._stop_loss_enabled,
-                self._simple_take_profit_enabled,
             ),
         )
+        risk_form.addRow("AI 호출 주기", self._ai_exit_interval)
 
         # 해제된 라인이 있으면 그 사실을 입력란 바로 아래에 띄운다 — 체크박스만으로는
         # 눈에 잘 띄지 않는데, 손절이 꺼진 줄 모르는 것이 이 화면에서 가장 위험한 오해다
@@ -496,16 +503,14 @@ class MainWindow(QMainWindow):
         # 종목별 판정이 아니라는 점을 입력란 바로 아래에서 알려야 한다 — 한 종목이 크게
         # 무너져도 다른 종목이 상쇄하면 매도가 나가지 않는다 (PRD 5.5-B, 확정 2026-08-10)
         exit_hint = QLabel(
-            "(입력값 하나가 익절선(+)과 손절선(-)을 함께 정합니다 — 2를 넣으면 익절 +2% / "
-            "손절 -2%입니다. 폭은 같아도 켜고 끄는 것은 따로라, '익절'만 꺼서 손절만 남길 수 "
-            "있습니다. 둘 다 보유 종목을 합산한 순손익 기준이며, 닿으면 보유 종목을 전량 "
-            "매도합니다. '단순익절적용'만 종목별입니다 — 그 종목의 순손익이 0을 넘으면 비용을 "
-            "빼고 조금이라도 이익인 것이므로 그 종목만 팔고 나머지는 계속 보유합니다. 이때 "
-            "익절선은 입력값이 아니라 0이 되고, 입력값은 손절선에만 쓰입니다. '익절'과 "
-            "'단순익절적용'은 둘 중 하나만 켜지고, 둘 다 끄면 익절이 없습니다. 이익 난 종목이 "
-            "먼저 빠지면 남은 종목의 손실을 상쇄할 것이 없어져 합산 손절이 더 쉽게 걸립니다. "
-            "기본은 익절 + 손절이며, 여기서 바꾼 상태는 프로그램을 끌 때까지 "
-            "유지됩니다 — 다시 시작하면 기본값으로 돌아갑니다)"
+            "(입력값 하나가 손절선(-)과 익절 목표(+)를 함께 정합니다 — 2를 넣으면 손절 -2% / "
+            "익절 목표 +2%입니다. 성격은 다릅니다: 손절은 보유 종목 합산 순손익이 그 값에 "
+            "닿는 순간 실시간으로 전량 매도되는 자동선이고, 익절 목표는 자동으로 걸리지 않는 "
+            "참고선이라 AI 매도 판단에 '이 정도면 만족'이라는 기준으로만 넘어갑니다. 이익 쪽 "
+            "청산은 AI가 호출 주기마다 보유 종목 전체를 보고 정합니다 — 끄면 이익 실현이 "
+            "통째로 없어져 15:15 강제청산까지 갑니다. 두 체크박스 상태는 프로그램을 끌 때까지 "
+            "유지되며 다시 시작하면 기본값(AI 매도 판단 + 손절)으로 돌아갑니다. 호출 주기는 "
+            "`.env`에 저장되어 바꾸면 엔진이 재시작됩니다)"
         )
         exit_hint.setWordWrap(True)
         exit_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
@@ -882,7 +887,10 @@ class MainWindow(QMainWindow):
         # 지금 향하고 있는 쪽 라인만 붙인다 — 둘 다 적으면 한 줄에 들어가지 않는다.
         # 해제된 쪽은 값 대신 '해제'로 적는다 — 닿아도 팔리지 않으므로 숫자를 보이면 오해한다.
         if ret >= 0:
-            line = self._take_profit_label() if self._take_profit_watched() else "익절 해제"
+            # 이익 쪽은 자동선이 없다 — AI가 주기마다 판단할 뿐이라 '닿으면 팔리는 값'이 없다
+            line = (
+                "AI 매도 판단" if self._ai_exit_enabled.isChecked() else "AI 매도 판단 해제"
+            )
         else:
             line = (
                 f"손절 -{self._exit_percent.text().strip() or '2'}%"
@@ -1100,17 +1108,6 @@ class MainWindow(QMainWindow):
         )
 
     # ── 익절/손절 적용 여부 ──────────────────────────────────
-    def _on_take_profit_toggled(self, checked: bool) -> None:
-        """퍼센트 익절(합산)과 단순익절(종목별)은 배타적이다 — 켜는 쪽이 다른 쪽을 끈다."""
-        if checked:
-            self._uncheck_quietly(self._simple_take_profit_enabled)
-        self._on_exit_flag_toggled()
-
-    def _on_simple_take_profit_toggled(self, checked: bool) -> None:
-        if checked:
-            self._uncheck_quietly(self._take_profit_enabled)
-        self._on_exit_flag_toggled()
-
     def _uncheck_quietly(self, toggle: QCheckBox) -> None:
         """반대쪽 체크박스를 끄되, 그때 딸려오는 toggled 처리는 건너뛴다.
 
@@ -1134,29 +1131,25 @@ class MainWindow(QMainWindow):
         if self._syncing_exit_flags:
             return
 
-        take_profit = self._take_profit_enabled.isChecked()
+        ai_exit = self._ai_exit_enabled.isChecked()
         stop_loss = self._stop_loss_enabled.isChecked()
-        simple_take_profit = self._simple_take_profit_enabled.isChecked()
 
-        # 입력란은 늘 열어 둔다 — 단순익절이 켜지면 익절선은 0이 되지만, 같은 칸이
-        # 손절선도 정하므로 잠그면 손절 폭을 못 고치게 된다 (PRD 5.5-B "익절·손절 폭 통합")
+        # 입력란은 늘 열어 둔다 — 같은 칸이 손절선도 정하므로, AI 매도 판단을 꺼도
+        # 잠그면 손절 폭을 못 고치게 된다 (PRD 5.5-B "익절·손절 폭 통합")
+        self._ai_exit_interval.setEnabled(ai_exit)
         self._refresh_exit_flag_hint()
 
         thread = self._engine_thread
-        if thread is None or not thread.set_exit_flags(take_profit, stop_loss, simple_take_profit):
+        if thread is None or not thread.set_exit_flags(ai_exit, stop_loss):
             return
 
-        if simple_take_profit:
-            take_profit_state = "단순익절(종목별)"
-        elif take_profit:
-            take_profit_state = "적용"
-        else:
-            take_profit_state = "해제"
-        state = f"익절 {take_profit_state} / 손절 {'적용' if stop_loss else '해제'}"
-        if (take_profit or simple_take_profit) and stop_loss:
+        state = (
+            f"AI 매도 판단 {'적용' if ai_exit else '해제'} / 손절 {'적용' if stop_loss else '해제'}"
+        )
+        if ai_exit and stop_loss:
             logger.info("청산 조건 변경 — %s", state)
         else:
-            logger.warning("청산 조건 변경 — %s. 해제된 라인은 감시하지 않습니다.", state)
+            logger.warning("청산 조건 변경 — %s. 해제된 쪽은 동작하지 않습니다.", state)
 
     def _gap_down_text(self) -> str:
         """매수 확인 팝업에 넣을 갭 하락 안내 — 0(꺼짐)이면 꺼져 있다고 알린다."""
@@ -1169,65 +1162,53 @@ class MainWindow(QMainWindow):
             return "갭 하락 판정은 꺼져 있습니다 (전일 종가보다 얼마나 낮게 시작하든 매수합니다)."
         return f"전일 종가보다 {percent:g}% 넘게 낮게 시작한 종목도 건너뜁니다."
 
-    def _take_profit_label(self) -> str:
-        """익절 라인을 한 줄로 적는다 — 방식에 따라 기준선도 판정 단위도 다르다.
-
-        둘 다 꺼져 있으면 호출부가 '익절 해제'로 적으므로 여기서는 다루지 않는다.
-        """
-        if self._simple_take_profit_enabled.isChecked():
-            return "단순익절(종목별) 0% 초과"
-        return f"익절 +{self._exit_percent.text().strip() or '2'}%"
-
-    def _take_profit_watched(self) -> bool:
-        """익절이 어떤 방식으로든 감시되고 있는지 — 지금은 항상 False다.
-
-        Task 1(2026-09-09)에서 익절 자동 청산과 단순익절을 엔진에서 걷어냈다
-        (PRD 10절) — 두 체크박스가 어떤 상태든 실제로 감시되는 익절은 이제 없다.
-        체크박스 자체는 Task 6에서 정리하기 전까지 화면에 남아 있으므로, 예전처럼
-        체크박스 상태를 읽으면 "감시 중"이라고 오해하게 만드는 문구(`_exit_watch_text`
-        등)가 그대로 나간다. Task 6이 체크박스를 정리할 때까지의 임시 조치다.
-        """
-        return False
-
     def _exit_watch_text(self) -> str:
-        """매수 확인 팝업에 넣을 청산 감시 안내 — 해제된 라인은 빼고 알린다."""
-        lines = []
-        if self._take_profit_watched():
-            lines.append(self._take_profit_label())
-        if self._stop_loss_enabled.isChecked():
-            lines.append(f"손절 -{self._exit_percent.text().strip() or '2'}%")
+        """매수 확인 팝업에 넣을 청산 안내 — 두 경로의 성격을 갈라 적는다.
 
-        if not lines:
+        손절은 합산 순손익이 선에 닿는 순간 실시간으로 팔리는 자동선이고, AI 매도 판단은
+        주기마다 한 번씩 보고 정하는 판단이다. 익절 목표(%)는 AI에게 넘기는 참고선일 뿐
+        그 값에 닿는다고 자동으로 팔리지 않는다 — 이 구분이 흐려지면 없는 보호를 있다고
+        믿게 된다 (PRD 5.5-B).
+        """
+        percent = self._exit_percent.text().strip() or "2"
+        ai_exit = self._ai_exit_enabled.isChecked()
+        stop_loss = self._stop_loss_enabled.isChecked()
+
+        if not ai_exit and not stop_loss:
             return (
-                "⚠ 익절/손절이 모두 해제되어 있어 매수 후 실시간 청산이 동작하지 않습니다.\n"
-                "15:15 강제청산까지 보유합니다."
+                "⚠ AI 매도 판단과 손절이 모두 해제되어 있어 매수 후 실시간 청산이 동작하지 "
+                "않습니다.\n15:15 강제청산까지 보유합니다."
             )
-        prefix = "" if len(lines) == 2 else "⚠ "
-        # 단순익절만 종목별로 그 종목만 팔고, 나머지 라인은 합산 판정에 전량 매도다
-        unit = (
-            "매수 후에는 종목별 순손익 기준"
-            if self._simple_take_profit_enabled.isChecked()
-            else "매수 후에는 보유 종목 합산 순손익 기준"
-        )
-        tail = (
-            "닿은 종목만 매도합니다"
-            if self._simple_take_profit_enabled.isChecked()
-            else "닿으면 전량 매도합니다"
-        )
-        return (
-            f"{prefix}{unit} {' / '.join(lines)} 라인이 자동 감시되며, "
-            f"{tail} (엔진이 켜져 있는 동안만)."
-        )
+
+        lines = []
+        if stop_loss:
+            lines.append(
+                f"손절 -{percent}% — 보유 종목 합산 순손익이 닿는 순간 실시간으로 전량 매도합니다."
+            )
+        else:
+            lines.append("⚠ 손절이 꺼져 있어 손실 쪽 실시간 청산이 없습니다.")
+
+        if ai_exit:
+            lines.append(
+                f"AI 매도 판단 — {self._ai_exit_interval.currentText()}마다 보유 종목 전체를 보고 "
+                f"전량 매도할지 정합니다. 익절 목표 +{percent}%는 AI에게 넘기는 참고선이라 "
+                "그 값에 닿아도 자동으로 팔리지 않습니다."
+            )
+        else:
+            lines.append("⚠ AI 매도 판단이 꺼져 있어 이익 실현 쪽 실시간 청산이 없습니다.")
+
+        lines.append("(둘 다 엔진이 켜져 있는 동안만 동작합니다.)")
+        return "\n".join(lines)
 
     def _refresh_exit_flag_hint(self) -> None:
-        """해제된 라인이 있을 때만 경고 문구를 띄운다.
+        """해제된 청산 경로가 있을 때만 경고 문구를 띄운다.
 
-        익절은 두 체크박스 중 어느 쪽도 켜지지 않았을 때만 '해제'다 — 단순익절로 감시
-        중인데 '익절 적용 해제됨'이라고 띄우면 정반대로 읽힌다.
+        이 화면에서 가장 위험한 오해가 "손절이 꺼진 줄 모르는 것"이라, 어느 쪽이 꺼졌는지
+        이름을 콕 집어 적는다.
         """
         disabled = []
-        if not self._take_profit_watched():
-            disabled.append("익절")
+        if not self._ai_exit_enabled.isChecked():
+            disabled.append("AI 매도 판단")
         if not self._stop_loss_enabled.isChecked():
             disabled.append("손절")
         self._exit_flag_hint.setVisible(bool(disabled))
@@ -1237,9 +1218,9 @@ class MainWindow(QMainWindow):
         tail = (
             "실시간 청산이 동작하지 않아 15:15 강제청산까지 보유합니다."
             if len(disabled) == 2
-            else "그 라인에 닿아도 매도하지 않습니다."
+            else "그쪽 청산은 동작하지 않습니다."
         )
-        self._exit_flag_hint.setText(f"⚠ {' / '.join(disabled)} 적용 해제됨 — {tail}")
+        self._exit_flag_hint.setText(f"⚠ {' / '.join(disabled)} 해제됨 — {tail}")
 
     # ── 설정 저장/불러오기 ───────────────────────────────────
     def _load_settings(self) -> None:
@@ -1258,6 +1239,9 @@ class MainWindow(QMainWindow):
         self._gap_down_tolerance.setText(env.get("GAP_DOWN_TOLERANCE_PERCENT", "1"))
         self._select_combo_value(self._investable_ratio, env.get("INVESTABLE_RATIO_PERCENT"), default=50)
         self._select_combo_value(self._target_stock_count, env.get("TARGET_STOCK_COUNT"), default=3)
+        self._select_combo_value(
+            self._ai_exit_interval, env.get("AI_EXIT_INTERVAL_MINUTES"), default=15
+        )
         self._schedule_times.setText(
             f"추천 {env.get('RECOMMEND_TIME', DEFAULT_RECOMMEND_TIME_HHMM)}"
             f" → 매수 {env.get('BUY_TIME', DEFAULT_BUY_TIME_HHMM)}"
@@ -1306,6 +1290,8 @@ class MainWindow(QMainWindow):
             "STOP_LOSS_PERCENT": self._exit_percent.text().strip() or "2",
             "BUY_PRICE_TOLERANCE_PERCENT": self._buy_price_tolerance.text().strip() or "2",
             "GAP_DOWN_TOLERANCE_PERCENT": self._gap_down_tolerance.text().strip() or "1",
+            # AI 매도 판단 호출 주기 — 체크박스와 달리 .env에 저장하므로 바뀌면 재시작한다
+            "AI_EXIT_INTERVAL_MINUTES": str(self._ai_exit_interval.currentData()),
             "INVESTABLE_RATIO_PERCENT": str(self._investable_ratio.currentData()),
             "TARGET_STOCK_COUNT": str(self._target_stock_count.currentData()),
         }
@@ -1333,13 +1319,14 @@ class MainWindow(QMainWindow):
     def _needs_restart_for_changed_settings(self, values: dict) -> bool:
         """설정이 바뀐 채로 엔진이 돌고 있어 재시작이 필요한지.
 
-        엔진은 시작 시점에 읽은 `Settings`를 그대로 들고 돌기 때문에(스케줄 시각, 익절/손절
-        라인, 계좌 등), `.env`만 고쳐서는 아무것도 바뀌지 않는다.
+        엔진은 시작 시점에 읽은 `Settings`를 그대로 들고 돌기 때문에(스케줄 시각, 손절선,
+        AI 호출 주기, 계좌 등), `.env`만 고쳐서는 아무것도 바뀌지 않는다. 체크박스는 예외로
+        `set_exit_flags`가 돌고 있는 엔진에 바로 밀어 넣는다.
         """
         if self._engine_thread is None or values == self._applied_env:
             return False
 
-        # 재시작하는 동안에는 WebSocket이 끊겨 익절/손절 감시가 잠시 멈춘다.
+        # 재시작하는 동안에는 WebSocket이 끊겨 손절 감시가 잠시 멈춘다.
         # 보유 종목이 없으면 잃을 것이 없으므로 묻지 않고 바로 재시작한다.
         held = self._engine_thread.open_tickers()
         if held and not self._confirm_restart_with_positions(held):
