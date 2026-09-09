@@ -30,8 +30,13 @@ class OrderStatus(Enum):
 
 class ExitReason(Enum):
     """전략과 무관하게 시스템이 강제 청산하는 사유."""
+    # 익절 자동 청산은 2026-09-09에 걷어냈지만 이 값은 남긴다 — 과거 `trades` 기록에 그대로
+    # 남아 있고 리포트가 읽는다.
     TAKE_PROFIT = "take_profit"
     STOP_LOSS = "stop_loss"
+    # AI 매도 판단 (PRD 5.5-B). 익절 자동 청산이 빠진 자리를 대신한다 — 나중에 성과를
+    # 되짚을 때 손절·강제청산과 갈라서 보려고 별도 값으로 남긴다.
+    AI_JUDGMENT = "ai_judgment"
 
 
 def format_stock(ticker: str, name: Optional[str] = None) -> str:
