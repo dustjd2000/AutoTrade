@@ -58,7 +58,7 @@ def recommendation_email(
     if any(_sell_target_line(r) for r in recommendations):
         lines.append(
             "※ 목표 매도가는 LLM의 참고 수치이며 주문에 사용되지 않습니다 — 실제 매도는 "
-            "순손익 기준 익절·손절과 15:15 강제청산이 담당합니다."
+            "순손익 기준 손절과 15:15 강제청산이 담당합니다."
         )
     # 전망 줄을 한 줄도 싣지 못했으면 이 주석도 뺀다 — 메일에 없는 값을 설명하는 꼴이 된다
     if any(_outlook_line(r) for r in recommendations):
@@ -541,8 +541,9 @@ def _buy_notes(execution: BuyExecution) -> List[str]:
         )
     else:
         notes.append(
-            "※ 실제 판정은 계좌 평단가로 보유 종목 전체를 합산해 하며, 조건에 닿으면 전량 매도합니다 "
-            "— 종목별 익절/손절은 없습니다. 위 가격은 '이 종목 혼자였다면' 기준의 참고값입니다."
+            "※ 실제 판정은 계좌 평단가로 보유 종목 전체를 합산해 하며, 손절 조건에 닿으면 전량 "
+            "매도합니다 — 익절가는 자동 매도로 이어지지 않는 참고값이고, 종목별 익절/손절도 "
+            "없습니다. 위 가격은 '이 종목 혼자였다면' 기준의 참고값입니다."
         )
     notes.extend(
         [

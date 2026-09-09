@@ -1179,11 +1179,15 @@ class MainWindow(QMainWindow):
         return f"익절 +{self._exit_percent.text().strip() or '2'}%"
 
     def _take_profit_watched(self) -> bool:
-        """익절이 어떤 방식으로든 감시되고 있는지 — 두 체크박스는 배타적이다."""
-        return (
-            self._take_profit_enabled.isChecked()
-            or self._simple_take_profit_enabled.isChecked()
-        )
+        """익절이 어떤 방식으로든 감시되고 있는지 — 지금은 항상 False다.
+
+        Task 1(2026-09-09)에서 익절 자동 청산과 단순익절을 엔진에서 걷어냈다
+        (PRD 10절) — 두 체크박스가 어떤 상태든 실제로 감시되는 익절은 이제 없다.
+        체크박스 자체는 Task 6에서 정리하기 전까지 화면에 남아 있으므로, 예전처럼
+        체크박스 상태를 읽으면 "감시 중"이라고 오해하게 만드는 문구(`_exit_watch_text`
+        등)가 그대로 나간다. Task 6이 체크박스를 정리할 때까지의 임시 조치다.
+        """
+        return False
 
     def _exit_watch_text(self) -> str:
         """매수 확인 팝업에 넣을 청산 감시 안내 — 해제된 라인은 빼고 알린다."""
