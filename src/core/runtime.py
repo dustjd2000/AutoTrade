@@ -164,6 +164,7 @@ def build_runtime(settings: Settings) -> Runtime:
         max_daily_loss_ratio=settings.max_daily_loss_ratio,
         take_profit_ratio=settings.take_profit_ratio,
         stop_loss_ratio=settings.stop_loss_ratio,
+        stop_loss_enabled=settings.stop_loss_enabled,
         max_total_exposure_ratio=settings.max_total_exposure_ratio,
         commission_rate=settings.commission_ratio,
         tax_rate=settings.tax_ratio,
@@ -182,6 +183,7 @@ def build_runtime(settings: Settings) -> Runtime:
         trade_store=trade_store,
         notifier=AlertNotifier(email),
         emergency_action=settings.emergency_action,
+        ai_exit_enabled=settings.ai_exit_enabled,
     )
     ws_client.on_data(engine.on_market_data)
 

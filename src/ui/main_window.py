@@ -40,6 +40,7 @@ from config.settings import (
     DEFAULT_BUY_TIME_HHMM,
     DEFAULT_RECOMMEND_TIME_HHMM,
     Settings,
+    parse_flag,
 )
 from src.core.daily_workflow import (
     BUY_DROPPABLE_STATUSES,
@@ -218,9 +219,9 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._setup_logging()
         self._load_settings()
-        # 체크박스 초기값은 연결 전에 setChecked로 넣어 toggled가 울리지 않는다 — 입력란
-        # 활성/비활성 같은 연동 상태를 여기서 한 번 맞춰 준다 (엔진은 아직 없으므로 반영은 생략됨)
-        self._on_exit_flag_toggled()
+        # `_load_settings`는 toggled를 막아둔 채 체크박스를 복원하므로(방금 읽은 값을 그대로
+        # 다시 저장할 이유가 없다), 거기에 딸린 연동 상태는 여기서 한 번 맞춰 준다
+        self._sync_exit_flag_widgets()
 
         if auto_start:
             # 창이 완전히 뜬 뒤 "▶ 시작" 버튼을 누른 것과 동일하게 동작해야 하므로
@@ -453,9 +454,10 @@ class MainWindow(QMainWindow):
         self._gap_down_tolerance.setPlaceholderText("예: 1 (전일 종가 -1% 미만 시 매수 안 함, 0=끔)")
         self._gap_down_tolerance.setValidator(QDoubleValidator(0.0, 100.0, 2))
 
-        # 적용 여부 체크박스 — 끄면 그 경로는 동작하지 않는다. `.env`에 저장하지 않고
-        # 엔진을 재시작하지도 않는다(끄고 싶은 순간에 감시 공백이 생기면 안 된다).
-        # **기본은 AI 매도 판단 + 손절이다** (확정 2026-09-09, PRD 5.5-B "AI 매도 판단").
+        # 적용 여부 체크박스 — 끄면 그 경로는 동작하지 않는다. 켜고 끌 때마다 `.env`에
+        # 저장해 다시 시작해도 마지막 상태가 이어지지만(확정 2026-09-09), 저장했다고 엔진을
+        # 재시작하지는 않는다 — 끄고 싶은 순간에 감시 공백이 생기면 안 된다.
+        # **`.env`에 값이 없을 때의 기본은 AI 매도 판단 + 손절이다** (PRD 5.5-B "AI 매도 판단").
         # 익절 자동 청산과 단순익절은 걷어냈다 — 고정 익절선이 상방을 자른다는 것이 실매매
         # 27건 대조에서 관찰됐고(PRD 10절), 그 자리를 주기적 AI 판단이 대신한다.
         self._ai_exit_enabled = QCheckBox("AI 매도 판단")
@@ -508,9 +510,9 @@ class MainWindow(QMainWindow):
             "닿는 순간 실시간으로 전량 매도되는 자동선이고, 익절 목표는 자동으로 걸리지 않는 "
             "참고선이라 AI 매도 판단에 '이 정도면 만족'이라는 기준으로만 넘어갑니다. 이익 쪽 "
             "청산은 AI가 호출 주기마다 보유 종목 전체를 보고 정합니다 — 끄면 이익 실현이 "
-            "통째로 없어져 15:15 강제청산까지 갑니다. 두 체크박스 상태는 프로그램을 끌 때까지 "
-            "유지되며 다시 시작하면 기본값(AI 매도 판단 + 손절)으로 돌아갑니다. 호출 주기는 "
-            "`.env`에 저장되어 바꾸면 엔진이 재시작됩니다)"
+            "통째로 없어져 15:15 강제청산까지 갑니다. 두 체크박스 상태는 켜고 끄는 즉시 "
+            "`.env`에 저장되어 다시 시작해도 그대로 이어집니다(엔진은 재시작되지 않고 바로 "
+            "반영됩니다). 호출 주기도 `.env`에 저장되지만 이쪽은 바꾸면 엔진이 재시작됩니다)"
         )
         exit_hint.setWordWrap(True)
         exit_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
@@ -1122,25 +1124,46 @@ class MainWindow(QMainWindow):
         finally:
             self._syncing_exit_flags = False
 
-    def _on_exit_flag_toggled(self) -> None:
-        """체크박스 상태를 돌고 있는 엔진에 그대로 밀어 넣는다 (재시작하지 않는다).
+    def _sync_exit_flag_widgets(self) -> None:
+        """체크박스 상태에 딸린 화면 요소를 맞춘다 (AI 호출 주기 활성 여부·해제 경고 문구).
 
-        `.env`에 저장하지 않으므로 앱을 다시 켜면 항상 기본값(손절 + 익절(%))으로
-        돌아간다 — 바꾼 상태를 되돌리는 경로는 이 재시작 하나뿐이다.
+        익절/손절 폭 입력란은 늘 열어 둔다 — 같은 칸이 손절선도 정하므로, AI 매도 판단을
+        꺼도 잠그면 손절 폭을 못 고치게 된다 (PRD 5.5-B "익절·손절 폭 통합").
+        """
+        self._ai_exit_interval.setEnabled(self._ai_exit_enabled.isChecked())
+        self._refresh_exit_flag_hint()
+
+    def _on_exit_flag_toggled(self) -> None:
+        """체크박스 상태를 돌고 있는 엔진에 밀어 넣고 `.env`에 저장한다 (재시작하지 않는다).
+
+        저장은 다음에 엔진이 새로 뜰 때를 위한 것이다 — `Settings`가 이 두 키를 읽어
+        `RiskManager.stop_loss_enabled`/`TradingEngine.ai_exit_enabled`로 넣는다. 그래서
+        설정 저장에 따른 재시작이나 프로그램 재실행 뒤에도 마지막 상태가 이어진다
+        (확정 2026-09-09). 저장 자체가 재시작을 부르지는 않는다 — 재시작 사이에는 손절
+        감시가 멈추는데, 정작 손절을 끄고 싶은 순간에 그 공백이 생기면 안 된다.
         """
         if self._syncing_exit_flags:
             return
 
         ai_exit = self._ai_exit_enabled.isChecked()
         stop_loss = self._stop_loss_enabled.isChecked()
-
-        # 입력란은 늘 열어 둔다 — 같은 칸이 손절선도 정하므로, AI 매도 판단을 꺼도
-        # 잠그면 손절 폭을 못 고치게 된다 (PRD 5.5-B "익절·손절 폭 통합")
-        self._ai_exit_interval.setEnabled(ai_exit)
-        self._refresh_exit_flag_hint()
+        self._sync_exit_flag_widgets()
 
         thread = self._engine_thread
-        if thread is None or not thread.set_exit_flags(ai_exit, stop_loss):
+        applied = thread is not None and thread.set_exit_flags(ai_exit, stop_loss)
+
+        # 돌고 있는 엔진에 밀어 넣은 뒤에 저장한다 — 파일 쓰기가 실패하더라도 방금 켜고 끈
+        # 것은 이미 반영돼 있어야 한다. `_save_settings`가 다루는 값이 아니므로
+        # `_applied_env` 비교(=재시작 판정)에도 걸리지 않는다.
+        save_env(
+            ENV_PATH,
+            {
+                "AI_EXIT_ENABLED": "1" if ai_exit else "0",
+                "STOP_LOSS_ENABLED": "1" if stop_loss else "0",
+            },
+        )
+
+        if not applied:
             return
 
         state = (
@@ -1242,6 +1265,15 @@ class MainWindow(QMainWindow):
         self._select_combo_value(
             self._ai_exit_interval, env.get("AI_EXIT_INTERVAL_MINUTES"), default=15
         )
+        # 청산 체크박스는 마지막으로 켜고 끈 상태를 그대로 되살린다. 복원하는 동안에는
+        # toggled 처리를 막는다 — 방금 읽은 값을 다시 저장할 이유가 없고, 이 시점에는
+        # 엔진도 아직 없다. 값이 없거나 깨져 있으면 `parse_flag`가 켬으로 떨어뜨린다.
+        self._syncing_exit_flags = True
+        try:
+            self._ai_exit_enabled.setChecked(parse_flag(env.get("AI_EXIT_ENABLED"), True))
+            self._stop_loss_enabled.setChecked(parse_flag(env.get("STOP_LOSS_ENABLED"), True))
+        finally:
+            self._syncing_exit_flags = False
         self._schedule_times.setText(
             f"추천 {env.get('RECOMMEND_TIME', DEFAULT_RECOMMEND_TIME_HHMM)}"
             f" → 매수 {env.get('BUY_TIME', DEFAULT_BUY_TIME_HHMM)}"
@@ -1290,7 +1322,7 @@ class MainWindow(QMainWindow):
             "STOP_LOSS_PERCENT": self._exit_percent.text().strip() or "2",
             "BUY_PRICE_TOLERANCE_PERCENT": self._buy_price_tolerance.text().strip() or "2",
             "GAP_DOWN_TOLERANCE_PERCENT": self._gap_down_tolerance.text().strip() or "1",
-            # AI 매도 판단 호출 주기 — 체크박스와 달리 .env에 저장하므로 바뀌면 재시작한다
+            # AI 매도 판단 호출 주기 — 체크박스와 달리 이 저장 경로를 타므로 바뀌면 재시작한다
             "AI_EXIT_INTERVAL_MINUTES": str(self._ai_exit_interval.currentData()),
             "INVESTABLE_RATIO_PERCENT": str(self._investable_ratio.currentData()),
             "TARGET_STOCK_COUNT": str(self._target_stock_count.currentData()),
@@ -1320,8 +1352,9 @@ class MainWindow(QMainWindow):
         """설정이 바뀐 채로 엔진이 돌고 있어 재시작이 필요한지.
 
         엔진은 시작 시점에 읽은 `Settings`를 그대로 들고 돌기 때문에(스케줄 시각, 손절선,
-        AI 호출 주기, 계좌 등), `.env`만 고쳐서는 아무것도 바뀌지 않는다. 체크박스는 예외로
-        `set_exit_flags`가 돌고 있는 엔진에 바로 밀어 넣는다.
+        AI 호출 주기, 계좌 등), `.env`만 고쳐서는 아무것도 바뀌지 않는다. 청산 체크박스는
+        예외로, `.env`에 저장하되 `set_exit_flags`가 돌고 있는 엔진에 바로 밀어 넣는다 —
+        `_save_settings`가 다루는 값이 아니라 여기 비교 대상(`values`)에 아예 들어오지 않는다.
         """
         if self._engine_thread is None or values == self._applied_env:
             return False

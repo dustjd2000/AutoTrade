@@ -2,6 +2,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import time as dt_time
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,29 @@ def _parse_hhmm(raw: str, default: str, name: str) -> dt_time:
 
 def _minutes(value: dt_time) -> int:
     return value.hour * 60 + value.minute
+
+
+# .env에서 켬/끔으로 인정하는 표기 — UI는 "1"/"0"으로 저장하지만 손으로 적어 넣는 경우가
+# 있어 흔한 표기를 함께 받는다.
+_TRUE_TEXTS = ("1", "true", "yes", "on")
+_FALSE_TEXTS = ("0", "false", "no", "off")
+
+
+def parse_flag(raw: Optional[str], default: bool) -> bool:
+    """.env의 켬/끔 문자열을 bool로 바꾼다. 비었거나 알 수 없는 값이면 기본값을 쓴다.
+
+    알 수 없는 값을 '끔'으로 읽지 않는 것이 요점이다 — 오타 하나로 손절 감시가 조용히
+    빠지는 것이 이 파일에서 가장 위험한 실패다. UI(`MainWindow._load_settings`)도 체크박스를
+    복원할 때 같은 함수를 쓴다.
+    """
+    text = (raw or "").strip().lower()
+    if text in _TRUE_TEXTS:
+        return True
+    if text in _FALSE_TEXTS:
+        return False
+    if text:
+        logger.warning("켬/끔 값을 알 수 없어 기본값 %s를 사용합니다: %r", default, raw)
+    return default
 
 
 @dataclass
@@ -142,6 +166,18 @@ class Settings:
     @property
     def stop_loss_ratio(self) -> float:
         return self.stop_loss_percent / 100
+
+    # 청산 경로 적용 여부 — UI 체크박스가 켜고 끄며, 바뀔 때마다 `.env`에 저장된다
+    # (확정 2026-09-09, PRD 5.5-B "익절/손절 적용 여부"). 다른 리스크 설정과 달리 엔진을
+    # 재시작하지 않고 돌고 있는 엔진에 바로 밀어 넣으므로(`EngineThread.set_exit_flags`),
+    # 여기서 읽은 값이 쓰이는 것은 엔진이 새로 뜨는 순간뿐이다.
+    # 둘 다 꺼져 있으면 실시간 청산이 사라지고 15:15 강제청산까지 보유한다.
+    ai_exit_enabled: bool = field(
+        default_factory=lambda: parse_flag(os.getenv("AI_EXIT_ENABLED"), True)
+    )
+    stop_loss_enabled: bool = field(
+        default_factory=lambda: parse_flag(os.getenv("STOP_LOSS_ENABLED"), True)
+    )
 
     # 09:00 매수 직전 현재가가 목표 매수가보다 이 비율을 넘게 높으면 그 종목을 건너뛴다.
     # 추천은 전일 종가 기준이라 갭 상승한 날에는 목표가가 이미 의미를 잃는데, 지정가는

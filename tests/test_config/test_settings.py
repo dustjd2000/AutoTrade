@@ -2,7 +2,12 @@ from datetime import time as dt_time
 
 import pytest
 
-from config.settings import AI_EXIT_INTERVAL_CHOICES, DEFAULT_RECOMMEND_TIME_HHMM, Settings
+from config.settings import (
+    AI_EXIT_INTERVAL_CHOICES,
+    DEFAULT_RECOMMEND_TIME_HHMM,
+    Settings,
+    parse_flag,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -184,3 +189,59 @@ def test_validate_rejects_an_unsupported_interval(monkeypatch):
     monkeypatch.setenv("AI_EXIT_INTERVAL_MINUTES", "7")
     with pytest.raises(ValueError, match="AI_EXIT_INTERVAL_MINUTES"):
         _valid_settings(monkeypatch).validate()
+
+
+
+# ── 청산 경로 적용 여부 (AI 매도 판단 / 손절) ─────────
+@pytest.fixture
+def clear_exit_flags(monkeypatch):
+    """실제 .env가 남긴 값이 섞이지 않도록 두 키를 비운 상태에서 시작한다."""
+    monkeypatch.delenv("AI_EXIT_ENABLED", raising=False)
+    monkeypatch.delenv("STOP_LOSS_ENABLED", raising=False)
+
+
+def test_exit_flags_default_to_enabled(clear_exit_flags):
+    """.env에 값이 없으면 AI 매도 판단·손절 둘 다 켬이다 (PRD 5.5-B)."""
+    settings = Settings()
+
+    assert settings.ai_exit_enabled is True
+    assert settings.stop_loss_enabled is True
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "FALSE", "no", "off", " 0 "])
+def test_exit_flags_read_off_from_env(monkeypatch, clear_exit_flags, raw):
+    """UI가 저장하는 "0" 외에 손으로 적어 넣은 표기도 끔으로 읽는다."""
+    monkeypatch.setenv("AI_EXIT_ENABLED", raw)
+    monkeypatch.setenv("STOP_LOSS_ENABLED", raw)
+
+    settings = Settings()
+
+    assert settings.ai_exit_enabled is False
+    assert settings.stop_loss_enabled is False
+
+
+def test_exit_flags_are_independent(monkeypatch, clear_exit_flags):
+    """한쪽만 끄는 것이 이 두 키의 존재 이유다 — 손절만 남기거나 AI만 남길 수 있어야 한다."""
+    monkeypatch.setenv("AI_EXIT_ENABLED", "0")
+    monkeypatch.setenv("STOP_LOSS_ENABLED", "1")
+
+    settings = Settings()
+
+    assert settings.ai_exit_enabled is False
+    assert settings.stop_loss_enabled is True
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "kkeum", "예", "2"])
+def test_unknown_flag_text_falls_back_to_on(monkeypatch, clear_exit_flags, raw):
+    """오타를 '끔'으로 읽으면 손절 감시가 조용히 빠진다 — 알 수 없는 값은 켬으로 떨어뜨린다."""
+    monkeypatch.setenv("STOP_LOSS_ENABLED", raw)
+
+    assert Settings().stop_loss_enabled is True
+
+
+def test_parse_flag_keeps_the_given_default_when_value_is_missing():
+    """`parse_flag`는 UI의 체크박스 복원에도 쓰이므로 기본값을 그대로 존중해야 한다."""
+    assert parse_flag(None, True) is True
+    assert parse_flag(None, False) is False
+    assert parse_flag("1", False) is True
+    assert parse_flag("0", True) is False

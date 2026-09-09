@@ -103,6 +103,7 @@ class TradingEngine:
         trade_store: Optional[TradeStore] = None,
         notifier: Optional[AlertNotifier] = None,
         emergency_action: str = "hold",
+        ai_exit_enabled: bool = True,
     ):
         self.auth = auth
         self.market_data = market_data
@@ -146,8 +147,8 @@ class TradingEngine:
         # 순손익 궤적. 메모리에만 두고 08:40 reset_for_new_day에서 비운다 (runtime.watch_ai_exit).
         self.exit_trace = ExitTrace()
         # UI 체크박스가 켜고 끈다 — stop_loss_enabled가 risk_manager에 붙은 것과 같은 자리다.
-        # 기본은 켬. .env에 저장하지 않으므로 재시작하면 항상 켬으로 돌아간다.
-        self.ai_exit_enabled = True
+        # 기본은 켬이고, 마지막으로 켜고 끈 상태는 `.env`(AI_EXIT_ENABLED)에서 여기로 들어온다.
+        self.ai_exit_enabled = ai_exit_enabled
         # 오늘 AI 매도 판단을 부른 횟수 (하루 호출 상한 판정용). 엔진을 재시작해도 유지되고
         # 08:40 reset_for_new_day에서만 비워진다 — 재시작으로 상한을 우회하지 못하게 한다.
         self._ai_exit_calls = 0
