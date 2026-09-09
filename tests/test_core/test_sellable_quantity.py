@@ -58,7 +58,6 @@ def make_engine(account, exit_reason=None):
             tax_rate=0.0,
             position_net_pnl=lambda p: (p.current_price - p.avg_price) * p.quantity,
             portfolio_net_pnl=lambda ps: (0.0, None),
-            check_simple_take_profits=lambda ps: [],
             portfolio_return=lambda ps: None,
         ),
     )

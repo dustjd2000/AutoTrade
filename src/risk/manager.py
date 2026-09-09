@@ -1,6 +1,6 @@
 import logging
 import math
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, Optional, Tuple
 
 from src.api.account import BalanceSnapshot, Position
 from src.core.events import ExitReason, OrderRequest, OrderResult, OrderSide, OrderStatus
@@ -32,9 +32,10 @@ def exit_trigger_price(
 ) -> float:
     """순손익률이 target_ratio에 도달하는 현재가 — net_return의 역함수 (표시용).
 
-    합산으로 판정하는 손절·퍼센트 익절에서는 이 가격에 닿아도 그 종목만 팔리지는 않는다
-    (PRD 5.5-B) — "이 종목 혼자였다면 조건에 닿는 가격"이라는 참고값이다. 반면 종목별로
-    판정하는 단순익절(target_ratio=0)에서는 이 가격이 그 종목의 실제 매도 지점이다.
+    합산으로 판정하는 손절에서는 이 가격에 닿아도 그 종목만 팔리지는 않는다 (PRD 5.5-B)
+    — "이 종목 혼자였다면 조건에 닿는 가격"이라는 참고값이다. 익절선(target_ratio에
+    `take_profit_ratio`를 넘긴 경우)은 자동 매도를 하지 않으므로 항상 참고값이다
+    (2026-09-09, 익절 자동 청산 제거 — PRD 10절).
     """
     return (
         avg_price
@@ -147,15 +148,16 @@ class RiskManager:
         self,
         max_position_ratio: float = 0.1,      # 종목당 최대 계좌 비중
         max_daily_loss_ratio: float = 0.02,   # 일일 최대 손실 비중
-        take_profit_ratio: float = 0.005,     # 익절 라인 (순손익률)
+        take_profit_ratio: float = 0.005,     # 익절 기준선 (순손익률) — 자동 청산에는 쓰지 않는다.
+                                               # AI 판단(추후 Task)에 넘길 참고 라인으로만 남겨 둔다
+                                               # (2026-09-09, 익절 자동 청산 제거 — PRD 10절: 실매매
+                                               # 27건 대조에서 어떤 익절선도 "익절 없음"을 못 이겼다).
         stop_loss_ratio: float = 0.02,        # 손절 라인 (순손익률)
         max_total_exposure_ratio: float = 0.7,  # 전체 계좌 대비 최대 노출 비중
         commission_rate: float = 0.00015,     # 매매수수료 (매수·매도 동일 적용)
         tax_rate: float = 0.002,              # 증권거래세+농특세 (매도 시만)
         slippage_rate: float = 0.001,         # 시장가 청산 슬리피지 추정치
-        take_profit_enabled: bool = True,     # 합산 퍼센트 익절 적용 여부 (UI 체크박스, 기본 적용)
         stop_loss_enabled: bool = True,       # 손절 적용 여부 (UI 체크박스)
-        simple_take_profit_enabled: bool = False,  # 단순익절 적용 여부 (UI 체크박스, 기본 해제)
     ):
         self.max_position_ratio = max_position_ratio
         self.max_daily_loss_ratio = max_daily_loss_ratio
@@ -165,19 +167,10 @@ class RiskManager:
         self.commission_rate = commission_rate
         self.tax_rate = tax_rate
         self.slippage_rate = slippage_rate
-        # 다른 설정과 달리 이 둘은 엔진이 도는 중에도 UI가 그대로 바꾼다 (PRD 5.5-B
-        # "익절/손절 적용 여부"). `.env`에 저장하지 않으므로 재시작하면 항상 기본값
-        # (손절 + 합산 퍼센트 익절)으로 돌아간다 — 감시 공백을 만들지 않으려면 끄고 켜는
-        # 데 엔진 재시작이 끼어들면 안 된다.
-        self.take_profit_enabled = take_profit_enabled
+        # 다른 설정과 달리 이 값은 엔진이 도는 중에도 UI가 그대로 바꾼다 (PRD 5.5-B
+        # "손절 적용 여부"). `.env`에 저장하지 않으므로 재시작하면 항상 기본값(적용)으로
+        # 돌아간다 — 감시 공백을 만들지 않으려면 끄고 켜는 데 엔진 재시작이 끼어들면 안 된다.
         self.stop_loss_enabled = stop_loss_enabled
-        # 익절선을 `take_profit_ratio` 대신 0으로 두고 **종목별로** 판정하는 모드
-        # (PRD 5.5-B "단순익절"). 위 둘과 같이 `.env`에 저장하지 않고 앱을 다시 켜야
-        # 기본값(해제)으로 되돌아간다 — 평소 익절은 합산 퍼센트 쪽이 맡는다 (확정
-        # 2026-08-18, PRD 5.5-B "퍼센트 익절 기본 적용"). UI에서는 `take_profit_enabled`와
-        # 배타적이지만, 여기서는 서로 독립으로 다룬다 — 둘 다 켜져 있으면 합산 판정이
-        # 먼저 돈다(엔진 호출 순서).
-        self.simple_take_profit_enabled = simple_take_profit_enabled
 
         self._initial_asset: float = 0.0
         self._daily_realized_loss: float = 0.0
@@ -228,69 +221,34 @@ class RiskManager:
         return portfolio_net_pnl(positions, self.commission_rate, self.tax_rate)
 
     def check_portfolio_exit(self, positions: Iterable[Position]) -> Optional[ExitReason]:
-        """보유 종목 **전체**가 익절/손절 라인에 도달했는지 확인한다.
+        """보유 종목 **전체**가 손절 라인에 도달했는지 확인한다.
 
         판정은 종목별이 아니라 합산이다 (확정 2026-08-10, PRD 5.5-B). 조건에 닿으면
-        보유 종목을 전량 매도한다. 종목별 익절/손절은 두지 않으므로, 한 종목이 크게
-        무너져도 다른 종목이 상쇄하면 매도가 나가지 않고 15:15 강제청산까지 간다.
+        보유 종목을 전량 매도한다. 종목별 손절은 두지 않으므로, 한 종목이 크게 무너져도
+        다른 종목이 상쇄하면 매도가 나가지 않고 15:15 강제청산까지 간다.
 
         키움 REST API에 조건부 예약주문(스탑오더) 엔드포인트가 확인되지 않아, 이 실시간
         모니터링이 **1차이자 사실상 유일한 청산 수단**이다 (PRD 5.5-B, 2026-07-27 확정).
-        즉 익절/손절은 증권사 서버가 아니라 이 프로그램이 떠 있는 동안에만 동작한다 —
+        즉 손절은 증권사 서버가 아니라 이 프로그램이 떠 있는 동안에만 동작한다 —
         앱이 꺼지거나 WebSocket이 끊기면 감시 공백이 생긴다.
 
         판정은 가격 변동률이 아니라 왕복 수수료·매도세금·슬리피지를 뺀 순손익률 기준이다.
-        익절선(기본 0.5%)은 이미 비용을 뺀 값이라, 도달하면 그만큼이 실수령 이익이다.
 
-        `take_profit_enabled`/`stop_loss_enabled`가 꺼져 있으면 그쪽 라인은 건너뛴다. 둘 다
-        꺼면 실시간 청산이 사라지고 15:15 강제청산만 남는다 — 합산 순손익률 계산 자체는
-        멈추지 않으므로 UI에는 그대로 표시된다.
+        `stop_loss_enabled`가 꺼져 있으면 손절도 건너뛴다 — 그러면 실시간 청산이 사라지고
+        15:15 강제청산만 남는다. 합산 순손익률 계산 자체는 멈추지 않으므로 UI에는 그대로
+        표시된다.
 
-        단순익절은 여기 끼지 않는다 — 종목별 판정이라 `check_simple_take_profits`가 따로
-        본다 (확정 2026-08-12). UI에서 익절 '적용'과 '단순익절적용'은 배타적이라 둘 중
-        하나만 켜지므로, 실제로는 이 메서드의 익절과 단순익절이 같은 날 함께 돌지 않는다.
+        익절(자동 청산)과 단순익절은 2026-09-09에 걷어냈다 (PRD 10절) — 실매매 27건을
+        당일 고가와 대조한 결과 익절선 0%·0.5%·1%·2%·2.3%·3%·4% 어느 값도 "익절 없음"보다
+        낫지 않았다. `take_profit_ratio`는 지우지 않고 남겨, 추후 AI 판단에 기준선으로
+        넘긴다 — 이 메서드는 더 이상 그 값을 읽지 않는다.
         """
         ret = self.portfolio_return(positions)
         if ret is None:
             return None
-        if self.take_profit_enabled and ret >= self.take_profit_ratio:
-            return ExitReason.TAKE_PROFIT
         if self.stop_loss_enabled and ret <= -self.stop_loss_ratio:
             return ExitReason.STOP_LOSS
         return None
-
-    def check_simple_take_profits(self, positions: Iterable[Position]) -> List[Position]:
-        """단순익절 대상 — **종목별** 순손익률이 0을 넘은 종목만 골라 돌려준다 (PRD 5.5-B).
-
-        합산이 아니라 종목마다 따로 본다 (확정 2026-08-12). 돌려주는 것은 '지금 팔아야 하는
-        종목'이지 전량 청산 신호가 아니다 — 고르지 못한 종목은 그대로 보유한다.
-
-        비교가 `>=`가 아니라 `>`인 것은 본전(0)에서 팔지 않기 위해서다. '단순'은 기준선이
-        0이라는 뜻일 뿐, 순손익률에서 수수료·세금·슬리피지를 빼는 것은 합산 판정과 같다.
-
-        **이익 난 종목이 먼저 빠져나가면 남은 보유는 손실 종목 위주가 되어 합산 손절이 더
-        쉽게 걸린다** — 종목별 청산이 만드는 순서 의존성이며, 사용자가 알고 택한 동작이다.
-
-        평단·수량·현재가 중 하나라도 0인 종목은 판정하지 않는다 (현재가 0은 조회 실패나
-        장 전 상태다).
-        """
-        if not self.simple_take_profit_enabled:
-            return []
-        return [
-            position
-            for position in positions
-            if position.avg_price > 0
-            and position.quantity > 0
-            and position.current_price > 0
-            and net_return(
-                position.current_price,
-                position.avg_price,
-                self.commission_rate,
-                self.tax_rate,
-                self.slippage_rate,
-            )
-            > 0
-        ]
 
     def record_order(self, result: OrderResult, avg_price: Optional[float] = None) -> None:
         if (

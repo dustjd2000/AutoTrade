@@ -1,7 +1,11 @@
-"""합산 익절/손절 — 판정은 보유 종목 전체로 하고, 걸리면 전량 매도한다 (PRD 5.5-B).
+"""합산 손절 — 판정은 보유 종목 전체로 하고, 걸리면 전량 매도한다 (PRD 5.5-B).
 
 엔진 테스트 대부분은 RiskManager를 스텁으로 대체하지만, 여기서는 실물을 그대로 써서
 '합산으로 판정한 결과가 실제 주문으로 이어지는가'를 끝까지 확인한다.
+
+익절 자동 청산과 단순익절(종목별 0% 익절)은 2026-09-09에 걷어냈다 (PRD 10절, 실매매 27건
+대조 — 어떤 익절선도 "익절 없음"보다 낫지 않았다). 그 둘을 검증하던 테스트는 지우거나
+새 동작("이제 팔지 않는다")을 확인하는 쪽으로 바꿨다 — 각 자리에 남긴 주석을 참고.
 """
 from types import SimpleNamespace
 
@@ -45,7 +49,7 @@ class RecordingStore:
         self.reasons.append((result.ticker, exit_reason))
 
 
-def make_engine(positions, simple_take_profit_enabled=False, trade_store=None):
+def make_engine(positions, trade_store=None):
     """비용을 0으로 둔 실물 RiskManager를 붙인 엔진 — 가격 변동률이 곧 순손익률이 된다."""
     orders = []
     alerts = []
@@ -70,17 +74,13 @@ def make_engine(positions, simple_take_profit_enabled=False, trade_store=None):
         account=FakeAccount(positions),
         strategy=SimpleNamespace(name="s", generate_signal=lambda d: Signal.HOLD),
         risk_manager=RiskManager(
+            # take_profit_ratio는 자동 청산에 더는 쓰이지 않지만(2026-09-09, PRD 10절),
+            # 옛 익절선 근방에서도 매도가 나가지 않는지 확인하는 테스트를 위해 그대로 둔다
             take_profit_ratio=0.005,
             stop_loss_ratio=0.02,
             commission_rate=0.0,
             tax_rate=0.0,
             slippage_rate=0.0,
-            # 퍼센트 익절은 실사용 기본값이 해제지만(2026-08-12) 여기서는 합산 판정 자체를
-            # 검증하므로 켠다 — 끄면 익절 쪽 케이스가 아예 돌지 않는다
-            take_profit_enabled=True,
-            # 기본은 끈다 — 대부분의 테스트가 퍼센트 익절선(+0.5%)에서의 전량 매도를 보는데,
-            # 단순익절이 켜져 있으면 이익 난 종목이 먼저 개별 매도되어 검증 대상이 달라진다
-            simple_take_profit_enabled=simple_take_profit_enabled,
         ),
         notifier=SimpleNamespace(send=alerts.append),
         trade_store=trade_store,
@@ -123,14 +123,19 @@ def test_all_holdings_are_sold_when_the_total_hits_the_stop_loss():
     assert engine.open_tickers == [], "전량 매도 후에도 감시 목록이 남았다"
 
 
-def test_all_holdings_are_sold_when_the_total_hits_the_take_profit():
-    """이익 쪽도 마찬가지다 — 합산이 익절선에 닿으면 손실 종목까지 함께 정리한다."""
+def test_take_profit_no_longer_triggers_a_selloff():
+    """합산이 옛 익절선(+0.5%)에 닿아도 이제는 팔지 않는다 (2026-09-09, PRD 10절).
+
+    익절 자동 청산을 걷어내기 전에는 이 시나리오(+3% / -0.5% → 합산 +1.25%)가 전량 매도로
+    이어졌다 — test_all_holdings_are_sold_when_the_total_hits_the_take_profit이 그걸 확인하는
+    테스트였다. 지금은 같은 가격으로 정반대(아무것도 팔리지 않음)를 확인한다.
+    """
     engine, orders, _ = make_engine(two_holdings(price_a=1030.0, price_b=995.0))
 
-    # +3% / -0.5% → 합산 +1.25%
+    # +3% / -0.5% → 합산 +1.25% (예전 익절선 통과 지점)
     engine.on_market_data(MarketData(ticker="000660", price=995.0, volume=1))
 
-    assert {o.ticker for o in orders} == {"005930", "000660"}
+    assert orders == []
 
 
 def test_exit_alert_is_sent_once_for_the_whole_list():
@@ -184,53 +189,11 @@ def test_position_without_a_price_does_not_trigger_a_selloff():
     assert orders == [], "현재가를 못 읽은 종목이 합산에 -100%로 들어갔다"
 
 
-# ── 단순익절 (종목별, 확정 2026-08-12) ──────────────────────────
-def test_simple_take_profit_sells_only_the_winning_stock():
-    """이익 난 종목만 팔고 나머지는 그대로 둔다 — 합산 판정과 달리 전량이 아니다."""
-    engine, orders, _ = make_engine(two_holdings(), simple_take_profit_enabled=True)  # +1% / -3%
-
-    engine.on_market_data(MarketData(ticker="005930", price=1010.0, volume=1))
-
-    assert [(o.ticker, o.side) for o in orders] == [("005930", OrderSide.SELL)]
-    assert engine.open_tickers == ["000660"], "손실 종목까지 함께 팔렸다"
-
-
-def test_simple_take_profit_alert_names_the_sold_stock():
-    engine, _, alerts = make_engine(two_holdings(), simple_take_profit_enabled=True)
-
-    engine.on_market_data(MarketData(ticker="005930", price=1010.0, volume=1))
-
-    [message] = alerts
-    assert "단순익절" in message
-    assert "삼성전자" in message and "SK하이닉스" not in message
-
-
-def test_stop_loss_beats_simple_take_profit():
-    """계좌 전체가 손절선 아래면 이익 난 종목 하나를 파는 것보다 전량 청산이 우선이다."""
-    engine, orders, _ = make_engine(
-        two_holdings(price_a=1010.0, price_b=940.0), simple_take_profit_enabled=True
-    )  # +1% / -6% → 합산 -2.5%
-
-    engine.on_market_data(MarketData(ticker="000660", price=940.0, volume=1))
-
-    assert {o.ticker for o in orders} == {"005930", "000660"}
-
-
-def test_remaining_loser_can_hit_the_stop_loss_after_the_winner_leaves():
-    """종목별 익절이 만드는 순서 의존성 — 이익 종목이 빠지면 남은 손실이 상쇄를 잃는다.
-
-    합산만 볼 때는 -1%로 아무것도 팔리지 않던 조합이, 단순익절로 +1% 종목이 먼저 나가면
-    남은 -3% 하나가 손절선(-2%)을 넘겨 결국 둘 다 정리된다 (PRD 5.5-B, 사용자가 택한 동작).
-    """
-    engine, orders, _ = make_engine(two_holdings(), simple_take_profit_enabled=True)
-
-    engine.on_market_data(MarketData(ticker="005930", price=1010.0, volume=1))
-    assert [o.ticker for o in orders] == ["005930"]
-
-    engine._invalidate_positions()
-    engine.on_market_data(MarketData(ticker="000660", price=970.0, volume=1))
-
-    assert [o.ticker for o in orders] == ["005930", "000660"]
+# 단순익절(종목별, 확정 2026-08-12)은 2026-09-09에 걷어냈다 (PRD 10절) — check_simple_take_profits /
+# _execute_simple_take_profit이 없어지면서 이 자리에 있던
+# test_simple_take_profit_sells_only_the_winning_stock / test_simple_take_profit_alert_names_the_sold_stock /
+# test_stop_loss_beats_simple_take_profit / test_remaining_loser_can_hit_the_stop_loss_after_the_winner_leaves
+# 네 테스트를 지웠다 — 종목별로 골라 파는 경로 자체가 없어져 고쳐 쓸 대상이 남지 않았다.
 
 
 # ── 청산 사유 기록 (확정 2026-08-12) ────────────────────────────
@@ -243,13 +206,5 @@ def test_stop_loss_is_recorded_with_its_reason():
     assert sorted(store.reasons) == [("000660", "stop_loss"), ("005930", "stop_loss")]
 
 
-def test_simple_take_profit_is_recorded_apart_from_the_percent_one():
-    """둘 다 ExitReason.TAKE_PROFIT이라, 사유를 나눠 두지 않으면 어느 규칙이 팔았는지 모른다."""
-    store = RecordingStore()
-    engine, _, _ = make_engine(
-        two_holdings(), simple_take_profit_enabled=True, trade_store=store
-    )
-
-    engine.on_market_data(MarketData(ticker="005930", price=1010.0, volume=1))
-
-    assert store.reasons == [("005930", "simple_take_profit")]
+# 단순익절 사유("simple_take_profit")를 percent take_profit과 구분해 기록하는지 보던
+# test_simple_take_profit_is_recorded_apart_from_the_percent_one은 단순익절과 함께 지웠다.

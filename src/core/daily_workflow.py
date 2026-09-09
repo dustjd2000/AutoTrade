@@ -309,23 +309,19 @@ class DailyWorkflow:
         self._buy_board = (day, tuple(rows))
 
     def _take_profit_price(self, price: float) -> float:
-        """익절선에 닿는 가격 — 표의 '매도예상가'. 익절이 꺼져 있으면 0이라 칸이 빈다.
+        """익절 기준선에 닿는 가격 — 표의 '매도예상가'. 자동 매도 조건이 아니라 참고값이다.
 
-        LLM의 목표 매도가가 아니라 익절(%) 설정을 순손익 기준으로 역산한 값이다. 목표
-        매도가는 주문에 쓰이지 않는 참고 수치라(PRD 5.5-B) "언제 팔리나"에 답하지 못한다.
-        단순익절은 익절선이 0이므로 그 경우를 먼저 본다 — 두 익절은 배타적이다(PRD 5.5-B).
+        LLM의 목표 매도가가 아니라 `take_profit_ratio`를 순손익 기준으로 역산한 값이다.
+        목표 매도가는 주문에 쓰이지 않는 참고 수치라(PRD 5.5-B) "언제 팔리나"에 답하지
+        못한다. 익절 자동 청산과 단순익절은 2026-09-09에 걷어냈으므로(PRD 10절) 이 가격에
+        닿아도 실제로 팔리지 않는다 — `take_profit_ratio`는 추후 AI 판단에 넘길 기준선으로
+        남아 있고, 여기서는 그 기준선이 "이 종목 혼자였다면" 어디인지 보여줄 뿐이다.
         """
         risk = self.engine.risk_manager
         if price <= 0:
             return 0.0
-        if risk.simple_take_profit_enabled:
-            target_ratio = 0.0
-        elif risk.take_profit_enabled:
-            target_ratio = risk.take_profit_ratio
-        else:
-            return 0.0
         return exit_trigger_price(
-            price, target_ratio, risk.commission_rate, risk.tax_rate, risk.slippage_rate
+            price, risk.take_profit_ratio, risk.commission_rate, risk.tax_rate, risk.slippage_rate
         )
 
     def _board_from_recommendations(self, recommendations) -> List[BuyPlanView]:
@@ -941,14 +937,11 @@ class DailyWorkflow:
             cash=cash,
             amount_per_stock=amount_per_stock,
             records=records,
-            # 단순익절이 켜져 있으면 그날의 익절선은 설정값(%)이 아니라 0이다 — 메일의
-            # 종목별 익절가가 실제 트리거(손익분기 가격)와 어긋나지 않게 0을 넘긴다
-            take_profit_percent=(
-                0.0
-                if self.engine.risk_manager.simple_take_profit_enabled
-                else self.engine.risk_manager.take_profit_ratio * 100
-            ),
-            simple_take_profit=self.engine.risk_manager.simple_take_profit_enabled,
+            # 익절 자동 청산과 단순익절은 걷어냈다(2026-09-09, PRD 10절) — take_profit_percent는
+            # 이제 항상 참고 기준선(take_profit_ratio) 값이고, simple_take_profit은 그 모드가
+            # 없어졌으므로 항상 False다. 필드 자체는 과거 메일과 형식을 맞추려 남겨 둔다.
+            take_profit_percent=self.engine.risk_manager.take_profit_ratio * 100,
+            simple_take_profit=False,
             stop_loss_percent=self.engine.risk_manager.stop_loss_ratio * 100,
             commission_percent=self.engine.risk_manager.commission_rate * 100,
             tax_percent=self.engine.risk_manager.tax_rate * 100,

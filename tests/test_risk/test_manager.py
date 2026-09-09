@@ -23,14 +23,8 @@ def make_manager(
     commission_rate=0.0,
     tax_rate=0.0,
     slippage_rate=0.0,
-    take_profit_enabled=True,
     stop_loss_enabled=True,
-    simple_take_profit_enabled=False,
 ):
-    """대부분의 테스트가 퍼센트 익절선을 검증하므로 단순익절만 기본값을 뒤집어 둔다.
-
-    실제 기본값은 '적용'(True)이다 — `test_flags_default_to_enabled`가 그쪽을 지킨다.
-    """
     manager = RiskManager(
         take_profit_ratio=take_profit_ratio,
         stop_loss_ratio=stop_loss_ratio,
@@ -38,9 +32,7 @@ def make_manager(
         commission_rate=commission_rate,
         tax_rate=tax_rate,
         slippage_rate=slippage_rate,
-        take_profit_enabled=take_profit_enabled,
         stop_loss_enabled=stop_loss_enabled,
-        simple_take_profit_enabled=simple_take_profit_enabled,
     )
     manager.initialize(BalanceSnapshot(cash=initial_asset, positions={}))
     return manager
@@ -52,18 +44,13 @@ def held(ticker, quantity, avg_price, current_price):
     )
 
 
-def test_portfolio_exit_triggers_take_profit_at_threshold():
-    """기본 익절선은 순손익 +0.5% — 비용이 0인 이 케이스에서는 가격 +0.5%가 곧 그 지점이다.
-
-    정확히 경계값(1,005원)을 쓰지 않는 것은 부동소수 오차 때문이다 — 1005/1000-1이
-    0.004999999999999893으로 나와 경계에서는 판정이 갈린다. 호가 단위가 1원 이상이라
-    실전에서는 다음 틱에 잡히므로 로직을 손대지 않고 테스트만 경계 위에서 확인한다.
-    """
-    manager = make_manager(take_profit_ratio=0.005)
-
-    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 1006.0)]) == ExitReason.TAKE_PROFIT
-
-
+# 익절 자동 청산(check_portfolio_exit의 TAKE_PROFIT 분기)은 2026-09-09에 걷어냈다 (PRD 10절,
+# 실매매 27건 대조 — 어떤 익절선도 "익절 없음"보다 낫지 않았다). 그 분기만 확인하던
+# test_portfolio_exit_triggers_take_profit_at_threshold / test_portfolio_exit_take_profit_reflects_costs /
+# test_take_profit_can_be_disabled_without_affecting_stop_loss /
+# test_stop_loss_can_be_disabled_without_affecting_take_profit / test_both_disabled_leaves_only_the_forced_close는
+# 지웠다 — 아래 test_portfolio_exit_no_longer_takes_profit / test_stop_loss_can_still_be_disabled가
+# 새 동작을 대신 확인한다.
 def test_portfolio_exit_triggers_stop_loss_at_threshold():
     manager = make_manager(stop_loss_ratio=0.02)
 
@@ -74,19 +61,6 @@ def test_portfolio_exit_returns_none_within_band():
     manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02)
 
     assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 1002.0)]) is None
-
-
-def test_portfolio_exit_take_profit_reflects_costs():
-    """수수료·세금·슬리피지가 있으면 가격 +0.5%만으로는 순손익 +0.5%에 못 미친다."""
-    manager = make_manager(
-        take_profit_ratio=0.005, commission_rate=0.00015, tax_rate=0.0018, slippage_rate=0.001
-    )
-    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 1005.0)]) is None
-
-    trigger_price = exit_trigger_price(1000.0, 0.005, 0.00015, 0.0018, 0.001)
-    assert trigger_price > 1005.0  # 비용만큼 익절가가 위로 밀린다
-    at_trigger = [held("005930", 10, 1000.0, trigger_price + 1)]
-    assert manager.check_portfolio_exit(at_trigger) == ExitReason.TAKE_PROFIT
 
 
 def test_portfolio_exit_stop_loss_triggers_earlier_with_costs():
@@ -141,125 +115,77 @@ def test_weighting_follows_invested_amount_not_stock_count():
 
     # 단순평균이면 (+1% -30%)/2 = -14.5%로 손절이 나가야 하지만, 실제 손익은 +7,000원이다
     assert manager.portfolio_return(positions) == pytest.approx(7_000 / 1_010_000)
-    assert manager.check_portfolio_exit(positions) == ExitReason.TAKE_PROFIT
+    # 합산 +0.69%는 옛 익절선(0.5%)을 넘지만, 익절 자동 청산은 걷어냈으므로 팔지 않는다
+    assert manager.check_portfolio_exit(positions) is None
 
 
 def test_positions_without_a_price_are_excluded():
-    """현재가 0(조회 실패·장 전)을 그대로 넣으면 -100%로 잡혀 합산이 즉시 손절선을 넘는다."""
-    manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02)
+    """현재가 0(조회 실패·장 전)을 그대로 넣으면 -100%로 잡혀 합산이 왜곡된다 — 계산에서 뺀다."""
+    manager = make_manager()
     positions = [
         held("005930", 10, 1000.0, 1006.0),
         held("000660", 10, 1000.0, 0.0),  # 현재가를 못 읽은 종목
     ]
 
-    assert manager.check_portfolio_exit(positions) == ExitReason.TAKE_PROFIT
-
-
-def test_take_profit_can_be_disabled_without_affecting_stop_loss():
-    """익절 적용을 끄면 익절선에 닿아도 팔지 않는다 — 손절은 그대로 동작한다."""
-    manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02, take_profit_enabled=False)
-
-    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 1006.0)]) is None
-    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 980.0)]) == ExitReason.STOP_LOSS
-
-
-def test_stop_loss_can_be_disabled_without_affecting_take_profit():
-    manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02, stop_loss_enabled=False)
-
-    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 980.0)]) is None
-    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 1006.0)]) == ExitReason.TAKE_PROFIT
-
-
-def test_both_disabled_leaves_only_the_forced_close():
-    """둘 다 끄면 실시간 청산이 사라진다 — 15:15 강제청산만 남는다 (PRD 5.5-B)."""
-    manager = make_manager(take_profit_enabled=False, stop_loss_enabled=False)
-
-    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 1006.0)]) is None
-    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 980.0)]) is None
+    assert manager.portfolio_return(positions) == pytest.approx(0.006)
 
 
 def test_disabled_flags_do_not_stop_the_return_calculation():
     """판정만 멈추고 합산 순손익률은 계속 계산한다 — UI 표시에 그대로 쓰인다."""
-    manager = make_manager(take_profit_enabled=False, stop_loss_enabled=False)
+    manager = make_manager(stop_loss_enabled=False)
 
     assert manager.portfolio_return([held("005930", 10, 1000.0, 1010.0)]) == pytest.approx(0.01)
 
 
-def test_simple_take_profit_picks_each_winner_on_its_own():
-    """판정은 합산이 아니라 종목별이다 — 이익 난 종목만 골라 돌려준다 (확정 2026-08-12)."""
-    manager = make_manager(simple_take_profit_enabled=True)
-    positions = [
-        held("005930", 100, 1000.0, 1001.0),  # +0.1%
-        held("000660", 100, 1000.0, 970.0),   # -3%
-    ]
-
-    # 합산은 -1.45%로 마이너스지만, 그것과 무관하게 이익 난 종목은 대상이 된다
-    assert manager.portfolio_return(positions) < 0
-    assert [p.ticker for p in manager.check_simple_take_profits(positions)] == ["005930"]
+def test_portfolio_exit_no_longer_takes_profit():
+    """익절은 자동 청산에서 빠졌다 — 이익이 아무리 커도 여기서는 팔지 않는다."""
+    manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02)
+    profitable = [held("005930", 10, 1000.0, 1100.0)]
+    assert manager.check_portfolio_exit(profitable) is None
 
 
-def test_simple_take_profit_holds_at_break_even():
-    """0을 '넘어야' 판다 — 본전(0)에서는 팔지 않는다. 비용만 내고 끝나는 매매를 막는다."""
-    manager = make_manager(simple_take_profit_enabled=True)
-
-    assert manager.check_simple_take_profits([held("005930", 10, 1000.0, 1000.0)]) == []
-
-
-def test_simple_take_profit_still_measures_net_return_not_price():
-    """'단순'은 기준선이 0이라는 뜻이지, 비용을 무시한다는 뜻이 아니다."""
-    manager = make_manager(
-        simple_take_profit_enabled=True,
-        commission_rate=0.00015,
-        tax_rate=0.0018,
-        slippage_rate=0.001,
-    )
-
-    # 가격은 +0.2%로 올랐지만 왕복 비용을 빼면 아직 손실이다
-    assert manager.check_simple_take_profits([held("005930", 10, 1000.0, 1002.0)]) == []
-
-    break_even = exit_trigger_price(1000.0, 0.0, 0.00015, 0.0018, 0.001)
-    assert break_even > 1002.0
-    at_profit = [held("005930", 10, 1000.0, break_even + 1)]
-    assert [p.ticker for p in manager.check_simple_take_profits(at_profit)] == ["005930"]
+def test_portfolio_exit_still_stops_loss():
+    manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02)
+    losing = [held("005930", 10, 1000.0, 900.0)]
+    assert manager.check_portfolio_exit(losing) is ExitReason.STOP_LOSS
 
 
-def test_simple_take_profit_returns_nothing_when_disabled():
-    manager = make_manager(simple_take_profit_enabled=False)
-
-    assert manager.check_simple_take_profits([held("005930", 10, 1000.0, 1050.0)]) == []
-
-
-def test_simple_take_profit_skips_positions_without_a_price():
-    """현재가 0(조회 실패·장 전)인 종목은 판정하지 않는다."""
-    manager = make_manager(simple_take_profit_enabled=True)
-
-    assert manager.check_simple_take_profits([held("000660", 10, 1000.0, 0.0)]) == []
+def test_stop_loss_can_still_be_disabled():
+    manager = make_manager(stop_loss_ratio=0.02, stop_loss_enabled=False)
+    losing = [held("005930", 10, 1000.0, 900.0)]
+    assert manager.check_portfolio_exit(losing) is None
 
 
-def test_simple_take_profit_does_not_reach_the_portfolio_judgement():
-    """단순익절은 합산 판정에 끼지 않는다 — 손절과 퍼센트 익절만 거기서 본다."""
-    manager = make_manager(
-        take_profit_ratio=0.005, stop_loss_ratio=0.02, simple_take_profit_enabled=True
-    )
-
-    # 합산 +0.1%는 퍼센트 익절선에 못 미치므로 합산 판정은 아무것도 내지 않는다
-    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 1001.0)]) is None
-    # 손절은 단순익절과 무관하게 그대로 동작한다
-    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 980.0)]) == ExitReason.STOP_LOSS
+def test_take_profit_ratio_survives_as_a_reference_line():
+    """자동 청산에는 안 쓰지만 AI에게 넘길 기준선이라 설정은 남는다."""
+    manager = make_manager(take_profit_ratio=0.005)
+    assert manager.take_profit_ratio == 0.005
 
 
-def test_flags_default_to_stop_loss_and_percent_take_profit():
-    """기본값은 **손절 + 합산 퍼센트 익절**이다 (확정 2026-08-18).
+def test_simple_take_profit_is_gone():
+    """단순익절(종목별 0% 익절) 모드는 2026-09-09에 걷어냈다 (PRD 10절).
 
-    익절 기본값은 세 번 바뀌었다: 단순익절(도입) → 둘 다 해제(2026-08-12) →
-    단순익절(2026-08-13) → 퍼센트 익절(2026-08-18). 두 익절 방식은 배타적이라
-    한쪽이 켜지면 다른 쪽은 꺼진다. 손절은 계좌를 지키는 쪽이라 계속 기본 적용이다.
+    이 자리에 있던 test_simple_take_profit_picks_each_winner_on_its_own /
+    test_simple_take_profit_holds_at_break_even / test_simple_take_profit_still_measures_net_return_not_price /
+    test_simple_take_profit_returns_nothing_when_disabled / test_simple_take_profit_skips_positions_without_a_price /
+    test_simple_take_profit_does_not_reach_the_portfolio_judgement 여섯 개는 모두
+    check_simple_take_profits를 직접 호출했다 — 메서드 자체가 없어졌으므로 지웠고, 이 테스트가
+    "그 메서드도 그 플래그도 더는 없다"는 것만 확인한다.
+    """
+    manager = make_manager()
+    assert not hasattr(manager, "check_simple_take_profits")
+    assert not hasattr(manager, "simple_take_profit_enabled")
+
+
+def test_stop_loss_defaults_to_enabled():
+    """손절 기본값은 계속 적용이다 — 계좌를 지키는 마지막 안전장치라 기본을 유지한다.
+
+    익절 적용 플래그(take_profit_enabled)와 단순익절(simple_take_profit_enabled)은
+    2026-09-09에 걷어냈다 (PRD 10절) — 그 전까지 기본값이 네 번 바뀐 내력은 PRD 10절에 남아 있다.
     """
     manager = RiskManager()
 
     assert manager.stop_loss_enabled is True
-    assert manager.take_profit_enabled is True
-    assert manager.simple_take_profit_enabled is False
 
 
 def test_record_order_accumulates_realized_loss_only_on_loss():

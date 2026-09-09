@@ -619,15 +619,12 @@ class TradingEngine:
     def _check_portfolio_exit(self, positions: Dict[str, Position]) -> bool:
         """청산 조건에 닿았으면 매도한다. 매도를 시도했으면 True.
 
-        판정이 둘로 나뉜다 (PRD 5.5-B):
-        1. **합산** — 손절과 퍼센트 익절. 닿으면 보유 종목을 전량 매도한다 (확정 2026-08-10)
-        2. **종목별 단순익절** — 순손익이 0을 넘은 종목만 골라 그 종목만 매도한다 (확정 2026-08-12)
+        판정은 **합산 손절** 하나다 (PRD 5.5-B, 확정 2026-08-10). 닿으면 보유 종목을
+        전량 매도한다. 익절 자동 청산과 종목별 단순익절은 2026-09-09에 걷어냈다 (PRD 10절)
+        — 실매매 대조에서 어떤 익절선도 "익절 없음"보다 낫지 않았기 때문이다.
 
-        합산을 먼저 보는 이유는, 계좌 전체가 손절선 아래인 상황에서 이익 난 종목 하나를 파는
-        것보다 전량 청산이 우선이기 때문이다.
-
-        이미 매도 주문을 낸 종목(`_exiting`)은 양쪽 판정에서 모두 뺀다 — 체결이 잔고에
-        반영되기까지 시차가 있어, 남겨두면 이미 판 물량이 다음 틱의 판정을 계속 왜곡한다.
+        이미 매도 주문을 낸 종목(`_exiting`)은 판정에서 뺀다 — 체결이 잔고에 반영되기까지
+        시차가 있어, 남겨두면 이미 판 물량이 다음 틱의 판정을 계속 왜곡한다.
         """
         holdings = [p for t, p in positions.items() if t not in self._exiting]
         if not holdings:
@@ -638,36 +635,10 @@ class TradingEngine:
             self._execute_portfolio_exit(holdings, reason)
             return True
 
-        winners = self.risk_manager.check_simple_take_profits(holdings)
-        if winners:
-            self._execute_simple_take_profit(winners)
-            return True
-
         return False
 
-    def _execute_simple_take_profit(self, winners: List[Position]) -> None:
-        """단순익절에 걸린 종목만 청산한다 — 고르지 못한 종목은 그대로 보유한다.
-
-        전량 청산(`_execute_portfolio_exit`)과 같은 종목별 루프(`_execute_exit`)를 써서
-        매도가능수량·주문 거부·상장폐지 제외 처리를 공유하고, 성공 알림도 같은 이유로
-        한 통에 묶는다 (틱 한 번에 여러 종목이 함께 걸릴 수 있다).
-        """
-        logger.info("단순익절 조건 도달 (종목별): 대상 %d종목", len(winners))
-
-        sold = [
-            _position_summary(position)
-            for position in winners
-            if self._execute_exit(
-                position, ExitReason.TAKE_PROFIT, exit_reason="simple_take_profit"
-            )
-        ]
-        if sold:
-            self.notify(
-                f"단순익절 매도 (종목별 순손익 0% 초과) — {len(sold)}종목\n" + "\n".join(sold)
-            )
-
     def _execute_portfolio_exit(self, holdings: List[Position], reason: ExitReason) -> None:
-        """합산 손익이 익절/손절 라인에 닿아 보유 종목을 전량 청산한다.
+        """합산 손익이 손절 라인에 닿아 보유 종목을 전량 청산한다.
 
         종목별 청산(`_execute_exit`)을 그대로 돌려 매도가능수량·주문 거부·상장폐지 제외
         처리를 공유하고, **성공 알림만 한 통으로 묶는다** — 종목마다 보내면 보유 3종목에
@@ -697,13 +668,11 @@ class TradingEngine:
     def _execute_exit(
         self, position: Position, reason: ExitReason, exit_reason: Optional[str] = None
     ) -> bool:
-        """익절/손절 라인 도달 시 전략 신호와 무관하게 즉시 청산한다. 주문이 접수되면 True.
+        """손절 라인 도달 시 전략 신호와 무관하게 즉시 청산한다. 주문이 접수되면 True.
 
-        성공 알림은 호출부(`_execute_portfolio_exit` / `_execute_simple_take_profit`)가
-        매도한 종목을 묶어 한 번에 보낸다.
+        성공 알림은 호출부(`_execute_portfolio_exit`)가 매도한 종목을 묶어 한 번에 보낸다.
 
-        `exit_reason`은 기록에 남길 사유다 — 단순익절과 합산 퍼센트 익절이 둘 다
-        `ExitReason.TAKE_PROFIT`이라, 어느 규칙이 팔았는지는 호출부만 안다.
+        `exit_reason`은 기록에 남길 사유다 — 지정하지 않으면 `reason.value`를 쓴다.
         """
         summary = _position_summary(position)
         quantity = self._closable_or_skip(position, reason.value)

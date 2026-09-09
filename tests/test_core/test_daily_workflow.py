@@ -108,9 +108,6 @@ def make_workflow(recommendations=None, collected=True, cash=12_000_000):
             commission_rate=0.00015,
             tax_rate=0.0018,
             slippage_rate=0.001,
-            # 메일에 익절선(%)이 그대로 적히는지 보는 테스트들이라 퍼센트 익절로 고정한다
-            simple_take_profit_enabled=False,
-            take_profit_enabled=True,
         ),
         note_open_position=lambda ticker: None,
         last_price=lambda ticker: 0.0,
@@ -995,27 +992,11 @@ def test_buy_plan_snapshot_is_filled_at_recommendation_time():
     )
 
 
-def test_buy_plan_sell_price_follows_simple_take_profit():
-    """단순익절이 켜져 있으면 익절선은 0이다 — 표도 그 가격을 보여줘야 한다."""
-    workflow, _, _, _, _ = make_workflow(recommendations=board_recs())
-    workflow.engine.risk_manager.simple_take_profit_enabled = True
-
-    workflow.recommend_and_notify(today=BOARD_DAY)
-
-    (plan,) = workflow.buy_plan_snapshot(today=BOARD_DAY)
-    assert plan.sell_price == pytest.approx(
-        exit_trigger_price(1000, 0.0, 0.00015, 0.0018, 0.001)
-    )
-
-
-def test_buy_plan_sell_price_is_blank_when_take_profit_is_off():
-    workflow, _, _, _, _ = make_workflow(recommendations=board_recs())
-    workflow.engine.risk_manager.take_profit_enabled = False
-
-    workflow.recommend_and_notify(today=BOARD_DAY)
-
-    (plan,) = workflow.buy_plan_snapshot(today=BOARD_DAY)
-    assert plan.sell_price == 0.0
+# 단순익절(simple_take_profit_enabled)과 익절 적용 해제(take_profit_enabled)는 2026-09-09에
+# 걷어냈다 (PRD 10절) — 매도예상가가 그 값을 따라 바뀌는지 보던
+# test_buy_plan_sell_price_follows_simple_take_profit / test_buy_plan_sell_price_is_blank_when_take_profit_is_off
+# 두 테스트를 지웠다. 매도예상가는 이제 항상 take_profit_ratio를 참고값으로 쓴다 —
+# 위 test_buy_plan_snapshot_is_filled_at_recommendation_time이 그 계산을 계속 확인한다.
 
 
 def test_buy_plan_snapshot_shows_order_status_after_buying():
@@ -1457,8 +1438,6 @@ def build_workflow(tmp_path):
             commission_rate=0.00015,
             tax_rate=0.0018,
             slippage_rate=0.001,
-            simple_take_profit_enabled=False,
-            take_profit_enabled=True,
         ),
         note_open_position=lambda ticker: None,
         last_price=lambda ticker: 0.0,
