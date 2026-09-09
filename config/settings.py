@@ -19,6 +19,10 @@ MIN_RECOMMEND_TO_BUY_MINUTES = 3
 MARKET_OPEN_HHMM = "09:00"
 
 
+# AI 매도 판단 호출 주기로 고를 수 있는 값 (분) — UI 콤보와 validate()가 함께 쓴다.
+AI_EXIT_INTERVAL_CHOICES = (15, 30, 60)
+
+
 def _parse_hhmm(raw: str, default: str, name: str) -> dt_time:
     """"HH:MM" 문자열을 `datetime.time`으로 바꾼다. 깨져 있으면 기본값으로 돌린다.
 
@@ -102,6 +106,11 @@ class Settings:
 
     # 1호 전략의 추천·매수 시각 — .env에는 "HH:MM" 문자열로 두고, 스케줄러가 쓰는
     # datetime.time은 프로퍼티로 환산한다 (확정 2026-08-04, 매수 시각 추가 2026-08-20)
+    # AI 매도 판단 호출 주기 (분). UI 콤보가 주는 셋만 허용한다 — 그 밖의 값은 validate()가
+    # 막는다 (PRD 5.5-B 'AI 매도 판단'). 비용이 여기서 갈린다: 하루 호출 수가 주기에 반비례한다.
+    ai_exit_interval_minutes: int = field(
+        default_factory=lambda: int(os.getenv("AI_EXIT_INTERVAL_MINUTES", "15"))
+    )
     recommend_time_hhmm: str = field(
         default_factory=lambda: os.getenv("RECOMMEND_TIME", DEFAULT_RECOMMEND_TIME_HHMM)
     )
@@ -189,6 +198,11 @@ class Settings:
             raise ValueError(
                 f"BUY_TIME은 RECOMMEND_TIME보다 {MIN_RECOMMEND_TO_BUY_MINUTES}분 이상 뒤여야 "
                 f"합니다: 추천 {self.recommend_time_hhmm} / 매수 {self.buy_time_hhmm}"
+            )
+        if self.ai_exit_interval_minutes not in AI_EXIT_INTERVAL_CHOICES:
+            raise ValueError(
+                f"AI_EXIT_INTERVAL_MINUTES는 {AI_EXIT_INTERVAL_CHOICES} 중 하나여야 합니다: "
+                f"{self.ai_exit_interval_minutes}"
             )
         if not self.app_key or not self.app_secret:
             raise ValueError("KIWOOM_APP_KEY and KIWOOM_APP_SECRET must be set")

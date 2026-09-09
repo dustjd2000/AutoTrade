@@ -2,7 +2,7 @@ from datetime import time as dt_time
 
 import pytest
 
-from config.settings import DEFAULT_RECOMMEND_TIME_HHMM, Settings
+from config.settings import AI_EXIT_INTERVAL_CHOICES, DEFAULT_RECOMMEND_TIME_HHMM, Settings
 
 
 @pytest.fixture(autouse=True)
@@ -160,3 +160,27 @@ def test_commission_defaults_to_the_measured_rate(monkeypatch):
     monkeypatch.delenv("COMMISSION_PERCENT", raising=False)
 
     assert Settings().commission_ratio == 0.00015
+
+
+# ── AI 매도 판단 호출 주기 ─────────────────────────
+def test_ai_exit_interval_defaults_to_15(monkeypatch):
+    monkeypatch.delenv("AI_EXIT_INTERVAL_MINUTES", raising=False)
+    assert Settings().ai_exit_interval_minutes == 15
+
+
+def test_ai_exit_interval_reads_env(monkeypatch):
+    monkeypatch.setenv("AI_EXIT_INTERVAL_MINUTES", "60")
+    assert Settings().ai_exit_interval_minutes == 60
+
+
+def test_validate_accepts_every_ui_choice(monkeypatch):
+    for minutes in AI_EXIT_INTERVAL_CHOICES:
+        monkeypatch.setenv("AI_EXIT_INTERVAL_MINUTES", str(minutes))
+        _valid_settings(monkeypatch).validate()
+
+
+def test_validate_rejects_an_unsupported_interval(monkeypatch):
+    """UI 콤보에 없는 값이 .env로 들어오면 엔진 시작 단계에서 막는다."""
+    monkeypatch.setenv("AI_EXIT_INTERVAL_MINUTES", "7")
+    with pytest.raises(ValueError, match="AI_EXIT_INTERVAL_MINUTES"):
+        _valid_settings(monkeypatch).validate()
