@@ -42,6 +42,12 @@ class HoldingView:
     # 아침 추천 때는 없던 정보라 프롬프트에서 따로 표시한다 (PRD 5.5-B '장중 공시').
     headlines: List[str] = field(default_factory=list)
     new_headlines: List[str] = field(default_factory=list)
+    # 아침 추천이 함께 낸 목표 매도가. 주문에는 쓰이지 않지만(PRD 10절 "목표 매도가는
+    # 참고용") AI에게는 보여준다 — 아침에 스스로 세운 목표를 장중에 모르면 이미 넘긴
+    # 자리에서도 "시나리오가 유효하다"고 읽는다 (2026-09-10 HD현대중공업).
+    target_sell_price: float = 0.0
+    # 당일 고점 순손익률과 그 대비 반납폭 (`DrawdownTracker`). 아직 모르면 None이다.
+    peak_return: Optional[float] = None
 
 
 @dataclass
@@ -53,6 +59,38 @@ class ExitDecision:
 def _pct(ratio: float) -> str:
     """0~1 스케일 비율을 부호 있는 퍼센트 문자열로 바꾼다 (0.004 → "+0.40%")."""
     return f"{ratio * 100:+.2f}%"
+
+
+def _sell_target_text(holding: HoldingView) -> str:
+    """목표 매도가와 현재가의 관계 — 넘겼는지 아직인지를 말로 못 박는다.
+
+    가격만 적어 두면 모델이 현재가와 대조하지 않고 넘어간다. 숫자 비교는 코드가 한다.
+    """
+    if holding.target_sell_price <= 0:
+        return "없음 (그날 추천 종목이 아닙니다)"
+    gap = (holding.current_price - holding.target_sell_price) / holding.target_sell_price
+    if holding.current_price >= holding.target_sell_price:
+        return f"{holding.target_sell_price:,.0f}원 — 현재가가 이미 {gap * 100:+.2f}% 넘어섰습니다"
+    return f"{holding.target_sell_price:,.0f}원 — 아직 {gap * 100:.2f}% 아래입니다"
+
+
+def _peak_text(holding: HoldingView) -> str:
+    """당일 고점 대비 반납폭 — '밀렸다'를 서술이 아니라 수치로 준다.
+
+    되돌림을 판단 기준 1번으로 두었는데도 모델이 궤적에서 스스로 읽지 않고 "여전히
+    플러스"로 넘어갔다 (2026-09-10). 반납폭과 반납 비율을 계산해서 넘긴다.
+    """
+    if holding.peak_return is None:
+        return "고점 정보 없음"
+    given_back = max(0.0, holding.peak_return - holding.net_return)
+    share = given_back / holding.peak_return if holding.peak_return > 0 else 0.0
+    if given_back <= 0:
+        return f"당일 고점 {_pct(holding.peak_return)} (지금이 당일 고점입니다)"
+    tail = f", 고점 이익의 {min(1.0, share) * 100:.0f}%를 반납" if holding.peak_return > 0 else ""
+    return (
+        f"당일 고점 {_pct(holding.peak_return)} → 현재 {_pct(holding.net_return)} "
+        f"({given_back * 100:.2f}%p 반납{tail})"
+    )
 
 
 def _headline_text(holding: HoldingView) -> str:
@@ -89,6 +127,11 @@ def build_exit_system_prompt() -> str:
 - **익절 기준선은 자동 청산 트리거가 아니라 사용자가 정한 목표치**입니다. 순손익률이
   그 위에 있다고 반드시 팔아야 하는 것도 아니고, 그 아래에 있다고 팔면 안 되는
   것도 아닙니다. 참고 지표일 뿐입니다.
+- **익절 기준선 미달을 보유 근거로 쓰지 마십시오.** "아직 익절선에 못 미쳤다",
+  "익절선에 근접했지만 도달 전이다" 같은 문장은 근거가 아닙니다. 기준선은 **보유
+  종목 합산** 기준이라, 종목이 여러 개면 한 종목이 크게 올라도 나머지가 희석해
+  합산은 좀처럼 그 선에 닿지 않습니다. 도달 여부가 아니라 **지금 흐름이 꺾였는지**로
+  판단하십시오.
 
 ## 시간
 15:15가 되면 보유 종목 전체가 강제로 청산됩니다. 남은 시간이 짧을수록 지금 팔지
@@ -96,10 +139,14 @@ def build_exit_system_prompt() -> str:
 반영하십시오.
 
 ## 판단 기준
-1. **되돌림** — 고점 대비 얼마나 밀렸는지, 그리고 그 되돌림이 얼마나 빠른 속도로
-   진행되고 있는지를 궤적에서 읽으십시오.
+1. **되돌림** — 종목마다 `당일 고점 → 현재`와 반납폭(%p·비율)을 함께 드립니다.
+   직접 계산하지 말고 그 수치를 쓰십시오. **고점 이익의 절반 이상을 반납했다면 그것
+   자체가 매도 근거입니다** — "여전히 플러스"는 반박이 되지 않습니다. 남은 이익을
+   지키는 것도 이 판단의 역할입니다.
 2. **아침 전망의 유효성** — 이 종목을 고를 때 본 시나리오(`outlook`/`reason`)가
-   지금도 살아 있는지, 아니면 이미 깨졌는지를 판단하십시오.
+   지금도 살아 있는지, 아니면 이미 깨졌는지를 판단하십시오. **아침에 함께 세운 목표
+   매도가를 이미 넘어섰다면 그 시나리오는 "유효하게 진행 중"이 아니라 "달성된"
+   것입니다.** 달성된 시나리오는 더 들고 있을 근거가 되지 못합니다.
 3. **장중 공시** — `[신규]`가 붙은 공시는 아침에 종목을 고를 때는 없던 정보입니다.
    그 내용이 아침 시나리오를 무너뜨리는지(유상증자·전환사채 발행 같은 지분 희석,
    횡령·배임, 실적 악화 등) 아니면 무관하거나 오히려 뒷받침하는지를 판단하십시오.
@@ -121,6 +168,7 @@ def build_exit_user_prompt(
     take_profit_ratio: float,
     minutes_to_close: int,
     partial: bool,
+    portfolio_peak: Optional[float] = None,
 ) -> str:
     lines = [
         "보유 종목을 지금 전량 정리할지 판단하기 위한 현재 상황입니다.",
@@ -130,9 +178,16 @@ def build_exit_user_prompt(
         f"- 손절선: {_pct(-stop_loss_ratio)} "
         f"(남은 거리 {(portfolio_return + stop_loss_ratio) * 100:.2f}%p — "
         "닿으면 코드가 자동으로 처리하므로 이 판단이 신경 쓸 필요는 없습니다)",
-        f"- 익절 기준선: {_pct(take_profit_ratio)} (자동 청산 기준이 아니라 참고용 목표입니다)",
+        f"- 익절 기준선: {_pct(take_profit_ratio)} "
+        "(**보유 종목 합산** 기준이며 자동 청산 트리거가 아닙니다. 미달 자체는 보유 근거가 "
+        "되지 않습니다)",
         f"- 현재 합산 순손익률: {_pct(portfolio_return)}",
     ]
+    if portfolio_peak is not None:
+        given_back = max(0.0, portfolio_peak - portfolio_return)
+        lines.append(
+            f"- 합산 당일 고점: {_pct(portfolio_peak)} ({given_back * 100:.2f}%p 반납)"
+        )
 
     lines.append("\n## 순손익률 궤적 (시각 → 합산 / 종목별)")
     if partial:
@@ -147,6 +202,8 @@ def build_exit_user_prompt(
             f"- {h.ticker} {h.name}: 평단 {h.avg_price:,.0f}원, 현재가 {h.current_price:,.0f}원, "
             f"수량 {h.quantity}주, 순손익률 {_pct(h.net_return)}"
         )
+        lines.append(f"  되돌림: {_peak_text(h)}")
+        lines.append(f"  아침 목표 매도가: {_sell_target_text(h)}")
         lines.append(f"  아침 근거: {h.reason}")
         lines.append(f"  아침 전망: {h.outlook}")
         lines.append(f"  오늘 공시: {_headline_text(h)}")
@@ -193,6 +250,7 @@ class ExitAdvisor:
         take_profit_ratio: float,
         minutes_to_close: int,
         partial: bool,
+        portfolio_peak: Optional[float] = None,
         timeout_seconds: float = 120.0,
     ) -> Optional[ExitDecision]:
         """청산 여부를 판단해 돌려준다. 실패하면 None — 호출측은 그 주기에 아무것도 팔지 않는다."""
@@ -204,6 +262,7 @@ class ExitAdvisor:
             take_profit_ratio,
             minutes_to_close,
             partial,
+            portfolio_peak,
         )
         logger.info(
             "AI 매도 판단 요청 (exit_prompt_version=%s, 보유 %d종목):\n%s",

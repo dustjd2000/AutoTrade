@@ -18,6 +18,7 @@ import pytest
 
 from src.api.account import Position
 from src.core.events import ExitReason, MarketData
+from src.core.exit_drawdown import DrawdownTracker
 from src.core.exit_trace import ExitTrace
 from src.core.runtime import (
     AI_EXIT_END_TIME,
@@ -68,6 +69,7 @@ class FakeEngine:
         ai_exit_enabled=True,
         ai_exit_calls=0,
         portfolio_return=0.01,
+        drawdown_ratio=0.0,
     ):
         self.ai_exit_enabled = ai_exit_enabled
         self._ai_exit_calls = ai_exit_calls
@@ -75,6 +77,8 @@ class FakeEngine:
         self._fresh_holdings = list(holdings or []) if fresh_holdings is None else list(fresh_holdings)
         self.open_tickers = [p.ticker for p in self._holdings]
         self.exit_trace = ExitTrace()
+        # 이익 반납 감시 — 실제 트래커를 그대로 쓴다 (게이트가 urgent_pending을 읽는다)
+        self.exit_drawdown = DrawdownTracker(drawdown_ratio)
         self.risk_manager = SimpleNamespace(
             portfolio_return=lambda hs: portfolio_return,
             stop_loss_ratio=0.02,
@@ -150,6 +154,7 @@ def make_runtime(
     interval_minutes=DEFAULT_INTERVAL_MINUTES,
     decide_result=None,
     disclosure_watch=None,
+    drawdown_ratio=0.0,
 ):
     engine = FakeEngine(
         holdings=holdings,
@@ -157,6 +162,7 @@ def make_runtime(
         ai_exit_enabled=ai_exit_enabled,
         ai_exit_calls=ai_exit_calls,
         portfolio_return=portfolio_return,
+        drawdown_ratio=drawdown_ratio,
     )
     settings = SimpleNamespace(buy_time=buy_time, ai_exit_interval_minutes=interval_minutes)
     advisor = SpyAdvisor(result=decide_result)

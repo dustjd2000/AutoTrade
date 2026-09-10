@@ -192,6 +192,7 @@ def build_runtime(settings: Settings) -> Runtime:
         notifier=AlertNotifier(email),
         emergency_action=settings.emergency_action,
         ai_exit_enabled=settings.ai_exit_enabled,
+        ai_exit_drawdown_ratio=settings.ai_exit_drawdown_ratio,
     )
     ws_client.on_data(engine.on_market_data)
 
@@ -493,10 +494,12 @@ def ai_exit_due(
     거래일 → `engine.ai_exit_enabled` → 호출 창 안 → 마지막 호출로부터 주기 경과 →
     보유 종목 있음 → 하루 호출 상한 안.
 
-    **장중에 악재 공시가 새로 뜬 경우(`DisclosureWatch.urgent_pending`)만 예외로**, 주기와
-    하루 상한 두 가지를 건너뛴다 (PRD 5.5-B '장중 공시'). 주기만 건너뛰면 그날의 마지막
-    정규 사이클이 상한에 걸려 대신 빠지고, 그쪽이 장 마감에 더 가까워 손해가 크다. 트리거
-    자체가 하루 `MAX_URGENT_TRIGGERS_PER_DAY`회로 묶여 있어 비용은 그만큼만 늘어난다.
+    **즉시 호출 사유가 서 있으면** 주기와 하루 상한 두 가지를 건너뛴다. 사유는 둘이다 —
+    장중에 새로 뜬 악재 공시(`DisclosureWatch`, PRD 5.5-B '장중 공시')와 당일 고점 대비
+    이익 반납(`DrawdownTracker`, PRD 5.5-B '이익 반납 감시'). 주기만 건너뛰면 그날의
+    마지막 정규 사이클이 상한에 걸려 대신 빠지고, 그쪽이 장 마감에 더 가까워 손해가 크다.
+    두 트리거 모두 각자의 `MAX_URGENT_TRIGGERS_PER_DAY`(공시 3회 / 반납 5회)로 묶여 있어
+    비용은 그만큼만 는다.
     거래일·설정·호출 창·보유 종목은 예외 없이 그대로 본다.
     """
     now = now or datetime.now()
@@ -510,7 +513,9 @@ def ai_exit_due(
     if not ai_exit_window_open(runtime.settings, now):
         return False
 
-    urgent = runtime.disclosure_watch is not None and runtime.disclosure_watch.urgent_pending
+    urgent = (runtime.disclosure_watch is not None and runtime.disclosure_watch.urgent_pending) or (
+        engine.exit_drawdown.urgent_pending
+    )
 
     if last_called_at is not None and not urgent:
         elapsed_minutes = (now - last_called_at).total_seconds() / 60
@@ -535,10 +540,11 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
     """
     now = now or datetime.now()
     engine = runtime.engine
-    # 이번 사이클이 공시 때문에 앞당겨진 것이든 아니든 여기서 트리거를 비운다 — 남겨 두면
-    # 다음 주기까지 계속 주기를 건너뛰게 된다.
+    # 이번 사이클이 앞당겨진 것이든 아니든 여기서 트리거를 비운다 — 남겨 두면 다음
+    # 주기까지 계속 주기를 건너뛰게 된다.
     if runtime.disclosure_watch is not None:
         runtime.disclosure_watch.take_urgent()
+    engine.exit_drawdown.take_urgent()
 
     holdings = engine.exit_candidates()
     if not holdings:
@@ -565,6 +571,14 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
             else {}
         )
         watch = runtime.disclosure_watch
+        # 실시간 콜백이 쌓아 둔 당일 고점 — 궤적(15분 간격)에는 없는 봉우리가 여기 남는다
+        peaks = {
+            p.ticker: r.peak
+            for p in holdings
+            for r in [engine.exit_drawdown.retracement(p.ticker, per_ticker[p.ticker])]
+            if r is not None
+        }
+        portfolio_peak_view = engine.exit_drawdown.portfolio_retracement(portfolio_return)
         holdings_view = []
         for p in holdings:
             rec = recommendations.get(p.ticker)
@@ -584,6 +598,9 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
                     new_headlines=(
                         watch.new_headlines_for(p.ticker) if watch is not None else []
                     ),
+                    # 이월 포지션은 그날 추천이 아니라 목표 매도가가 없다 — 0으로 둔다
+                    target_sell_price=float(rec.target_sell_price or 0) if rec is not None else 0.0,
+                    peak_return=peaks.get(p.ticker),
                 )
             )
 
@@ -607,6 +624,7 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
                 engine.risk_manager.take_profit_ratio,
                 minutes_to_close,
                 partial,
+                portfolio_peak_view.peak if portfolio_peak_view is not None else None,
             ),
         )
     except Exception:

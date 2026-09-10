@@ -22,6 +22,7 @@ from src.core.events import (
     ExitReason,
     UnsellableView,
 )
+from src.core.exit_drawdown import DrawdownTracker
 from src.core.exit_trace import ExitTrace
 from src.logger.trade_store import TradeStore
 from src.notification.alert import AlertNotifier
@@ -126,6 +127,7 @@ class TradingEngine:
         notifier: Optional[AlertNotifier] = None,
         emergency_action: str = "hold",
         ai_exit_enabled: bool = True,
+        ai_exit_drawdown_ratio: float = 0.0,
     ):
         self.auth = auth
         self.market_data = market_data
@@ -168,6 +170,10 @@ class TradingEngine:
         # AI 매도 판단 (PRD 5.5-B) — 익절 자동 청산이 빠진 자리를 대신한다.
         # 순손익 궤적. 메모리에만 두고 08:40 reset_for_new_day에서 비운다 (runtime.watch_ai_exit).
         self.exit_trace = ExitTrace()
+        # 당일 순손익 고점과 그 대비 반납폭. 궤적과 달리 **실시간 시세 콜백에서** 갱신한다
+        # — 고점은 15분 주기 사이를 스쳐 지나가므로 궤적만으로는 잡히지 않는다
+        # (PRD 5.5-B "이익 반납 감시"). 이것도 08:40에 비운다.
+        self.exit_drawdown = DrawdownTracker(ai_exit_drawdown_ratio)
         # UI 체크박스가 켜고 끈다 — stop_loss_enabled가 risk_manager에 붙은 것과 같은 자리다.
         # 기본은 켬이고, 마지막으로 켜고 끈 상태는 `.env`(AI_EXIT_ENABLED)에서 여기로 들어온다.
         self.ai_exit_enabled = ai_exit_enabled
@@ -511,6 +517,7 @@ class TradingEngine:
         self._closed_out_at = None
         # 순손익 궤적은 하루치라 다음 날로 넘기지 않는다 — 어제 궤적으로 오늘을 판단하면 안 된다.
         self.exit_trace.clear()
+        self.exit_drawdown.clear()
         self._ai_exit_calls = 0
         # 어제 판단이 오늘 표에 남아 있으면 오늘 이미 한 번 돈 것처럼 읽힌다
         self._last_ai_exit = None
@@ -649,6 +656,9 @@ class TradingEngine:
         position = positions.get(data.ticker)
         if position is not None and data.ticker not in self._exiting:
             position.current_price = data.price
+        # 손절 판정보다 **앞에서** 고점을 갱신한다 — 손절이 걸려 아래에서 return하면
+        # 그 틱의 고점이 통째로 빠진다.
+        self._track_exit_drawdown(positions)
         if self._check_portfolio_exit(positions):
             return
 
@@ -700,6 +710,40 @@ class TradingEngine:
             result.status.value,
             result.order_id,
         )
+
+    def _track_exit_drawdown(self, positions: Dict[str, Position]) -> None:
+        """당일 순손익 고점을 따라가고, 반납폭이 임계치를 넘으면 AI 판단을 앞당긴다.
+
+        여기서는 팔지 않는다 — `DrawdownTracker`에 표시만 남기고, 실제 호출은
+        `runtime.ai_exit_due`가 그 표시를 보고 다음 폴링(최대 30초)에서 앞당긴다.
+        판단 자체는 종전대로 보유 목록 전체에 대해 AI가 한 번 내린다.
+
+        AI 매도 판단이 꺼져 있으면 아무것도 하지 않는다 — 앞당길 호출이 없다.
+        """
+        if not self.ai_exit_enabled:
+            return
+
+        holdings = [p for t, p in positions.items() if t not in self._exiting]
+        if not holdings:
+            return
+
+        per_ticker = {p.ticker: self.position_net_return(p) for p in holdings}
+        crossed = self.exit_drawdown.update(
+            per_ticker, self.risk_manager.portfolio_return(holdings)
+        )
+        for ticker in crossed:
+            retracement = self.exit_drawdown.retracement(ticker, per_ticker[ticker])
+            if retracement is None:
+                continue
+            logger.warning(
+                "이익 반납: %s 당일 고점 %+.2f%% → 현재 %+.2f%% (%.2f%%p 반납, 고점 이익의 %.0f%%) "
+                "— AI 매도 판단을 앞당깁니다.",
+                ticker,
+                retracement.peak * 100,
+                retracement.current * 100,
+                retracement.given_back * 100,
+                retracement.given_back_share * 100,
+            )
 
     def _check_portfolio_exit(self, positions: Dict[str, Position]) -> bool:
         """청산 조건에 닿았으면 매도한다. 매도를 시도했으면 True.

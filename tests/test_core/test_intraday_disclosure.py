@@ -199,3 +199,38 @@ def test_cycle_works_without_a_disclosure_watch():
     view = advisor.calls[0]["holdings"][0]
     assert view.headlines == []
     assert view.new_headlines == []
+
+
+# ── 이익 반납 트리거 (PRD 5.5-B '이익 반납 감시') ──────────────
+def test_giveback_skips_the_interval_and_the_cap():
+    """공시와 같은 통로를 쓴다 — 주기와 하루 상한을 함께 건너뛴다."""
+    just_called = IN_WINDOW - timedelta(minutes=1)
+    runtime, engine, _ = make_runtime(
+        holdings=[holding()], ai_exit_calls=DEFAULT_CALL_LIMIT, drawdown_ratio=0.03
+    )
+    engine.exit_drawdown.update({"005930": 0.0446})
+    engine.exit_drawdown.update({"005930": 0.0141})
+
+    assert engine.exit_drawdown.urgent_pending is True
+    assert ai_exit_due(runtime, IN_WINDOW, just_called) is True
+
+
+def test_cycle_consumes_the_giveback_trigger():
+    runtime, engine, _ = make_runtime(holdings=[holding()], drawdown_ratio=0.03)
+    engine.exit_drawdown.update({"005930": 0.0446})
+    engine.exit_drawdown.update({"005930": 0.0141})
+
+    asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW, None))
+
+    assert engine.exit_drawdown.urgent_pending is False
+
+
+def test_peak_reaches_the_advisor():
+    """실시간 콜백이 잡은 고점이 프롬프트까지 도달해야 한다 — 궤적에는 없는 봉우리다."""
+    runtime, engine, advisor = make_runtime(holdings=[holding()], drawdown_ratio=0.03)
+    engine.exit_drawdown.update({"005930": 0.0446}, portfolio=0.0236)
+
+    asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW, None))
+
+    view = advisor.calls[0]["holdings"][0]
+    assert view.peak_return == 0.0446

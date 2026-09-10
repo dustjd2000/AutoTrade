@@ -11,14 +11,24 @@ from src.llm.exit_advisor import (
 )
 
 
-def holding(ticker="005930", net_return=0.004, headlines=None, new_headlines=None):
+def holding(
+    ticker="005930",
+    net_return=0.004,
+    headlines=None,
+    new_headlines=None,
+    target_sell_price=0.0,
+    peak_return=None,
+    current_price=36_100.0,
+):
     return HoldingView(
         ticker=ticker, name="삼성전자", quantity=23, avg_price=35_850.0,
-        current_price=36_100.0, net_return=net_return,
+        current_price=current_price, net_return=net_return,
         outlook="오전 중 전일 고가 36,150원 돌파를 시도할 것으로 봅니다.",
         reason="이동평균 대비 -6.0%까지 밀린 상태",
         headlines=list(headlines or []),
         new_headlines=list(new_headlines or []),
+        target_sell_price=target_sell_price,
+        peak_return=peak_return,
     )
 
 
@@ -181,3 +191,64 @@ def test_system_prompt_warns_against_selling_on_disclosure_alone():
 
     assert "[신규]" in system
     assert "공시가 떴다는 사실만으로 팔지 마십시오" in system
+
+
+# ── 목표 매도가 / 이익 반납 (PRD 5.5-B '이익 반납 감시') ────────
+def test_prompt_says_when_the_sell_target_is_already_passed():
+    """가격만 적어 두면 모델이 현재가와 대조하지 않는다 — 비교는 코드가 한다."""
+    view = holding(target_sell_price=35_000.0, current_price=36_100.0)
+    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 0.02, 0.005, 330, False)
+
+    assert "아침 목표 매도가: 35,000원 — 현재가가 이미 +3.14% 넘어섰습니다" in prompt
+
+
+def test_prompt_says_when_the_sell_target_is_not_reached():
+    view = holding(target_sell_price=38_000.0, current_price=36_100.0)
+    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 0.02, 0.005, 330, False)
+
+    assert "아직 -5.00% 아래입니다" in prompt
+
+
+def test_prompt_reports_the_giveback_as_a_number():
+    """2026-09-10 현대중공업 궤적 — 고점 +4.46%에서 +1.41%면 3.05%p, 고점 이익의 68%다."""
+    view = holding(net_return=0.0141, peak_return=0.0446)
+    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 0.02, 0.005, 330, False)
+
+    assert "되돌림: 당일 고점 +4.46% → 현재 +1.41% (3.05%p 반납, 고점 이익의 68%를 반납)" in prompt
+
+
+def test_prompt_says_so_when_now_is_the_peak():
+    view = holding(net_return=0.0446, peak_return=0.0446)
+    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 0.02, 0.005, 330, False)
+
+    assert "지금이 당일 고점입니다" in prompt
+
+
+def test_prompt_shows_the_portfolio_peak():
+    prompt = build_exit_user_prompt(
+        [holding()], trace_points(), 0.0085, 0.02, 0.05, 25, False, portfolio_peak=0.0236
+    )
+
+    assert "합산 당일 고점: +2.36% (1.51%p 반납)" in prompt
+
+
+def test_take_profit_line_is_marked_as_a_portfolio_level_reference():
+    """합산 기준이라는 사실을 안 적으면 종목별 수치와 곧장 비교한다."""
+    prompt = build_exit_user_prompt([holding()], trace_points(), 0.004, 0.02, 0.05, 330, False)
+
+    assert "**보유 종목 합산** 기준이며" in prompt
+    assert "미달 자체는 보유 근거가 되지 않습니다" in prompt
+
+
+def test_system_prompt_forbids_using_the_take_profit_line_as_a_hold_reason():
+    """2026-09-10에 모델이 '아직 익절선 미달'을 여섯 번 보유 근거로 썼다."""
+    system = build_exit_system_prompt()
+
+    assert "익절 기준선 미달을 보유 근거로 쓰지 마십시오" in system
+
+
+def test_system_prompt_makes_a_big_giveback_a_sell_reason():
+    system = build_exit_system_prompt()
+
+    assert "고점 이익의 절반 이상을 반납했다면 그것" in system
+    assert "여전히 플러스" in system
