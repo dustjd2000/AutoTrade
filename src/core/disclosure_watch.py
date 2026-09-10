@@ -13,7 +13,7 @@ MAX_HEADLINES_PER_TICKER = 5
 # 하루에 허용할 즉시 판단 트리거 수. 새로 뜬 악재 공시 하나가 한 번만 트리거하므로
 # (같은 제목은 두 번 '신규'가 되지 않는다) 실제로는 0~1건이지만, 공시가 쏟아지는 날에
 # LLM 호출이 상한 밖에서 늘어나지 않도록 못을 박아 둔다.
-MAX_URGENT_TRIGGERS_PER_DAY = 3
+MAX_URGENT_TRIGGERS_PER_DAY = 5
 
 
 class DisclosureWatch:
