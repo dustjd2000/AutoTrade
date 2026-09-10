@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStatusBar,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -148,11 +149,13 @@ def _section_label(text: str) -> QLabel:
     return lbl
 
 
-def _separator() -> QFrame:
-    line = QFrame()
-    line.setFrameShape(QFrame.Shape.HLine)
-    line.setStyleSheet(f"color: {COLOR_BORDER};")
-    return line
+def _in_scroll(page: QWidget) -> QScrollArea:
+    """탭 내용이 창보다 길어져도 잘리지 않게 스크롤에 담는다."""
+    scroll = QScrollArea()
+    scroll.setWidget(page)
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    return scroll
 
 
 def _with_toggle(field: QLineEdit, *toggles: QCheckBox) -> QWidget:
@@ -321,6 +324,30 @@ class MainWindow(QMainWindow):
                 border: 1px solid {COLOR_BORDER};
                 background: {COLOR_BG};
             }}
+            QTabWidget::pane {{
+                border: 1px solid {COLOR_BORDER};
+                border-radius: 6px;
+                top: -1px;
+            }}
+            QTabBar::tab {{
+                background: {COLOR_BG};
+                color: {COLOR_TEXT_DIM};
+                border: 1px solid {COLOR_BORDER};
+                border-bottom: none;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                padding: 8px 24px;
+                margin-right: 4px;
+                font-weight: bold;
+            }}
+            QTabBar::tab:selected {{
+                background: {COLOR_SURFACE};
+                color: {COLOR_TEXT};
+                border-bottom: 2px solid {COLOR_ACCENT};
+            }}
+            QTabBar::tab:!selected:hover {{
+                color: {COLOR_TEXT};
+            }}
             QTextEdit {{
                 background: {COLOR_SURFACE};
                 border: 1px solid {COLOR_BORDER};
@@ -338,10 +365,87 @@ class MainWindow(QMainWindow):
 
     # ── UI 조립 ──────────────────────────────────────────────
     def _build_ui(self) -> None:
-        # 설정·제어·즉시실행·로그를 모두 세로로 쌓으므로 작은 화면에서도 잘리지 않게 스크롤에 담는다
-        content = QWidget()
-        root = QVBoxLayout(content)
-        root.setContentsMargins(20, 16, 20, 16)
+        # 설정과 운영 정보를 탭으로 나눈다 — 한 화면에 다 쌓으면 스크롤이 길어져
+        # 지금 무슨 일이 벌어지는지 한눈에 들어오지 않는다.
+        central = QWidget()
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(20, 12, 20, 12)
+        outer.setSpacing(10)
+
+        # 엔진 제어와 청산 해제 경고는 탭 밖에 고정한다 — 어느 탭을 보고 있든 엔진이
+        # 도는지, 손절이 꺼져 있는지는 항상 보여야 한다.
+        outer.addWidget(self._build_control_box())
+        outer.addWidget(self._build_exit_flag_hint())
+
+        # 설정 탭을 먼저 만든다 — 운영 탭의 보유 종목 표가 만들어지면서 한 번 갱신되는데,
+        # 그 갱신이 설정 쪽 위젯(총 매수가능 금액)을 건드린다. 보여주는 순서는 그 반대다.
+        settings_page = self._build_settings_page()
+        operation_page = self._build_operation_page()
+
+        tabs = QTabWidget()
+        tabs.addTab(_in_scroll(operation_page), "운영")
+        tabs.addTab(_in_scroll(settings_page), "설정")
+        outer.addWidget(tabs, 1)
+
+        self.setCentralWidget(central)
+
+        self._statusbar = QStatusBar()
+        self.setStatusBar(self._statusbar)
+        self._statusbar.showMessage("준비")
+
+    def _build_control_box(self) -> QGroupBox:
+        """엔진 제어 — 상태등과 시작/정지를 한 줄에 담아 탭 위에 고정한다."""
+        ctrl_box = QGroupBox("엔진 제어")
+        ctrl_layout = QHBoxLayout(ctrl_box)
+        ctrl_layout.setSpacing(10)
+
+        status_lbl = QLabel("상태")
+        status_lbl.setStyleSheet(f"color: {COLOR_TEXT_DIM};")
+        self._status_dot = QLabel("●  정지")
+        self._status_dot.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-weight: bold;")
+        ctrl_layout.addWidget(status_lbl)
+        ctrl_layout.addWidget(self._status_dot)
+        ctrl_layout.addStretch()
+
+        self._btn_start = QPushButton("▶  시작")
+        self._btn_start.setStyleSheet(
+            f"background: {COLOR_ACCENT}; color: white; border: none;"
+        )
+        self._btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_start.clicked.connect(self._start_engine)
+
+        self._btn_stop = QPushButton("■  정지")
+        self._btn_stop.setEnabled(False)
+        self._btn_stop.setStyleSheet(
+            f"background: {COLOR_SURFACE}; color: {COLOR_TEXT_DIM}; border: 1px solid {COLOR_BORDER};"
+        )
+        self._btn_stop.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_stop.clicked.connect(self._stop_engine)
+
+        ctrl_layout.addWidget(self._btn_start)
+        ctrl_layout.addWidget(self._btn_stop)
+        return ctrl_box
+
+    def _build_exit_flag_hint(self) -> QLabel:
+        """청산 경로가 해제됐을 때 뜨는 경고 — 탭 밖 고정 자리에 둔다.
+
+        종전에는 '리스크 관리' 그룹 안에 있었는데, 설정이 탭으로 들어가면서 운영 탭을
+        보는 동안에는 손절이 꺼진 것을 알 수 없게 된다. 이 화면에서 가장 위험한 오해다.
+        """
+        self._exit_flag_hint = QLabel()
+        self._exit_flag_hint.setWordWrap(True)
+        self._exit_flag_hint.setStyleSheet(
+            f"color: {COLOR_WARNING}; font-size: 12px; font-weight: bold;"
+            f" border: 1px solid {COLOR_WARNING}; border-radius: 4px; padding: 6px 10px;"
+        )
+        self._exit_flag_hint.setVisible(False)
+        return self._exit_flag_hint
+
+    def _build_settings_page(self) -> QWidget:
+        """설정 탭 — '설정 저장'을 눌러야 반영되는 값들만 모은다."""
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setContentsMargins(4, 12, 4, 12)
         root.setSpacing(12)
 
         # 계좌/API 설정
@@ -511,14 +615,6 @@ class MainWindow(QMainWindow):
         )
         risk_form.addRow("AI 호출 주기", self._ai_exit_interval)
 
-        # 해제된 라인이 있으면 그 사실을 입력란 바로 아래에 띄운다 — 체크박스만으로는
-        # 눈에 잘 띄지 않는데, 손절이 꺼진 줄 모르는 것이 이 화면에서 가장 위험한 오해다
-        self._exit_flag_hint = QLabel()
-        self._exit_flag_hint.setWordWrap(True)
-        self._exit_flag_hint.setStyleSheet(f"color: {COLOR_WARNING}; font-size: 11px;")
-        self._exit_flag_hint.setVisible(False)
-        risk_form.addRow(self._exit_flag_hint)
-
         # 종목별 판정이 아니라는 점을 입력란 바로 아래에서 알려야 한다 — 한 종목이 크게
         # 무너져도 다른 종목이 상쇄하면 매도가 나가지 않는다 (PRD 5.5-B, 확정 2026-08-10)
         exit_hint = QLabel(
@@ -586,42 +682,15 @@ class MainWindow(QMainWindow):
         self._btn_save.clicked.connect(lambda: self._save_settings(show_popup=True))
         root.addWidget(self._btn_save)
 
-        root.addWidget(_separator())
+        root.addStretch()
+        return page
 
-        # 엔진 제어
-        ctrl_box = QGroupBox("엔진 제어")
-        ctrl_layout = QVBoxLayout(ctrl_box)
-
-        status_row = QHBoxLayout()
-        status_lbl = QLabel("상태")
-        status_lbl.setStyleSheet(f"color: {COLOR_TEXT_DIM};")
-        self._status_dot = QLabel("●  정지")
-        self._status_dot.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-weight: bold;")
-        status_row.addWidget(status_lbl)
-        status_row.addWidget(self._status_dot)
-        status_row.addStretch()
-        ctrl_layout.addLayout(status_row)
-
-        btn_row = QHBoxLayout()
-        self._btn_start = QPushButton("▶  시작")
-        self._btn_start.setStyleSheet(
-            f"background: {COLOR_ACCENT}; color: white; border: none;"
-        )
-        self._btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_start.clicked.connect(self._start_engine)
-
-        self._btn_stop = QPushButton("■  정지")
-        self._btn_stop.setEnabled(False)
-        self._btn_stop.setStyleSheet(
-            f"background: {COLOR_SURFACE}; color: {COLOR_TEXT_DIM}; border: 1px solid {COLOR_BORDER};"
-        )
-        self._btn_stop.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_stop.clicked.connect(self._stop_engine)
-
-        btn_row.addWidget(self._btn_start)
-        btn_row.addWidget(self._btn_stop)
-        ctrl_layout.addLayout(btn_row)
-        root.addWidget(ctrl_box)
+    def _build_operation_page(self) -> QWidget:
+        """운영 탭 — 지금 무슨 일이 벌어지고 있는지 보여주는 쪽."""
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setContentsMargins(4, 12, 4, 12)
+        root.setSpacing(12)
 
         # 즉시 실행 — 스케줄 시각을 기다리지 않고 하루 흐름의 각 단계를 바로 돌린다
         run_box = QGroupBox("즉시 실행 (시간 무시)")
@@ -676,16 +745,7 @@ class MainWindow(QMainWindow):
 
         # 사유가 길어 좌우로 나누지 않고 전체 폭을 쓴다 (매도 불가 건이 있을 때만 보인다)
         root.addWidget(self._build_unsellable_box())
-
-        scroll = QScrollArea()
-        scroll.setWidget(content)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.setCentralWidget(scroll)
-
-        self._statusbar = QStatusBar()
-        self.setStatusBar(self._statusbar)
-        self._statusbar.showMessage("준비")
+        return page
 
     # ── 로깅 연결 ────────────────────────────────────────────
     def _setup_logging(self) -> None:
