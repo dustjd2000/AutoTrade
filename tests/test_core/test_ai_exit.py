@@ -149,6 +149,7 @@ def make_runtime(
     buy_time=BUY_TIME,
     interval_minutes=DEFAULT_INTERVAL_MINUTES,
     decide_result=None,
+    disclosure_watch=None,
 ):
     engine = FakeEngine(
         holdings=holdings,
@@ -159,7 +160,12 @@ def make_runtime(
     )
     settings = SimpleNamespace(buy_time=buy_time, ai_exit_interval_minutes=interval_minutes)
     advisor = SpyAdvisor(result=decide_result)
-    runtime = SimpleNamespace(settings=settings, engine=engine, exit_advisor=advisor)
+    runtime = SimpleNamespace(
+        settings=settings,
+        engine=engine,
+        exit_advisor=advisor,
+        disclosure_watch=disclosure_watch,
+    )
     return runtime, engine, advisor
 
 

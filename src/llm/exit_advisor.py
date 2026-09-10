@@ -1,6 +1,6 @@
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 import anthropic
@@ -38,6 +38,10 @@ class HoldingView:
     net_return: float
     outlook: str
     reason: str
+    # 오늘 DART 공시 제목 (최신순). `new_headlines`는 그중 장중에 새로 뜬 것으로,
+    # 아침 추천 때는 없던 정보라 프롬프트에서 따로 표시한다 (PRD 5.5-B '장중 공시').
+    headlines: List[str] = field(default_factory=list)
+    new_headlines: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -49,6 +53,20 @@ class ExitDecision:
 def _pct(ratio: float) -> str:
     """0~1 스케일 비율을 부호 있는 퍼센트 문자열로 바꾼다 (0.004 → "+0.40%")."""
     return f"{ratio * 100:+.2f}%"
+
+
+def _headline_text(holding: HoldingView) -> str:
+    """보유 종목 한 줄에 붙일 공시 문자열 — 장중에 새로 뜬 것에 `[신규]`를 붙인다.
+
+    공시가 없는 것과 조회하지 못한 것을 구분하지 않는다 — 어느 쪽이든 AI가 쓸 정보가
+    없다는 점은 같고, "조회 실패"를 적으면 AI가 그것을 악재 신호로 읽을 여지가 생긴다.
+    """
+    if not holding.headlines:
+        return "없음"
+    new = set(holding.new_headlines)
+    return " / ".join(
+        f"[신규] {title}" if title in new else title for title in holding.headlines
+    )
 
 
 def build_exit_system_prompt() -> str:
@@ -82,6 +100,12 @@ def build_exit_system_prompt() -> str:
    진행되고 있는지를 궤적에서 읽으십시오.
 2. **아침 전망의 유효성** — 이 종목을 고를 때 본 시나리오(`outlook`/`reason`)가
    지금도 살아 있는지, 아니면 이미 깨졌는지를 판단하십시오.
+3. **장중 공시** — `[신규]`가 붙은 공시는 아침에 종목을 고를 때는 없던 정보입니다.
+   그 내용이 아침 시나리오를 무너뜨리는지(유상증자·전환사채 발행 같은 지분 희석,
+   횡령·배임, 실적 악화 등) 아니면 무관하거나 오히려 뒷받침하는지를 판단하십시오.
+   **공시가 떴다는 사실만으로 팔지 마십시오** — 대형주에는 정기보고서처럼 주가와
+   무관한 공시가 일상적으로 뜹니다. 다만 매도로 판단할 만한 악재 공시가 있다면 그것은
+   궤적보다 우선하는 근거입니다. 되돌림이 아직 오지 않았어도 팔 수 있습니다.
 
 ## reason 작성 지침
 `reason`에는 제공된 궤적의 **구체적 수치를 인용**하십시오. ("합산 순손익률이
@@ -125,6 +149,7 @@ def build_exit_user_prompt(
         )
         lines.append(f"  아침 근거: {h.reason}")
         lines.append(f"  아침 전망: {h.outlook}")
+        lines.append(f"  오늘 공시: {_headline_text(h)}")
 
     lines.append("\n지금 전량 매도할지 판단하세요.")
     return "\n".join(lines)

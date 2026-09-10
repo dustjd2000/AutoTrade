@@ -77,9 +77,16 @@ class DisclosureClient:
         self.api_key = api_key
 
     def fetch(
-        self, tickers: Iterable[str], today: Optional[date] = None
+        self,
+        tickers: Iterable[str],
+        today: Optional[date] = None,
+        since: Optional[date] = None,
     ) -> Dict[str, List[str]]:
         """종목코드 → 공시 제목 목록(최신순).
+
+        `since`는 조회 시작일이며 기본은 직전 영업일이다 — 아침 추천은 "전일 장 마감 이후"를
+        보려고 이틀을 받는다. 장중 감시(`DisclosureWatch`)는 당일만 필요해 `since=today`를
+        넘긴다. 범위를 좁히면 받아 넘길 페이지 수도 함께 줄어든다.
 
         배제 대상 공시도 걸러내지 않고 그대로 담아 돌려준다 — 판정은 `blocking_disclosure`가
         하고, 헤드라인을 몇 건만 싣는 것은 호출부가 정한다. 여기서 미리 잘라내면 4번째 공시가
@@ -96,7 +103,7 @@ class DisclosureClient:
         wanted = set(tickers)
         grouped: Dict[str, List[str]] = {}
         total = 0
-        for item in self._iter_disclosures(previous_business_day(today), today):
+        for item in self._iter_disclosures(since or previous_business_day(today), today):
             total += 1
             ticker = str(item.get("stock_code", "")).strip()
             title = str(item.get("report_nm", "")).strip()

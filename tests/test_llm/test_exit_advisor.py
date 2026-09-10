@@ -11,12 +11,14 @@ from src.llm.exit_advisor import (
 )
 
 
-def holding(ticker="005930", net_return=0.004):
+def holding(ticker="005930", net_return=0.004, headlines=None, new_headlines=None):
     return HoldingView(
         ticker=ticker, name="삼성전자", quantity=23, avg_price=35_850.0,
         current_price=36_100.0, net_return=net_return,
         outlook="오전 중 전일 고가 36,150원 돌파를 시도할 것으로 봅니다.",
         reason="이동평균 대비 -6.0%까지 밀린 상태",
+        headlines=list(headlines or []),
+        new_headlines=list(new_headlines or []),
     )
 
 
@@ -152,3 +154,30 @@ def test_decide_returns_none_when_response_text_is_malformed_json():
         )
     )
     assert advisor.decide([holding()], [], 0.004, 0.02, 0.005, 330, False) is None
+
+
+# ── 장중 공시 (PRD 5.5-B '장중 공시') ──────────────────────────
+def test_prompt_marks_intraday_disclosures_as_new():
+    """아침에 없던 공시는 `[신규]`로 구분해야 한다 — AI가 새 정보인지 알아야 한다."""
+    view = holding(
+        headlines=["유상증자 결정", "분기보고서"],
+        new_headlines=["유상증자 결정"],
+    )
+    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 0.02, 0.005, 330, False)
+
+    assert "오늘 공시: [신규] 유상증자 결정 / 분기보고서" in prompt
+
+
+def test_prompt_says_none_when_there_is_no_disclosure():
+    """조회 실패와 '공시 없음'을 구분하지 않는다 — 실패를 적으면 악재 신호로 읽힐 수 있다."""
+    prompt = build_exit_user_prompt([holding()], trace_points(), 0.004, 0.02, 0.005, 330, False)
+
+    assert "오늘 공시: 없음" in prompt
+
+
+def test_system_prompt_warns_against_selling_on_disclosure_alone():
+    """대형주에는 정기보고서가 일상적으로 뜬다 — 공시 존재만으로 팔면 안 된다."""
+    system = build_exit_system_prompt()
+
+    assert "[신규]" in system
+    assert "공시가 떴다는 사실만으로 팔지 마십시오" in system

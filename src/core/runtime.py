@@ -8,7 +8,7 @@ import inspect
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timedelta
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 from config.settings import Settings
 from src.api.account import AccountClient
@@ -34,6 +34,7 @@ from src.core.daily_workflow import DailyWorkflow
 from src.core.engine import TradingEngine
 from src.core.events import ExitReason
 from src.data.collector import DataCollector, LargeCapUniverse
+from src.core.disclosure_watch import DisclosureWatch
 from src.data.disclosure import DisclosureClient
 from src.llm.exit_advisor import ExitAdvisor, HoldingView
 from src.llm.recommender import LLMRecommender
@@ -93,6 +94,9 @@ AI_EXIT_START_DELAY_MINUTES = 15
 # 15:15 강제청산 직전에는 부르지 않는다 — 어차피 곧 팔린다.
 AI_EXIT_END_TIME = dt_time(15, 0)
 AI_EXIT_POLL_SECONDS = 30.0
+# 장중 공시 조회 주기 (PRD 5.5-B '장중 공시'). DART는 시각을 주지 않아 목록을 다시 받아
+# 비교하는 수밖에 없다 — 악재 공시가 뜬 뒤 판단이 돌기까지의 최대 지연이 이 값이다.
+DISCLOSURE_POLL_SECONDS = 300.0
 
 
 def _submit(runtime: "Runtime", action: str) -> Callable[[], None]:
@@ -142,6 +146,8 @@ class Runtime:
     workflow: DailyWorkflow
     # 보유 종목을 지금 전량 정리할지 판단하는 LLM 모듈 (PRD 5.5-B 'AI 매도 판단').
     exit_advisor: ExitAdvisor
+    # 장중에 새로 뜬 공시를 가려내 위 판단에 넘긴다 (PRD 5.5-B '장중 공시').
+    disclosure_watch: Optional[DisclosureWatch] = None
     # 스케줄 잡과 UI 버튼이 공유하는 실행 통로. build_runtime이 Runtime을 만든 뒤에
     # 채운다 — ActionRunner가 runtime을 참조해야 해서 순서를 뒤집을 수 없다.
     runner: Optional[ActionRunner] = None
@@ -172,6 +178,8 @@ def build_runtime(settings: Settings) -> Runtime:
     )
     trade_store = TradeStore()
     email = EmailNotifier(settings)
+    # 아침 수집과 장중 감시가 같은 클라이언트를 쓴다 — 상태가 없고 API 키만 들고 있다
+    disclosures = DisclosureClient(settings.dart_api_key)
 
     engine = TradingEngine(
         auth=auth,
@@ -191,7 +199,7 @@ def build_runtime(settings: Settings) -> Runtime:
         collector=DataCollector(
             market_data,
             LargeCapUniverse(KiwoomClient(settings, auth)),
-            DisclosureClient(settings.dart_api_key),
+            disclosures,
             gap_down_tolerance_ratio=settings.gap_down_tolerance_ratio,
             notify=engine.notify,
         ),
@@ -222,6 +230,7 @@ def build_runtime(settings: Settings) -> Runtime:
         ws_client=ws_client,
         workflow=workflow,
         exit_advisor=exit_advisor,
+        disclosure_watch=DisclosureWatch(disclosures),
     )
     runtime.runner = ActionRunner(runtime)
 
@@ -483,6 +492,12 @@ def ai_exit_due(
     아래를 전부 만족해야 True다. 하나라도 아니면 그 사이클은 건너뛴다.
     거래일 → `engine.ai_exit_enabled` → 호출 창 안 → 마지막 호출로부터 주기 경과 →
     보유 종목 있음 → 하루 호출 상한 안.
+
+    **장중에 악재 공시가 새로 뜬 경우(`DisclosureWatch.urgent_pending`)만 예외로**, 주기와
+    하루 상한 두 가지를 건너뛴다 (PRD 5.5-B '장중 공시'). 주기만 건너뛰면 그날의 마지막
+    정규 사이클이 상한에 걸려 대신 빠지고, 그쪽이 장 마감에 더 가까워 손해가 크다. 트리거
+    자체가 하루 `MAX_URGENT_TRIGGERS_PER_DAY`회로 묶여 있어 비용은 그만큼만 늘어난다.
+    거래일·설정·호출 창·보유 종목은 예외 없이 그대로 본다.
     """
     now = now or datetime.now()
     if not is_trading_day(now):
@@ -495,7 +510,9 @@ def ai_exit_due(
     if not ai_exit_window_open(runtime.settings, now):
         return False
 
-    if last_called_at is not None:
+    urgent = runtime.disclosure_watch is not None and runtime.disclosure_watch.urgent_pending
+
+    if last_called_at is not None and not urgent:
         elapsed_minutes = (now - last_called_at).total_seconds() / 60
         if elapsed_minutes < runtime.settings.ai_exit_interval_minutes:
             return False
@@ -503,7 +520,7 @@ def ai_exit_due(
     if not engine.open_tickers:
         return False
 
-    if engine.ai_exit_calls >= ai_exit_call_limit(runtime.settings):
+    if not urgent and engine.ai_exit_calls >= ai_exit_call_limit(runtime.settings):
         return False
 
     return True
@@ -518,6 +535,11 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
     """
     now = now or datetime.now()
     engine = runtime.engine
+    # 이번 사이클이 공시 때문에 앞당겨진 것이든 아니든 여기서 트리거를 비운다 — 남겨 두면
+    # 다음 주기까지 계속 주기를 건너뛰게 된다.
+    if runtime.disclosure_watch is not None:
+        runtime.disclosure_watch.take_urgent()
+
     holdings = engine.exit_candidates()
     if not holdings:
         return
@@ -542,6 +564,7 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
             if engine.trade_store is not None
             else {}
         )
+        watch = runtime.disclosure_watch
         holdings_view = []
         for p in holdings:
             rec = recommendations.get(p.ticker)
@@ -556,6 +579,11 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
                     # 이월 포지션처럼 그날 추천이 아닌 종목은 아침 근거가 없다 — 빈 문자열로 둔다.
                     outlook=rec.outlook if rec is not None else "",
                     reason=rec.reason if rec is not None else "",
+                    # 공시 감시가 아직 한 번도 돌지 않았으면 빈 목록이다 — 없는 것과 같이 다룬다
+                    headlines=watch.headlines_for(p.ticker) if watch is not None else [],
+                    new_headlines=(
+                        watch.new_headlines_for(p.ticker) if watch is not None else []
+                    ),
                 )
             )
 
@@ -644,6 +672,60 @@ async def watch_ai_exit(runtime: Runtime, poll_seconds: float = AI_EXIT_POLL_SEC
         last_called_at = await maybe_run_ai_exit_cycle(runtime, datetime.now(), last_called_at)
 
 
+async def maybe_poll_disclosures(
+    runtime: Runtime, now: Optional[datetime] = None
+) -> List[Tuple[str, str]]:
+    """조건이 맞으면 장중 공시를 한 번 조회한다 (PRD 5.5-B '장중 공시').
+
+    보유 종목이 있는 거래일 장중에만 돈다 — 팔 것이 없으면 볼 이유가 없고, 장이 닫힌
+    시간에는 새 공시가 판단으로 이어질 곳이 없다. 새로 뜬 악재 공시를 돌려준다.
+
+    조회는 blocking HTTP라 별도 스레드로 넘긴다 — 이벤트 루프에서 그대로 기다리면 그동안
+    WebSocket PING 응답이 끊기고 실시간 손절 콜백도 멈춘다 (AI 매도 판단과 같은 이유).
+    """
+    now = now or datetime.now()
+    watch = runtime.disclosure_watch
+    if watch is None:
+        return []
+    if not is_market_hours(now):
+        return []
+
+    tickers = runtime.engine.open_tickers
+    if not tickers:
+        return []
+
+    try:
+        triggered = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: watch.poll(tickers, now)
+        )
+    except Exception:
+        # 공시를 못 봤다고 매매를 멈추지는 않는다 — 아침 수집(_apply_disclosures)과 같은 규약이다
+        logger.exception("장중 공시 조회에 실패했습니다. 이번 주기는 건너뜁니다.")
+        return []
+
+    for ticker, title in triggered:
+        logger.warning("장중 악재 공시: %s | %s — AI 매도 판단을 앞당깁니다.", ticker, title)
+        runtime.engine.notify(
+            f"[경고] 보유 종목 {ticker}에 장중 공시가 떴습니다: {title}. "
+            "AI 매도 판단을 호출 주기와 무관하게 곧바로 한 번 돌립니다."
+        )
+    return triggered
+
+
+async def watch_disclosures(
+    runtime: Runtime, poll_seconds: float = DISCLOSURE_POLL_SECONDS
+) -> None:
+    """장중 공시를 주기적으로 받아 캐시에 쌓는다 (PRD 5.5-B '장중 공시').
+
+    AI 매도 판단 사이클 안에서 조회하지 않고 따로 떼어 둔 이유는 두 가지다. 판단 주기가
+    60분이면 그만큼 반영이 늦고, 판단 경로에 HTTP 호출을 하나 더 넣게 된다. 여기서 미리
+    받아 두면 판단은 캐시만 읽는다.
+    """
+    while True:
+        await asyncio.sleep(poll_seconds)
+        await maybe_poll_disclosures(runtime, datetime.now())
+
+
 def adopt_carried_over_positions(runtime: Runtime) -> List[str]:
     """시작 시점에 남아 있는 보유 종목을 오늘의 매도 대상으로 편입한다.
 
@@ -687,6 +769,7 @@ async def run(runtime: Runtime) -> None:
     buy_result_watch = asyncio.create_task(watch_buy_result(runtime))
     cash_watch = asyncio.create_task(watch_cash_refresh(runtime))
     ai_exit_watch = asyncio.create_task(watch_ai_exit(runtime))
+    disclosure_watch = asyncio.create_task(watch_disclosures(runtime))
     try:
         await asyncio.gather(runtime.ws_client.connect(), runtime.scheduler.run())
     except asyncio.CancelledError:
@@ -698,6 +781,7 @@ async def run(runtime: Runtime) -> None:
         buy_result_watch.cancel()
         cash_watch.cancel()
         ai_exit_watch.cancel()
+        disclosure_watch.cancel()
         request_stop(runtime)
         await runtime.ws_client.disconnect()
         logger.info("매매 런타임이 종료되었습니다.")
