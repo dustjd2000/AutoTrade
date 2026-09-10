@@ -82,7 +82,8 @@ class FakeEngine:
         )
         self.trade_store = SimpleNamespace(recommendations_for=lambda day: [])
         self.exit_candidates_calls = []  # force 인자 기록
-        self.executed = []  # [(holdings, reason), ...] — _execute_portfolio_exit 호출 기록
+        self.executed = []  # [(holdings, reason, note), ...] — _execute_portfolio_exit 호출 기록
+        self.ai_exit_results = []  # [(at, sell, reason, ok), ...] — note_ai_exit_result 호출 기록
 
     @property
     def ai_exit_calls(self):
@@ -98,8 +99,11 @@ class FakeEngine:
     def position_net_return(self, position):
         return 0.0  # 값 자체는 이 파일의 관심사가 아니다 (조립·배선만 확인한다)
 
-    def _execute_portfolio_exit(self, holdings, reason):
-        self.executed.append((holdings, reason))
+    def _execute_portfolio_exit(self, holdings, reason, note=None):
+        self.executed.append((holdings, reason, note))
+
+    def note_ai_exit_result(self, at, sell, reason, ok=True):
+        self.ai_exit_results.append((at, sell, reason, ok))
 
 
 class SpyAdvisor:
@@ -251,9 +255,11 @@ def test_sell_true_executes_portfolio_exit_with_ai_judgment_reason():
     asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
 
     assert len(engine.executed) == 1
-    sold_holdings, reason = engine.executed[0]
+    sold_holdings, reason, note = engine.executed[0]
     assert reason is ExitReason.AI_JUDGMENT
     assert [p.ticker for p in sold_holdings] == [h.ticker]
+    # 근거를 함께 넘겨야 청산 로그와 알림 메일에 남는다 — 사유 코드만으로는 왜 팔았는지 모른다
+    assert note == "추세 이탈"
 
 
 def test_sell_false_does_not_execute_anything():
@@ -311,6 +317,54 @@ def test_sell_true_does_not_execute_if_holdings_were_cleared_meanwhile():
     assert engine.executed == []
 
 
+# ── 판단 결과 기록 (UI 보유 종목 표가 읽는 값) ─────────────────
+def test_hold_decision_is_recorded_for_the_ui():
+    runtime, engine, advisor = make_runtime(
+        holdings=[holding()], decide_result=ExitDecision(sell=False, reason="합산 +0.9%에서 +0.4%")
+    )
+    asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
+
+    assert engine.ai_exit_results == [(IN_WINDOW, False, "합산 +0.9%에서 +0.4%", True)]
+
+
+def test_sell_decision_is_recorded_for_the_ui():
+    runtime, engine, advisor = make_runtime(
+        holdings=[holding()], decide_result=ExitDecision(sell=True, reason="추세 이탈")
+    )
+    asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
+
+    assert engine.ai_exit_results == [(IN_WINDOW, True, "추세 이탈", True)]
+
+
+def test_failed_decision_is_recorded_as_not_ok():
+    """호출 실패를 '보유 유지'와 같은 모양으로 남기면 안 된다.
+
+    AI가 유일한 이익 실현 수단이라, 하루 종일 실패하고 있는 것과 팔지 않기로 판단한 것은
+    화면에서 구분돼야 한다.
+    """
+    runtime, engine, advisor = make_runtime(holdings=[holding()], decide_result=None)
+    asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
+
+    [(at, sell, reason, ok)] = engine.ai_exit_results
+    assert (at, sell, ok) == (IN_WINDOW, False, False)
+    # 사유는 판정 문구("판단 실패")와 겹치지 않게 무엇이 실패했는지를 적는다
+    assert "LLM 호출 실패" in reason
+    assert engine.executed == []
+
+
+def test_sell_decision_is_recorded_even_when_holdings_vanished():
+    """LLM 응답을 기다리는 사이 손절이 먼저 정리했어도 판단 자체는 남긴다."""
+    runtime, engine, advisor = make_runtime(
+        holdings=[holding()],
+        fresh_holdings=[],
+        decide_result=ExitDecision(sell=True, reason="추세 이탈"),
+    )
+    asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
+
+    assert engine.ai_exit_results == [(IN_WINDOW, True, "추세 이탈", True)]
+    assert engine.executed == []
+
+
 # ── 스레드 분리 (LLM 호출은 별도 스레드, 매도 주문은 루프 스레드) ──────
 def test_decide_runs_off_the_loop_thread():
     loop_thread = threading.get_ident()
@@ -333,9 +387,9 @@ def test_execute_portfolio_exit_runs_on_the_loop_thread():
 
     original = engine._execute_portfolio_exit
 
-    def spy(holdings, reason):
+    def spy(holdings, reason, note=None):
         threads.append(threading.get_ident())
-        original(holdings, reason)
+        original(holdings, reason, note)
 
     engine._execute_portfolio_exit = spy
 
@@ -376,6 +430,42 @@ def test_reset_for_new_day_clears_exit_trace_and_call_counter():
 
     assert engine.exit_trace.count == 0
     assert engine.ai_exit_calls == 0
+
+
+def test_reset_for_new_day_clears_last_ai_exit_decision():
+    """어제 판단이 오늘 표에 남아 있으면 오늘 이미 한 번 돈 것처럼 읽힌다."""
+    engine, _, _ = make_engine(two_holdings())
+    engine.note_ai_exit_result(datetime.now(), sell=False, reason="관망")
+    assert engine.ai_exit_snapshot() is not None
+
+    engine.reset_for_new_day()
+
+    assert engine.ai_exit_snapshot() is None
+
+
+def test_ai_exit_snapshot_verdict_labels():
+    engine, _, _ = make_engine(two_holdings())
+    at = datetime.now()
+
+    engine.note_ai_exit_result(at, sell=False, reason="관망")
+    assert engine.ai_exit_snapshot().verdict == "보유 유지"
+
+    engine.note_ai_exit_result(at, sell=True, reason="추세 이탈")
+    assert engine.ai_exit_snapshot().verdict == "전량 매도"
+
+    engine.note_ai_exit_result(at, sell=False, reason="판단 실패", ok=False)
+    assert engine.ai_exit_snapshot().verdict == "판단 실패"
+
+
+def test_portfolio_exit_note_reaches_the_alert():
+    """사유 코드(ai_judgment)만으로는 왜 팔았는지 되짚을 수 없다 — 근거가 알림에 실려야 한다."""
+    engine, orders, alerts = make_engine(two_holdings())
+    holdings = list(engine._get_positions().values())
+
+    engine._execute_portfolio_exit(holdings, ExitReason.AI_JUDGMENT, note="추세 이탈")
+
+    assert len(orders) == 2
+    assert any("추세 이탈" in str(message) for message in alerts)
 
 
 # ── engine.py에 새로 추가한 메서드 (실물 TradingEngine으로 직접 확인) ────

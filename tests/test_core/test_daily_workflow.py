@@ -1780,7 +1780,8 @@ def test_tune_prompt_applies_change_and_sends_mail(tmp_path):
     workflow.tune_prompt(day)
 
     assert workflow.prompt_store.load_sections()["outlook"] == LONG_OUTLOOK
-    assert workflow.prompt_store.load_version() == "v12"
+    # 버전은 그날 검증 결과를 보고 고쳤다는 뜻으로 **거래일** 날짜를 그대로 쓴다
+    assert workflow.prompt_store.load_version() == "20260908"
     assert "추천 프롬프트 수정" in workflow.email.sent[-1][0]
 
 

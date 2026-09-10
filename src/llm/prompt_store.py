@@ -1,8 +1,9 @@
 import logging
 import os
 import re
+from datetime import date
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 from src.llm.recommender import (
     DEFAULT_PROMPT_SECTIONS,
@@ -20,19 +21,28 @@ VERSION_FILE = "version"
 HISTORY_DIR = "history"
 WHY_FILE = "why.md"
 
-_VERSION_PATTERN = re.compile(r"^v(\d+)$")
+# 버전은 고친 날짜(`20260909`)이고, 같은 날 두 번째부터 꼬리표가 붙는다(`20260909-2`).
+_VERSION_PATTERN = re.compile(r"^(\d{8})(?:-(\d+))?$")
 
 
-def next_version(current: str) -> str:
-    """`v11` → `v12`. 형식이 깨졌으면 코드 상수에서 이어 간다.
+def next_version(current: str, today: Optional[date] = None) -> str:
+    """새 버전은 **고친 날짜**(YYYYMMDD)다. 같은 날 다시 고치면 `-2`, `-3`으로 이어 간다.
 
-    버전 파일이 손상돼도 수정을 멈추지 않되, 손상된 값을 그대로 이어받지도 않는다.
+    꼬리표가 필요한 이유는 이력이 `history/<version>/`에 버전 이름으로 쌓이기 때문이다 —
+    같은 날 두 번 고치면서 이름이 겹치면 앞서 남긴 이력을 덮어써 되돌릴 것이 사라진다.
+
+    옛 표기(`v11`)나 깨진 값이 들어와도 멈추지 않는다 — 오늘 날짜가 언제나 올바른 답이라,
+    종전처럼 손상된 값을 이어받을지 따질 일이 없다.
     """
+    stamp = (today or date.today()).strftime("%Y%m%d")
     match = _VERSION_PATTERN.match((current or "").strip())
     if match is None:
-        logger.warning("프롬프트 버전 형식이 올바르지 않습니다 (%r) — 코드 상수에서 이어 갑니다.", current)
-        match = _VERSION_PATTERN.match(PROMPT_TEMPLATE_VERSION)
-    return f"v{int(match.group(1)) + 1}"
+        if (current or "").strip():
+            logger.info("프롬프트 버전 표기 %r을 날짜 표기로 바꿉니다.", current)
+        return stamp
+    if match.group(1) != stamp:
+        return stamp
+    return f"{stamp}-{int(match.group(2) or 1) + 1}"
 
 
 class PromptStore:
@@ -54,8 +64,11 @@ class PromptStore:
     def load_version(self) -> str:
         return self._read(self.prompt_dir / VERSION_FILE) or PROMPT_TEMPLATE_VERSION
 
-    def save(self, new_sections: Dict[str, str], reason: str) -> str:
+    def save(self, new_sections: Dict[str, str], reason: str, today: Optional[date] = None) -> str:
         """고친 절만 받아 전체를 다시 쓰고, 이전 버전을 이력으로 남긴다. 새 버전을 돌려준다.
+
+        `today`는 새 버전의 날짜다 — 호출측이 그날의 검증 결과를 보고 고치는 것이므로,
+        달력 날짜가 아니라 **판단 근거가 된 거래일**을 그대로 버전으로 삼는다.
 
         이력을 **먼저** 남긴다 — 쓰기가 중간에 실패해도 되돌릴 것이 남는다.
         고치지 않은 절도 함께 쓴다: 파일 다섯 개가 항상 그 버전의 완전한 사본이어야
@@ -79,7 +92,7 @@ class PromptStore:
         for key in PROMPT_SECTION_ORDER:
             self._write_atomic(self.prompt_dir / f"{key}.md", merged[key])
 
-        new_version = next_version(current_version)
+        new_version = next_version(current_version, today)
         self._write_atomic(self.prompt_dir / VERSION_FILE, new_version)
         logger.info("추천 프롬프트를 수정했습니다: %s → %s", current_version, new_version)
         return new_version

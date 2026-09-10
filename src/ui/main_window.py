@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from html import escape
 from pathlib import Path
 from typing import Optional
 
@@ -48,6 +49,8 @@ from src.core.daily_workflow import (
     BUY_PENDING_STATUS,
 )
 from src.core.runtime import ACTION_LABELS, CONFIRM_ACTIONS, MANUAL_ACTIONS, ORDER_ACTIONS
+from src.llm.prompt_store import PromptStore
+from src.llm.recommender import PROMPT_TEMPLATE_VERSION
 from src.ui.engine_thread import EngineThread
 from src.ui.env_store import load_env, save_env
 
@@ -78,6 +81,9 @@ HOLDINGS_CHECK_COLUMN = 0
 # 매도하지 못한 종목 — 보유 목록에서 제외된 건은 보유 종목 표에 나타나지 않으므로
 # 사유와 함께 따로 보여준다 (engine.UnsellableView)
 UNSELLABLE_COLUMNS = ("종목", "사유", "시각")
+# AI 매도 판단 블록 높이. 근거는 수치를 인용하도록 시켜서 서너 줄까지 가는데, 표 아래
+# 자리는 그만큼 넓지 않다 — 실행 로그 창처럼 넘치는 만큼 스크롤시킨다.
+AI_EXIT_VIEW_HEIGHT = 64
 # 오늘 매수할 종목과 진행 상태 (DailyWorkflow.buy_plan_snapshot) — 로그만으로는 매수
 # 절차가 어디까지 갔는지 알 수 없어 따로 보여준다 (PRD 5.10 "매수 예정 표")
 # 0번 열은 '선택 삭제' 대상 체크 — 보유 종목 표와 같은 방식이다 (HOLDINGS_CHECK_COLUMN 참고).
@@ -198,6 +204,8 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(880, 640)
         self.resize(1020, 900)
         self._engine_thread: Optional[EngineThread] = None
+        # 추천 프롬프트 버전을 읽기만 한다 — 엔진이 꺼져 있어도 파일은 그대로 있다
+        self._prompt_store = PromptStore()
         # 실행 중인 엔진이 읽어간 설정값 — 저장 시 실제로 바뀐 게 있는지 비교해,
         # 값이 그대로면 굳이 재시작하지 않는다 (재시작 사이에는 익절/손절 감시가 멈춘다).
         self._applied_env: Optional[dict] = None
@@ -209,6 +217,8 @@ class MainWindow(QMainWindow):
         # 배타 처리로 반대쪽 체크박스를 끄는 동안 True — 그때 딸려오는 toggled는 무시한다
         # (안 그러면 같은 상태로 엔진 반영과 로그가 두 번 나간다)
         self._syncing_exit_flags = False
+        # 마지막으로 그린 AI 매도 판단 — 같은 값이면 다시 그리지 않는다 (_refresh_ai_exit)
+        self._ai_exit_shown = None
         # '선택 매도' 대상으로 체크된 종목. 표는 2초마다 다시 그려지므로 상태를 여기 둔다
         self._checked_tickers: set[str] = set()
         # '매수 예정' 표에서 '선택 삭제' 대상으로 체크된 종목 (같은 이유로 여기 둔다)
@@ -419,7 +429,14 @@ class MainWindow(QMainWindow):
         self._target_stock_count.setCurrentIndex(self._target_stock_count.findData(3))
         self._target_stock_count.currentIndexChanged.connect(self._refresh_investable_amount)
 
+        # 15:35 자동 수정 에이전트가 고친 날짜가 그대로 버전이다 (PRD 5.13) — 오늘 추천이
+        # 어느 프롬프트로 나갔는지 화면에서 바로 확인할 수 있어야 한다
+        self._prompt_version = QLabel()
+        self._prompt_version.setWordWrap(True)
+
         fund_form.addRow("매매 시각", self._schedule_times)
+        fund_form.addRow("추천 프롬프트", self._prompt_version)
+        self._refresh_prompt_version()
         fund_form.addRow("예수금 투입 비율 (%)", self._investable_ratio)
         fund_form.addRow("추천 종목 수 (개)", self._target_stock_count)
 
@@ -719,6 +736,16 @@ class MainWindow(QMainWindow):
         self._holdings_view = table
         layout.addWidget(table)
 
+        # AI 매도 판단은 종목별이 아니라 보유 목록 전체에 한 번이라(PRD 5.5-B) 표의 열이
+        # 아니라 표 아래다 — 열로 넣으면 모든 행이 같은 값으로 반복된다. 라벨이 아니라
+        # 실행 로그와 같은 읽기 전용 QTextEdit인 것은 근거가 길어 한 줄에 담기지 않기
+        # 때문이다. 전역 QTextEdit 스타일(표면색·테두리·고정폭 글꼴)을 그대로 받는다.
+        self._ai_exit_view = QTextEdit()
+        self._ai_exit_view.setReadOnly(True)
+        self._ai_exit_view.setFixedHeight(AI_EXIT_VIEW_HEIGHT)
+        self._ai_exit_view.setVisible(False)
+        layout.addWidget(self._ai_exit_view)
+
         # 대상을 표에서 골라야 하므로 버튼도 ①~⑤ 그리드가 아니라 표 바로 아래에 둔다
         layout.addWidget(self._make_action_button("sell_selected"))
 
@@ -726,6 +753,9 @@ class MainWindow(QMainWindow):
         self._holdings_timer = QTimer(self)
         self._holdings_timer.setInterval(HOLDINGS_REFRESH_MS)
         self._holdings_timer.timeout.connect(self._refresh_holdings)
+        # 프롬프트 버전도 같은 타이머로 다시 읽는다 — 15:35 자동 수정이 장중에 값을 바꾸는데,
+        # 그것 하나 때문에 타이머를 따로 두기에는 파일 한 줄 읽기라 값이 싸다
+        self._holdings_timer.timeout.connect(self._refresh_prompt_version)
 
         self._refresh_holdings()
         return box
@@ -829,6 +859,7 @@ class MainWindow(QMainWindow):
             "익절/손절 판정은 여기에 시장가 슬리피지까지 더 빼고 하므로, 표시값이\n"
             "익절선에 닿아도 실제 매도는 조금 뒤에 일어납니다."
         )
+        self._refresh_ai_exit()
         # 체크된 종목이 늘거나 줄면 '선택 매도' 버튼의 활성 여부가 달라진다
         self._set_actions_enabled(self._actions_enabled)
         # 표를 만드는 도중에 불리는 첫 호출에서는 아래 두 표가 아직 없다
@@ -837,6 +868,44 @@ class MainWindow(QMainWindow):
         if self._unsellable_box is not None:
             self._refresh_unsellable()
         self._refresh_investable_amount()
+
+    def _refresh_ai_exit(self) -> None:
+        """마지막 AI 매도 판단을 표 아래 블록에 그대로 보여준다 (PRD 5.5-B).
+
+        로그는 흘러가 버려서 "마지막 판단이 언제, 뭐였는지"를 되짚을 수가 없다. 아직 한 번도
+        돌지 않았으면 블록 자체를 숨긴다 — 매수 시각 +15분 전에는 비어 있는 것이 정상이다
+        (`_investable_amount`와 같은 방식).
+
+        호출 실패도 '판단 실패'로 드러낸다. AI가 유일한 이익 실현 수단이라, 하루 종일
+        실패하고 있는 것과 팔지 않기로 판단한 것은 화면에서 구분돼야 한다.
+
+        **바뀐 판단에만 다시 그린다.** 2초 타이머가 매번 `setHtml`을 부르면 근거를 읽으려고
+        내려둔 스크롤이 그때마다 맨 위로 튄다.
+        """
+        last = self._engine_thread.ai_exit_snapshot() if self._engine_thread else None
+        self._ai_exit_view.setVisible(last is not None)
+        if last is None or last == self._ai_exit_shown:
+            return
+
+        self._ai_exit_shown = last
+        color = COLOR_DANGER if not last.ok else COLOR_WARNING if last.sell else COLOR_TEXT_DIM
+        reason = last.reason or "근거 없음"
+        # LLM이 쓴 문장이라 <, & 가 섞이면 HTML 태그로 먹힌다
+        self._ai_exit_view.setHtml(
+            f'<span style="color:{color};">{last.at:%H:%M} AI 판단 · {last.verdict}</span>'
+            f'<span style="color:{COLOR_TEXT};"> — {escape(reason)}</span>'
+        )
+
+    def _refresh_prompt_version(self) -> None:
+        """추천 프롬프트 버전(= 고쳐진 날짜)을 라벨에 쓴다.
+
+        `data/prompt/version` 한 줄을 읽을 뿐이라 API 호출도 엔진도 필요 없다. 코드
+        기본값과 같으면 아직 한 번도 자동 수정되지 않은 것이므로 그 사실을 함께 적는다 —
+        고치지 않는 날이 정상이라(PRD 5.13) 값만으로는 "돌긴 도는 건가"를 알 수 없다.
+        """
+        version = self._prompt_store.load_version()
+        note = " (코드 기본값 — 자동 수정 이력 없음)" if version == PROMPT_TEMPLATE_VERSION else ""
+        self._prompt_version.setText(f"{version}{note}")
 
     def _refresh_investable_amount(self) -> None:
         """예수금 캐시 × 투입 비율로 총 매수가능 금액과 종목당 배정액을 표시한다 (API 호출 없음).

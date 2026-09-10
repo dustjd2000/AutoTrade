@@ -11,7 +11,11 @@ from src.data.collector import DailyStockData
 logger = logging.getLogger(__name__)
 
 # 프롬프트 템플릿 버전 — 추천 근거를 나중에 추적할 수 있도록 코드로 버전 관리한다 (PRD 5.5-B).
-PROMPT_TEMPLATE_VERSION = "v11"
+# 표기는 **고쳐진 날짜**(YYYYMMDD)다 (확정 2026-09-09). 자동 수정 에이전트가 붙은 뒤로 버전은
+# 하루 단위로 갈리므로, 일련번호(v11)보다 언제 것인지가 바로 보이는 편이 낫다 — UI도 이 값을
+# 그대로 보여준다. 이 상수는 코드의 DEFAULT_PROMPT_SECTIONS가 마지막으로 바뀐 날이다
+# (종전 v11 = 2026-09-03, 오늘 전망 추가).
+PROMPT_TEMPLATE_VERSION = "20260903"
 
 # 목표 매수가가 전일 종가에서 이 비율을 벗어나면 경계로 자른다 (PRD 5.5-B '주문 방식').
 # LLM이 자릿수를 틀리는 것을 막는 가드레일이며, 정상 범위의 판단에는 개입하지 않는다.

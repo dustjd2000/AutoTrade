@@ -1277,7 +1277,7 @@ class DailyWorkflow:
             return
 
         try:
-            new_version = self.prompt_store.save(sections, result.reason)
+            new_version = self.prompt_store.save(sections, result.reason, today)
         except OSError:
             logger.exception("프롬프트 파일 쓰기에 실패했습니다 — 그대로 둡니다.")
             return

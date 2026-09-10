@@ -85,6 +85,13 @@ class EngineThread(QThread):
             return []
         return runtime.workflow.buy_plan_snapshot()
 
+    def ai_exit_snapshot(self):
+        """마지막 AI 매도 판단 (UI 표 갱신용 — API 호출 없이 캐시값만 읽는다)."""
+        runtime = self._runtime
+        if runtime is None:
+            return None
+        return runtime.engine.ai_exit_snapshot()
+
     def portfolio_return(self) -> Optional[float]:
         """익절/손절 판정에 쓰이는 합산 순손익률 (UI 표시용 — API 호출 없이 캐시값만 읽는다)."""
         runtime = self._runtime

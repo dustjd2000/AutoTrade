@@ -77,6 +77,28 @@ class PositionView:
         return (self.current_price - self.avg_price) / self.avg_price * 100
 
 
+@dataclass(frozen=True)
+class AIExitView:
+    """마지막 AI 매도 판단 사본 (UI 표시용 — PRD 5.5-B).
+
+    로그는 흘러가 버려서 "마지막 판단이 언제, 뭐였는지"를 되짚을 수가 없다. 호출 실패도
+    `ok=False`로 남긴다 — AI가 유일한 이익 실현 수단이라, 하루 종일 실패하고 있는 것과
+    "팔지 않기로 판단했다"는 것을 화면에서 구분할 수 있어야 한다.
+    """
+
+    at: datetime
+    sell: bool
+    reason: str
+    ok: bool = True
+
+    @property
+    def verdict(self) -> str:
+        """표에 한 단어로 적을 판단 결과."""
+        if not self.ok:
+            return "판단 실패"
+        return "전량 매도" if self.sell else "보유 유지"
+
+
 def _position_summary(position: Position) -> str:
     """종목 표기와 평단 대비 손익을 로그에서 바로 읽을 수 있게 요약한다."""
     pct = (
@@ -152,6 +174,8 @@ class TradingEngine:
         # 오늘 AI 매도 판단을 부른 횟수 (하루 호출 상한 판정용). 엔진을 재시작해도 유지되고
         # 08:40 reset_for_new_day에서만 비워진다 — 재시작으로 상한을 우회하지 못하게 한다.
         self._ai_exit_calls = 0
+        # 마지막 AI 매도 판단 결과 (UI 표시용). 주문에는 쓰이지 않는 사후 기록이다.
+        self._last_ai_exit: Optional[AIExitView] = None
 
     @property
     def open_tickers(self) -> List[str]:
@@ -179,6 +203,17 @@ class TradingEngine:
     def note_ai_exit_call(self) -> None:
         """AI 매도 판단을 한 번 불렀음을 기록한다 (하루 호출 상한 카운터, 08:40에만 초기화)."""
         self._ai_exit_calls += 1
+
+    def note_ai_exit_result(self, at: datetime, sell: bool, reason: str, ok: bool = True) -> None:
+        """마지막 AI 매도 판단 결과를 남긴다 (UI 표시용 — 매도 여부는 호출측이 이미 처리했다)."""
+        self._last_ai_exit = AIExitView(at=at, sell=sell, reason=reason, ok=ok)
+
+    def ai_exit_snapshot(self) -> Optional[AIExitView]:
+        """마지막 AI 매도 판단 (UI 스레드에서 호출 — API를 호출하지 않는다).
+
+        frozen dataclass라 사본을 따로 만들지 않아도 다른 스레드가 읽어서 안전하다.
+        """
+        return self._last_ai_exit
 
     def cash_snapshot(self) -> Optional[float]:
         """마지막으로 조회한 예수금 (UI 스레드에서 호출 — API를 호출하지 않는다).
@@ -477,6 +512,8 @@ class TradingEngine:
         # 순손익 궤적은 하루치라 다음 날로 넘기지 않는다 — 어제 궤적으로 오늘을 판단하면 안 된다.
         self.exit_trace.clear()
         self._ai_exit_calls = 0
+        # 어제 판단이 오늘 표에 남아 있으면 오늘 이미 한 번 돈 것처럼 읽힌다
+        self._last_ai_exit = None
         logger.info("새 거래일 준비 — 일일 손실 한도와 매매 중지 상태를 초기화했습니다.")
 
     def start(self) -> None:
@@ -685,21 +722,28 @@ class TradingEngine:
 
         return False
 
-    def _execute_portfolio_exit(self, holdings: List[Position], reason: ExitReason) -> None:
+    def _execute_portfolio_exit(
+        self, holdings: List[Position], reason: ExitReason, note: Optional[str] = None
+    ) -> None:
         """합산 손익이 손절 라인에 닿아 보유 종목을 전량 청산한다.
 
         종목별 청산(`_execute_exit`)을 그대로 돌려 매도가능수량·주문 거부·상장폐지 제외
         처리를 공유하고, **성공 알림만 한 통으로 묶는다** — 종목마다 보내면 보유 3종목에
         메일 3통이 나간다(종목명이 달라 같은 날 중복 억제에도 걸리지 않는다).
         주문이 거부된 종목은 `_execute_exit`이 종목별로 알린다.
+
+        `note`는 사유 코드만으로는 알 수 없는 판단 근거다 — AI 매도 판단이 쓴 문장이
+        여기로 들어온다 (`runtime.run_ai_exit_cycle`). 손절·강제청산처럼 사유 코드가 곧
+        설명인 경로는 넘기지 않는다.
         """
         ret = self.risk_manager.portfolio_return(holdings)
         percent = f"{ret * 100:+.2f}%" if ret is not None else "-"
         logger.info(
-            "합산 청산 조건 도달 (%s): 합산 순손익 %s, 대상 %d종목",
+            "합산 청산 조건 도달 (%s): 합산 순손익 %s, 대상 %d종목%s",
             reason.value,
             percent,
             len(holdings),
+            f" — {note}" if note else "",
         )
 
         sold = [
@@ -708,10 +752,13 @@ class TradingEngine:
             if self._execute_exit(position, reason)
         ]
         if sold:
-            self.notify(
+            body = (
                 f"{reason.value} 전량 청산 (합산 순손익 {percent}) — {len(sold)}종목\n"
                 + "\n".join(sold)
             )
+            if note:
+                body += f"\n\n판단 근거: {note}"
+            self.notify(body)
 
     def _execute_exit(
         self, position: Position, reason: ExitReason, exit_reason: Optional[str] = None

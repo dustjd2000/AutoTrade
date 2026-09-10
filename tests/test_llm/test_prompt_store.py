@@ -1,4 +1,7 @@
+from datetime import date
 from pathlib import Path
+
+import pytest
 
 from src.llm.prompt_store import PromptStore, next_version
 from src.llm.recommender import (
@@ -8,14 +11,24 @@ from src.llm.recommender import (
 )
 
 
-def test_next_version_increments():
-    assert next_version("v11") == "v12"
-    assert next_version("v9") == "v10"
+def test_next_version_is_the_day_it_was_changed():
+    """버전은 일련번호가 아니라 고친 날짜다 (확정 2026-09-09) — UI도 이 값을 그대로 보여준다."""
+    assert next_version("20260903", date(2026, 9, 10)) == "20260910"
 
 
-def test_next_version_falls_back_on_garbage():
-    """버전 파일이 깨져도 멈추지 않는다 — 코드 상수에서 이어 간다."""
-    assert next_version("쓰레기") == next_version(PROMPT_TEMPLATE_VERSION)
+@pytest.mark.parametrize(
+    "current, expected",
+    [("20260910", "20260910-2"), ("20260910-2", "20260910-3")],
+)
+def test_next_version_tags_a_second_change_on_the_same_day(current, expected):
+    """이력이 `history/<version>/`에 쌓이므로 같은 날 이름이 겹치면 앞 이력을 덮어쓴다."""
+    assert next_version(current, date(2026, 9, 10)) == expected
+
+
+@pytest.mark.parametrize("current", ["v11", "쓰레기", "", "2026-09-10"])
+def test_next_version_ignores_old_or_broken_values(current):
+    """옛 표기나 깨진 값이 들어와도 멈추지 않는다 — 오늘 날짜가 언제나 올바른 답이다."""
+    assert next_version(current, date(2026, 9, 10)) == "20260910"
 
 
 def test_load_sections_without_files_returns_defaults(tmp_path):
@@ -30,9 +43,9 @@ def test_load_version_without_file_returns_code_constant(tmp_path):
 
 def test_save_writes_files_archives_history_and_bumps_version(tmp_path):
     store = PromptStore(tmp_path / "prompt")
-    new_version = store.save({"outlook": "## 오늘 전망 작성 지침\n새 내용"}, reason="시험")
+    new_version = store.save({"outlook": "## 오늘 전망 작성 지침\n새 내용"}, reason="시험", today=date(2026, 9, 10))
 
-    assert new_version == next_version(PROMPT_TEMPLATE_VERSION)
+    assert new_version == "20260910"
     assert store.load_version() == new_version
     sections = store.load_sections()
     assert sections["outlook"] == "## 오늘 전망 작성 지침\n새 내용"
