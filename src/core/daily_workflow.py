@@ -411,6 +411,12 @@ class DailyWorkflow:
 
         체결 확인과 결과 메일은 여기서 하지 않는다 — 지정가 주문은 접수 직후에 체결 여부를
         알 수 없어, 10:10 `cancel_unfilled_buys`가 미체결분을 정리한 뒤에 알린다.
+
+        **종목당 배정액은 상한이지만 1주 값이 그것을 넘는 고가주에는 예외를 둔다**
+        (확정 2026-09-14, PRD 5.5-B "고가주 1주 예외"). 종전에는 `배정액 // 주문가`가 0이면
+        그대로 건너뛰어, 1주 값이 배정액보다 비싼 종목은 예수금이 남아 있어도 영영 못 샀다 —
+        2026-09-14 삼양식품(1주 1,307,000원 > 배정 1,039,625원)이 그렇게 빠졌고 그날 목표
+        매도가까지 갔다. 이제 **총 투입 한도**가 남아 있으면 1주는 산다.
         """
         cash = self.account.get_cash()
         plans = self.strategy.build_buy_plans(cash)
@@ -418,11 +424,18 @@ class DailyWorkflow:
             logger.warning("매수 계획이 없습니다 (추천 종목 없음). 주문가능금액 %s원", f"{cash:,.0f}")
             return
 
+        # 오늘 쓰기로 한 총액. 배정액을 넘겨 사는 고가주가 있어도 이 선은 넘지 않는다.
+        # 추천이 목표 종목 수보다 적은 날은 그만큼 작아진다 — 모자란 몫을 현금으로 남기는
+        # 규칙(build_buy_plans)을 여기서 되살리지 않기 위해서다.
+        budget = sum(plan.amount for plan in plans)
+        spent = 0.0
+
         logger.info(
-            "매수 시작 — 주문가능금액 %s원, 대상 %d종목, 종목당 배정 %s원",
+            "매수 시작 — 주문가능금액 %s원, 대상 %d종목, 종목당 배정 %s원 (총 투입 한도 %s원)",
             f"{cash:,.0f}",
             len(plans),
             f"{plans[0].amount:,.0f}",
+            f"{budget:,.0f}",
         )
 
         positions = self.account.get_positions()
@@ -461,13 +474,28 @@ class DailyWorkflow:
                         self.buy_price_tolerance_ratio * 100,
                     )
 
-                quantity = int(plan.amount // price)
-                if quantity <= 0:
-                    logger.warning(
-                        "매수 건너뜀: %s — 주문가 1주 %s원이 종목당 배정액 %s원을 초과합니다.",
+                # 배정액과 '남은 총 한도' 중 작은 쪽으로 산다 — 앞 종목이 배정액을 넘겨
+                # 샀으면 뒤 종목이 쓸 수 있는 돈이 그만큼 줄어 있다
+                remaining = budget - spent
+                quantity = int(min(plan.amount, remaining) // price)
+                if quantity <= 0 and price <= remaining:
+                    # 1주 값이 배정액보다 비싼 고가주 — 총 한도 안이면 1주는 산다
+                    # (확정 2026-09-14, PRD 5.5-B "고가주 1주 예외")
+                    quantity = 1
+                    logger.info(
+                        "배정액 초과 매수: %s 주문가 1주 %s원 > 배정액 %s원 — "
+                        "남은 총 한도 %s원 안이라 1주만 삽니다.",
                         label,
                         f"{price:,.0f}",
                         f"{plan.amount:,.0f}",
+                        f"{remaining:,.0f}",
+                    )
+                if quantity <= 0:
+                    logger.warning(
+                        "매수 건너뜀: %s — 주문가 1주 %s원이 남은 총 투입 한도 %s원을 초과합니다.",
+                        label,
+                        f"{price:,.0f}",
+                        f"{remaining:,.0f}",
                     )
                     # 별도 알림 메일은 보내지 않는다 — 매수 실행 결과 메일의
                     # '매수하지 못한 종목'에 사유까지 그대로 실린다
@@ -478,7 +506,7 @@ class DailyWorkflow:
                             name=plan.name,
                             outcome=BuyOutcome.SKIPPED,
                             reference_price=price,
-                            note=f"주문가 1주 {price:,.0f}원이 배정액 {plan.amount:,.0f}원을 초과",
+                            note=f"주문가 1주 {price:,.0f}원이 남은 총 투입 한도 {remaining:,.0f}원을 초과",
                         )
                     )
                     continue
@@ -541,6 +569,9 @@ class DailyWorkflow:
                     continue
 
                 ordered.append(plan.ticker)
+                # 접수한 만큼만 한도에서 깎는다 — 건너뛴·거부된 종목의 배정액은 남은 종목에
+                # 재분배되지 않고 현금으로 남는다 (build_buy_plans와 같은 규약)
+                spent += price * quantity
                 records.append(
                     BuyRecord(
                         ticker=plan.ticker,

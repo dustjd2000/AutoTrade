@@ -920,6 +920,84 @@ def test_buy_skipped_when_one_share_exceeds_allocation():
     assert not any("건너뜀" in n for n in notifications)
 
 
+# ── 고가주 1주 예외 (PRD 5.5-B, 확정 2026-09-14) ───────────────
+def make_today_workflow():
+    """2026-09-14 실제 상황 — 예수금 4,158,499원, 2종목, 한쪽이 1주 130만원대 고가주.
+
+    종목당 배정 1,039,625원 / 총 투입 한도 2,079,250원.
+    """
+    recs = [
+        StockRecommendation(
+            ticker="278470", name="에이피알", target_price=371_000,
+            recommend_price=373_000, reason="a",
+        ),
+        StockRecommendation(
+            ticker="003230", name="삼양식품", target_price=1_282_000,
+            recommend_price=1_288_000, reason="b",
+        ),
+    ]
+    workflow, email, order_client, notifications, strategy = make_workflow(
+        recommendations=recs, cash=4_158_499
+    )
+    strategy.target_stock_count = 2
+    strategy.set_recommendations(recs)
+    prices = {"278470": 374_500.0, "003230": 1_286_000.0}
+    workflow.engine.market_data = SimpleNamespace(
+        get_current_price=lambda t: MarketData(ticker=t, price=prices[t], volume=100)
+    )
+    return workflow, order_client, strategy
+
+
+def test_expensive_stock_buys_one_share_within_the_total_budget():
+    """1주 값이 배정액을 넘어도 총 투입 한도 안이면 산다.
+
+    종전에는 이 종목이 통째로 빠졌다 — 2026-09-14 삼양식품이 그렇게 빠졌고, 그날
+    목표 매도가(1,318,000원)까지 갔다.
+    """
+    workflow, order_client, _ = make_today_workflow()
+
+    workflow.execute_buys()
+
+    ordered = {o.ticker: o for o in order_client.orders}
+    assert set(ordered) == {"278470", "003230"}, "고가주가 빠졌다"
+    assert ordered["278470"].quantity == 2  # 1,039,625 // 378,000
+    assert ordered["003230"].quantity == 1  # 배정액 초과지만 총 한도 안
+
+
+def test_total_spend_stays_inside_the_budget():
+    """배정액을 넘겨 사도 그날 쓰기로 한 총액은 넘지 않는다."""
+    workflow, order_client, _ = make_today_workflow()
+
+    workflow.execute_buys()
+
+    spent = sum(o.price * o.quantity for o in order_client.orders)
+    assert spent <= 4_158_499 * 0.5, f"총 투입 한도를 넘겼다: {spent:,.0f}원"
+
+
+def test_expensive_stock_is_skipped_when_the_budget_is_gone():
+    """앞 종목이 한도를 다 쓰면 뒤의 고가주는 종전대로 건너뛴다."""
+    workflow, order_client, strategy = make_today_workflow()
+    # 배정액을 1종목분으로 줄여 총 한도를 에이피알이 거의 다 쓰게 만든다
+    strategy.target_stock_count = 4
+
+    workflow.execute_buys()
+
+    assert [o.ticker for o in order_client.orders] == ["278470"]
+    (plan,) = [p for p in workflow.buy_plan_snapshot() if p.ticker == "003230"]
+    assert plan.status == "건너뜀"
+
+
+def test_skipped_allocation_is_not_redistributed():
+    """건너뛴 몫은 남은 종목으로 넘어가지 않는다 — 현금으로 남긴다 (PRD 10절 2026-07-27)."""
+    workflow, order_client, strategy = make_today_workflow()
+    strategy.target_stock_count = 4  # 배정 519,812원 — 삼양식품은 한도 밖
+
+    workflow.execute_buys()
+
+    (order,) = order_client.orders
+    assert order.quantity == 1, "건너뛴 배정액이 에이피알 수량으로 넘어갔다"
+
+
 def test_pending_order_missing_from_fills_is_still_cancelled():
     """체결내역 TR이 대기 주문을 싣지 않으면 1순위 경로로는 못 잡는다 — 접수 기록으로 보완한다."""
     recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a")]
