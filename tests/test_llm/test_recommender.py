@@ -4,14 +4,18 @@ from types import SimpleNamespace
 import pytest
 
 from src.data.collector import DailyStockData
+from datetime import datetime, time
+
 from src.llm.recommender import (
     DEFAULT_PROMPT_SECTIONS,
     LLMRecommender,
+    MIN_BUDGET_SECONDS,
     PROMPT_SECTION_ORDER,
     RECOMMENDATION_SCHEMA,
     StockRecommendation,
     apply_price_guardrail,
     attach_recommend_price,
+    budget_seconds,
     build_system_prompt,
     build_user_prompt,
     drop_other_setups,
@@ -192,13 +196,35 @@ def test_attach_recommend_price_leaves_zero_for_unknown_tickers():
 
 
 # ── recommend()의 방어 로직 ──────────────────────────────────
-def _fake_recommender(response) -> LLMRecommender:
+class _FakeStream:
+    """`with client.messages.stream(...) as stream:` 경로를 흉내낸다."""
+
+    def __init__(self, response, events=()):
+        self._response = response
+        self._events = events
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def __iter__(self):
+        return iter(self._events)
+
+    def get_final_message(self):
+        return self._response
+
+
+def _fake_recommender(response, events=()) -> LLMRecommender:
     """API 호출만 가짜로 바꾼 recommender."""
     recommender = LLMRecommender.__new__(LLMRecommender)
-    recommender.settings = SimpleNamespace(llm_model="claude-sonnet-5", target_stock_count=3)
+    recommender.settings = SimpleNamespace(
+        llm_model="claude-sonnet-5", target_stock_count=3, buy_time=time(9, 8)
+    )
     recommender._client = SimpleNamespace(
         with_options=lambda **kw: SimpleNamespace(
-            messages=SimpleNamespace(create=lambda **kwargs: response)
+            messages=SimpleNamespace(stream=lambda **kwargs: _FakeStream(response, events))
         )
     )
     # recommend()이 프롬프트 절과 버전을 저장소에서 읽으므로, 파일이 없는 상태를 흉내낸 가짜를 준다
@@ -666,3 +692,28 @@ def test_recommender_uses_prompt_store_sections(tmp_path):
 
     assert "파일에서 온 내용입니다" in recommender._system_prompt()
     assert recommender.prompt_version == store.load_version()
+
+
+# ── 추천 호출의 시간 예산 ──────────────────────────────────
+def test_budget_is_time_left_until_buy():
+    """예산 = 매수 시각까지 남은 시간."""
+    assert budget_seconds(time(9, 8), datetime(2026, 9, 16, 9, 2, 35)) == pytest.approx(325.0)
+
+
+def test_budget_floors_at_minimum_after_buy_time():
+    """매수 시각이 지난 뒤 수동 실행(버튼 ①)해도 최소 예산은 준다."""
+    assert budget_seconds(time(9, 8), datetime(2026, 9, 16, 10, 0)) == MIN_BUDGET_SECONDS
+
+
+def test_budget_floors_at_minimum_when_time_left_is_tiny():
+    """매수 시각 직전이라 남은 시간이 예산에 못 미쳐도 최소값까지는 기다린다."""
+    assert budget_seconds(time(9, 8), datetime(2026, 9, 16, 9, 7)) == MIN_BUDGET_SECONDS
+
+
+def test_recommend_gives_up_when_budget_exceeded(monkeypatch):
+    """예산을 넘기면 스트림을 끊고 None — 매수 시각 뒤에 온 추천은 그날 쓸 수 없다."""
+    clock = iter([0.0, 10_000.0])
+    monkeypatch.setattr("src.llm.recommender.monotonic", lambda: next(clock))
+    response = _response("end_turn", [SimpleNamespace(type="text", text="[]")])
+
+    assert _fake_recommender(response, events=[object()]).recommend([]) is None

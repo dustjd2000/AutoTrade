@@ -1,6 +1,8 @@
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, time as dt_time
+from time import monotonic
 from typing import Dict, List, Optional
 
 import anthropic
@@ -37,6 +39,19 @@ TICK_SIZES = (
 # 부족하면 사고에 예산을 다 쓰고 본문이 비거나 잘려 파싱이 실패한다.
 # (비스트리밍 요청 권장 상한 — 이보다 크게 잡으면 HTTP 타임아웃 위험이 있다)
 MAX_TOKENS = 16000
+
+# 추천 호출에 줄 최소 시간 — 매수 시각이 지난 뒤 수동 실행(버튼 ①)해도 이만큼은 기다린다.
+MIN_BUDGET_SECONDS = 120.0
+
+
+def budget_seconds(buy_time: dt_time, now: datetime) -> float:
+    """매수 시각까지 남은 시간 = 추천 호출에 쓸 수 있는 시간 예산.
+
+    매수 시각을 넘겨 나온 추천은 그날 매수에 쓸 수 없다 — 2026-09-16에 120초 타임아웃
+    재시도가 6분을 쓰는 동안 09:05 매수가 통째로 밀려 0건으로 끝났다.
+    """
+    buy_at = datetime.combine(now.date(), buy_time)
+    return max((buy_at - now).total_seconds(), MIN_BUDGET_SECONDS)
 
 # 추천 유형 — LLM이 각 종목을 어떤 셋업으로 보고 골랐는지 스스로 밝히게 한다 (PRD 5.5-B '추천 유형 제한').
 # 프롬프트로 유형을 제한하는 것만으로는 소프트 제약이라, 이 값으로 코드가 한 번 더 잘라낸다.
@@ -509,20 +524,31 @@ class LLMRecommender:
         )
 
     def recommend(
-        self, daily_data: List[DailyStockData], timeout_seconds: float = 120.0
+        self, daily_data: List[DailyStockData], timeout_seconds: Optional[float] = None
     ) -> Optional[List[StockRecommendation]]:
         """LLM 호출 및 응답 파싱. 실패/타임아웃/형식 오류 시 None을 반환하고 해당일 매수는 스킵된다."""
+        if timeout_seconds is None:
+            timeout_seconds = budget_seconds(self.settings.buy_time, datetime.now())
         target_count = self.settings.target_stock_count
         user_prompt = build_user_prompt(daily_data, target_count)
         # 어떤 입력으로 그 추천이 나왔는지 남긴다 — 추천이 타당했는지 되짚을 유일한 근거다
         logger.info(
-            "LLM 요청 (prompt_version=%s, 후보 %d종목):\n%s",
+            "LLM 요청 (prompt_version=%s, 후보 %d종목, 예산 %.0f초):\n%s",
             self.prompt_version,
             len(daily_data),
+            timeout_seconds,
             user_prompt,
         )
+        deadline = monotonic() + timeout_seconds
         try:
-            response = self._client.with_options(timeout=timeout_seconds).messages.create(
+            # 비스트리밍은 응답이 다 만들어질 때까지 첫 바이트가 오지 않아, 사고(thinking)가
+            # 길어진 날 read timeout에 그대로 걸렸다 (2026-09-15·16 추천 실패 — 소요 시간이
+            # 19초에서 338초까지 요동친다). 스트리밍은 블록이 오는 대로 받으므로 생성이
+            # 길어져도 연결이 끊기지 않고, 총 시간은 아래 deadline이 직접 지킨다.
+            # max_retries=0 — 재시도가 예산을 배로 늘려 매수 시각을 넘기는 쪽이 더 나쁘다.
+            with self._client.with_options(
+                timeout=timeout_seconds, max_retries=0
+            ).messages.stream(
                 model=self.settings.llm_model,
                 max_tokens=MAX_TOKENS,
                 system=self._system_prompt(),
@@ -531,7 +557,14 @@ class LLMRecommender:
                 output_config={
                     "format": {"type": "json_schema", "schema": RECOMMENDATION_SCHEMA}
                 },
-            )
+            ) as stream:
+                for _ in stream:
+                    # 매수 시각을 넘겨 나온 추천은 그날 쓸 데가 없다 — 예산을 직접 지킨다
+                    if monotonic() > deadline:
+                        raise TimeoutError(
+                            f"추천 시간 예산 {timeout_seconds:.0f}초를 넘겨 중단합니다."
+                        )
+                response = stream.get_final_message()
         except Exception:
             logger.exception("LLM 호출이 실패했거나 타임아웃되었습니다.")
             return None
