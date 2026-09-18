@@ -200,3 +200,27 @@ def test_daily_reset_clears_the_tracker():
     engine.reset_for_new_day()
 
     assert engine.exit_drawdown.retracement("005930", 0.0) is None
+
+
+def test_small_peak_does_not_trigger():
+    """고점이 임계값에 못 미치면 반납으로 보지 않는다 — 매수가 근처의 출렁임이다.
+
+    2026-09-17 278470이 고점 +0.05%에서 -1.06%로 간 것을 '고점 이익의 100% 반납'으로
+    잡아 AI를 불렀다. 0.05%는 이익이 아니라 노이즈다.
+    """
+    tracker = DrawdownTracker(threshold_ratio=0.01)
+
+    tracker.update({"278470": 0.0005})          # 고점 +0.05%
+    crossed = tracker.update({"278470": -0.0106})  # 1.11%p 반납
+
+    assert crossed == []
+
+
+def test_peak_at_threshold_still_triggers():
+    """고점이 임계값 이상이면 기존대로 발동한다."""
+    tracker = DrawdownTracker(threshold_ratio=0.01)
+
+    tracker.update({"062040": 0.0217})          # 고점 +2.17%
+    crossed = tracker.update({"062040": 0.0117})  # 1.00%p 반납
+
+    assert crossed == ["062040"]

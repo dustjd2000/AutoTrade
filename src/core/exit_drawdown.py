@@ -48,6 +48,10 @@ class DrawdownTracker:
     합산 반납폭은 언제나 최대 종목의 반납폭 이하다. 합산으로 걸면 한 종목이 크게 밀려도
     다른 종목이 희석해 발동하지 않는다 — 2026-09-10이 정확히 그랬다(합산 반납 1.51%p,
     종목별 최대 3.05%p). 발동만 종목별이고, 팔 때는 그대로 보유 목록 전체다.
+
+    **고점이 임계값 이상일 때만 감시한다** (2026-09-18). 임계값이 절대값(%p)이라 고점이
+    작으면 "1%p 반납"이 사실상 "매수가 대비 -1%"가 되어, 이익을 지키는 감시가 아니라
+    그냥 하락 감지가 된다 — 관측된 발동 11건 중 8건이 고점 +1% 미만이었다.
     """
 
     def __init__(self, threshold_ratio: float):
@@ -82,7 +86,9 @@ class DrawdownTracker:
                 continue
             if self.threshold_ratio <= 0 or not self._armed.get(ticker, False):
                 continue
-            if peak <= 0:
+            # 고점이 임계값에 못 미치면 반납을 논할 이익이 아니다 — 고점 +0.05%에서 1%p
+            # 내려간 것은 매수가 근처의 출렁임이지 이익 반납이 아니다 (2026-09-18).
+            if peak < self.threshold_ratio:
                 continue
             if peak - current >= self.threshold_ratio:
                 self._armed[ticker] = False
