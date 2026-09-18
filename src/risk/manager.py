@@ -3,7 +3,7 @@ import math
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from src.api.account import BalanceSnapshot, Position
-from src.core.events import ExitReason, OrderRequest, OrderResult, OrderSide, OrderStatus
+from src.core.events import OrderRequest, OrderResult, OrderSide, OrderStatus
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +32,9 @@ def exit_trigger_price(
 ) -> float:
     """순손익률이 target_ratio에 도달하는 현재가 — net_return의 역함수 (표시용).
 
-    합산으로 판정하는 손절에서는 이 가격에 닿아도 그 종목만 팔리지는 않는다 (PRD 5.5-B)
-    — "이 종목 혼자였다면 조건에 닿는 가격"이라는 참고값이다.
+    손절이 종목별로 판정하므로(PRD 5.5-B, 확정 2026-09-18) target_ratio에 손절 비율을 넣으면
+    이 가격이 그 종목의 실제 매도 지점이다. 2026-08-10~2026-09-18에는 합산으로 판정해 이 가격에
+    닿아도 그 종목만 팔리지는 않았다 — "이 종목 혼자였다면 조건에 닿는 가격"이라는 참고값이었다.
     """
     return (
         avg_price
@@ -76,8 +77,8 @@ def portfolio_net_return(
 
 
 # --- 표시 전용 (슬리피지 없음) --------------------------------------------
-# 위의 net_return / portfolio_net_return은 익절/손절 **판정**용이라 슬리피지를 포함한다.
-# 아래 함수들은 화면에 찍는 값이라 슬리피지를 빼고, 대신 키움의 절사 규칙을 재현한다.
+# 위의 net_return(종목별 손절 판정용)과 portfolio_net_return(합산 표시·AI 프롬프트용)은
+# 슬리피지를 포함한다. 아래 함수들은 화면에 찍는 값이라 슬리피지를 빼고, 대신 키움의 절사 규칙을 재현한다.
 # 슬리피지 0.1%는 세율 오차(0.02%p)의 5배라, 표시값에 넣으면 가장 근거가 약한 가정이
 # 화면 숫자를 지배한다 (설계 문서 2026-09-01).
 

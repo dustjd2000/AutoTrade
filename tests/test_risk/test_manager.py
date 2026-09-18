@@ -61,7 +61,7 @@ def test_portfolio_exit_triggers_stop_loss_at_threshold():
     assert manager.check_position_exits([held("005930", 10, 1000.0, 980.0)]) == ["005930"]
 
 
-def test_portfolio_exit_returns_none_within_band():
+def test_portfolio_exit_returns_empty_above_stop_loss():
     manager = make_manager(stop_loss_ratio=0.02)
 
     assert manager.check_position_exits([held("005930", 10, 1000.0, 1002.0)]) == []

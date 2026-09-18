@@ -32,7 +32,7 @@ def make_engine(positions, sell_status=OrderStatus.FILLED, error_message="거부
         risk_manager=SimpleNamespace(
             initialize=lambda s: None,
             record_order=lambda *a, **kw: None,
-            check_portfolio_exit=lambda ps: None,
+            check_position_exits=lambda ps: [],
             commission_rate=0.0,
             tax_rate=0.0,
             position_net_pnl=lambda p: (p.current_price - p.avg_price) * p.quantity,

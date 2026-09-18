@@ -70,8 +70,8 @@ class DrawdownTracker:
     ) -> List[str]:
         """고점을 갱신하고, 이번 틱에 임계치를 새로 넘긴 종목코드를 돌려준다.
 
-        **고점이 이익일 때만 발동한다** — 종일 마이너스인 종목이 더 밀리는 것은 '반납'이
-        아니라 그냥 손실이고, 그 구간은 손절이 맡는다.
+        **고점이 임계값 이상일 때만 발동한다** (2026-09-18) — 종일 마이너스인 종목이 더
+        밀리는 것은 '반납'이 아니라 그냥 손실이고, 그 구간은 손절이 맡는다.
         """
         if portfolio is not None:
             if self._portfolio_peak is None or portfolio > self._portfolio_peak:

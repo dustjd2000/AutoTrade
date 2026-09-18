@@ -30,7 +30,7 @@ from src.notification.alert import AlertNotifier
 logger = logging.getLogger(__name__)
 
 # 실시간 체결 틱마다 잔고 REST(kt00005)를 호출하면 키움 유량 제한(429)에 걸린다.
-# 그 예외는 콜백 전체를 중단시키므로 익절/손절 판정이 통째로 건너뛰어지는데,
+# 그 예외는 콜백 전체를 중단시키므로 손절 판정이 통째로 건너뛰어지는데,
 # _last_market_data_at은 이미 갱신된 뒤라 시세 끊김 감시에도 걸리지 않는다 —
 # 즉 아무 경고 없이 손절만 멈춘다. TTL 캐시로 호출을 '틱당 1회'에서 'TTL당 1회'로 줄인다.
 POSITION_CACHE_TTL_SECONDS = 5.0
@@ -139,7 +139,7 @@ class TradingEngine:
         self.notifier = notifier
         self.emergency_action = emergency_action
         self._running = False
-        # 익절/손절 감시가 필요한 종목과 마지막 시세 수신 시각.
+        # 청산 감시가 필요한 종목과 마지막 시세 수신 시각.
         # 감시는 이 프로그램이 떠 있는 동안에만 동작하므로(키움 REST는 스탑오더 미지원),
         # 창 종료 경고와 시세 끊김 감지에 이 두 값을 쓴다.
         self._open_tickers: Set[str] = set()
@@ -255,14 +255,14 @@ class TradingEngine:
         self._open_tickers.add(ticker)
         # 다시 보유가 생겼으므로 '전량 매도 완료'가 아니다 — 리포트 발송 근거를 되돌린다
         self._closed_out_at = None
-        # 새 포지션의 평단가는 잔고를 다시 읽어야 알 수 있다 — 익절/손절 판정의 기준값이다
+        # 새 포지션의 평단가는 잔고를 다시 읽어야 알 수 있다 — 손절 판정의 기준값이다
         self._invalidate_positions()
 
     def _get_positions(self, force: bool = False) -> Dict[str, Position]:
         """보유 포지션 스냅샷. 틱마다 REST를 때리지 않도록 짧은 TTL로 캐시한다.
 
         갱신에 실패해도 직전 스냅샷으로 감시를 이어간다 — 평단가는 보유 중 변하지 않으므로
-        낡은 스냅샷으로도 익절/손절 판정은 유효하고, 한 번의 429로 감시가 멈추는 편이 더 위험하다.
+        낡은 스냅샷으로도 손절 판정은 유효하고, 한 번의 429로 감시가 멈추는 편이 더 위험하다.
         `force=True`는 청산처럼 최신 잔고가 반드시 필요한 경우로, 실패를 그대로 올린다.
         """
         now = datetime.now()
@@ -452,11 +452,13 @@ class TradingEngine:
         return views
 
     def portfolio_return_snapshot(self) -> Optional[float]:
-        """익절/손절 판정에 쓰이는 합산 순손익률 (UI 스레드에서 호출 — API를 호출하지 않는다).
+        """UI 표시와 AI 프롬프트에 쓰이는 합산 순손익률 (UI 스레드에서 호출 — API를 호출하지 않는다).
 
-        UI가 수수료율을 다시 읽어 따로 계산하면 엔진이 실제로 판정한 값과 어긋날 수 있어,
-        판정에 쓰는 그 함수(`RiskManager.portfolio_return`)를 그대로 부른다.
-        `position_snapshot`과 같이 `_positions` 참조를 한 번만 집어 일관된 사본으로 계산한다.
+        손절 판정은 종목별(`RiskManager.check_position_exits`)이라 이 값에 의존하지 않는다 —
+        여기서 쓰는 `RiskManager.portfolio_return`은 AI 매도 판단 프롬프트와 화면 요약줄이
+        읽는 값이다. UI가 수수료율을 다시 읽어 따로 계산하면 엔진과 어긋날 수 있어 같은 함수를
+        그대로 부른다. `position_snapshot`과 같이 `_positions` 참조를 한 번만 집어 일관된
+        사본으로 계산한다.
         """
         holdings = [p for t, p in self._positions.items() if t not in self._exiting]
         return self.risk_manager.portfolio_return(holdings)
@@ -464,8 +466,9 @@ class TradingEngine:
     def portfolio_net_pnl_snapshot(self) -> Tuple[float, Optional[float]]:
         """화면에 찍을 합산 (순손익 금액, 순손익률) — 슬리피지 없음, API 호출 없음.
 
-        `portfolio_return_snapshot`(판정값)과는 슬리피지만큼 다르다. 이쪽이 항상 조금
-        높다. 종목별 표와 같은 식으로 계산해야 표의 합계가 요약줄과 맞는다.
+        `portfolio_return_snapshot`(슬리피지 포함, AI 프롬프트가 읽는 값)과는 슬리피지만큼
+        다르다. 이쪽이 항상 조금 높다. 종목별 표와 같은 식으로 계산해야 표의 합계가 요약줄과
+        맞는다.
         """
         holdings = [p for t, p in self._positions.items() if t not in self._exiting]
         return self.risk_manager.portfolio_net_pnl(holdings)
@@ -576,8 +579,8 @@ class TradingEngine:
     def close_positions(self, tickers: Iterable[str], reason: str = "manual_selected") -> None:
         """선택한 종목만 시장가로 매도한다 (UI 보유 종목 표의 '선택 매도').
 
-        고르지 않은 종목은 그대로 보유하며 익절/손절 감시도 이어진다 — 판정은 보유 종목
-        합산이므로(PRD 5.5-B) 판 종목이 빠진 뒤의 나머지로 다시 계산된다.
+        고르지 않은 종목은 그대로 보유하며 청산 감시도 이어진다 — 손절은 종목별로 판정하므로
+        (PRD 5.5-B) 남은 종목은 각자의 순손익률로 계속 판정된다.
 
         `force_close_all_positions`와 주문 루프(`_sell_positions`)를 공유해 매도가능수량 0·
         주문 거부·상장폐지 제외 처리가 갈리지 않게 한다.
@@ -659,6 +662,10 @@ class TradingEngine:
         # 손절 판정보다 **앞에서** 고점을 갱신한다 — 손절이 걸려 아래에서 return하면
         # 그 틱의 고점이 통째로 빠진다.
         self._track_exit_drawdown(positions)
+        # 손절이 걸려 종목을 팔았으면(True) 이 틱의 나머지(신호 생성 이하)를 건너뛴다 —
+        # 손절 대상이 아닌 다른 보유 종목이 남아 있어도 그렇다. 1호 전략은 generate_signal이
+        # 항상 HOLD라 지금은 이 스킵이 영향을 주지 않지만, 실시간 신호로 매수/매도하는 전략을
+        # 붙이면 그 전략의 이번 틱 판단이 손절과 무관한 종목의 시세여도 통째로 밀린다는 뜻이 된다.
         if self._check_portfolio_exit(positions):
             return
 
@@ -765,7 +772,8 @@ class TradingEngine:
 
         broken = self.risk_manager.check_position_exits(holdings)
         if broken:
-            targets = [p for p in holdings if p.ticker in set(broken)]
+            broken_tickers = set(broken)
+            targets = [p for p in holdings if p.ticker in broken_tickers]
             self._execute_portfolio_exit(targets, ExitReason.STOP_LOSS)
             return True
 
@@ -788,7 +796,7 @@ class TradingEngine:
         ret = self.risk_manager.portfolio_return(holdings)
         percent = f"{ret * 100:+.2f}%" if ret is not None else "-"
         logger.info(
-            "청산 조건 도달 (%s): 합산 순손익 %s, 대상 %d종목%s",
+            "청산 조건 도달 (%s): 대상 합산 순손익 %s, 대상 %d종목%s",
             reason.value,
             percent,
             len(holdings),
@@ -802,7 +810,7 @@ class TradingEngine:
         ]
         if sold:
             body = (
-                f"{reason.value} 청산 (합산 순손익 {percent}) — {len(sold)}종목\n"
+                f"{reason.value} 청산 (대상 합산 순손익 {percent}) — {len(sold)}종목\n"
                 + "\n".join(sold)
             )
             if note:

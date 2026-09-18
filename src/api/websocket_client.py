@@ -21,7 +21,8 @@ RECONNECT_DELAY_SECONDS = 5
 class WebSocketClient:
     """키움 실시간 시세 수신 (PRD 5.2).
 
-    익절/손절 감시가 이 스트림에 의존하므로, 연결이 끊기면 재접속하며 구독을 복구한다.
+    청산 감시(손절·AI 매도 판단·이익 반납 감시)가 이 스트림에 의존하므로, 연결이 끊기면
+    재접속하며 구독을 복구한다.
     """
 
     def __init__(self, settings: Settings, auth: AuthClient):
@@ -37,7 +38,7 @@ class WebSocketClient:
 
     @property
     def is_connected(self) -> bool:
-        """현재 WebSocket 세션이 살아 있는지. 익절/손절 감시 가능 여부와 직결된다."""
+        """현재 WebSocket 세션이 살아 있는지. 청산 감시 가능 여부와 직결된다."""
         return self._ws is not None
 
     def subscribe(self, tickers: List[str]) -> None:

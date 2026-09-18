@@ -67,7 +67,7 @@ CANCEL_UNFILLED_TIME = dt_time(10, 10)  # 미체결 매수 취소 → 매수 결
 FORCE_CLOSE_TIME = dt_time(15, 15)  # 당일 매도 원칙에 따른 미청산 포지션 정리
 REPORT_TIME = dt_time(15, 35)       # 일일/월간 성과 리포트 이메일 (정규장 마감 15:30 이후)
 
-# 시세 끊김 감시 — 익절/손절이 실시간 시세에만 의존하므로(키움 REST 스탑오더 미지원),
+# 시세 끊김 감시 — 손절이 실시간 시세에만 의존하므로(키움 REST 스탑오더 미지원),
 # 보유 종목이 있는데 시세가 끊기면 손절이 조용히 멈춘다. 그 공백을 알린다.
 MARKET_OPEN_TIME = dt_time(9, 0)
 MARKET_CLOSE_TIME = dt_time(15, 30)
@@ -272,7 +272,7 @@ def is_market_hours(now: Optional[datetime] = None) -> bool:
 def quote_stall_seconds(runtime: Runtime, now: Optional[datetime] = None) -> Optional[float]:
     """시세가 끊긴 시간(초). 감시할 보유 종목이 없거나 장 시간이 아니면 None.
 
-    보유 종목이 있는데 시세가 오지 않으면 익절/손절 판정이 멈춘 상태다.
+    보유 종목이 있는데 시세가 오지 않으면 손절 판정이 멈춘 상태다.
     """
     now = now or datetime.now()
     if not runtime.engine.open_tickers or not is_market_hours(now):
@@ -314,10 +314,10 @@ async def watch_quote_stall(
                 held = runtime.engine.open_tickers
                 detail = _describe_stall(stalled)
                 logger.error(
-                    "%s 익절/손절 감시가 멈춘 상태입니다. 보유: %s", detail, held
+                    "%s 손절 감시가 멈춘 상태입니다. 보유: %s", detail, held
                 )
                 runtime.engine.notify(
-                    f"[경고] {detail} 익절/손절 감시가 멈췄습니다. "
+                    f"[경고] {detail} 손절 감시가 멈췄습니다. "
                     f"보유 종목: {held}. 앱과 네트워크 상태를 확인하세요."
                 )
                 warned = True
@@ -416,7 +416,7 @@ async def watch_buy_result(
 
         try:
             # 체결내역 조회는 페이지네이션이 걸린 블로킹 requests 호출이라 이벤트 루프를
-            # 막으면 그동안 WebSocket PING 응답도, 실시간 익절/손절 콜백도 멈춘다.
+            # 막으면 그동안 WebSocket PING 응답도, 실시간 손절 콜백도 멈춘다.
             filled = await asyncio.get_running_loop().run_in_executor(
                 None, runtime.workflow.buy_orders_filled
             )
@@ -746,12 +746,13 @@ def adopt_carried_over_positions(runtime: Runtime) -> List[str]:
 
     전일 청산에 실패했거나 앱이 꺼진 사이 넘어온 포지션은 아무도 구독하지 않는다.
     실시간 시세 구독은 당일 매수분(DailyWorkflow.execute_buys)에서만 걸리므로, 이월 포지션만
-    남은 날에는 시세가 한 건도 오지 않아 익절/손절 판정(RiskManager.check_portfolio_exit)이
+    남은 날에는 시세가 한 건도 오지 않아 손절 판정(RiskManager.check_position_exits)이
     아예 돌지 않는다 — 판정은 틱을 받은 순간에만 도는 콜백이다.
     여기서 구독을 걸어야 감시가 시작된다. 15:15 강제청산은 잔고 전체를 읽으므로 자동 포함된다.
 
-    판정은 보유 종목 합산 기준이므로, 이월 포지션도 당일 매수분과 한 덩어리로 묶여 함께
-    팔린다. 평단가는 최초 매수 시점 기준이라 이월분의 손실이 그대로 합산에 들어온다.
+    손절은 종목별로 판정하므로(PRD 5.5-B, 확정 2026-09-18), 이월 포지션도 각자의 평단가
+    기준 순손익률로 독립적으로 판정된다. 평단가는 최초 매수 시점 기준이라 이월분의 손실이
+    그대로 반영된다.
     """
     held = runtime.engine.open_tickers
     if not held:
@@ -761,7 +762,7 @@ def adopt_carried_over_positions(runtime: Runtime) -> List[str]:
     logger.warning("이월 포지션을 매도 감시 대상으로 편입했습니다: %s", held)
     runtime.engine.notify(
         f"[알림] 전일 이월 보유 종목 {len(held)}개를 오늘 매도 대상으로 편입했습니다: {held}. "
-        "익절/손절 감시가 시작되며, 남으면 15:15에 강제청산됩니다."
+        "손절 감시가 시작되며, 남으면 15:15에 강제청산됩니다."
     )
     return held
 

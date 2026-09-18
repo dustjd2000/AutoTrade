@@ -45,8 +45,8 @@ MANUAL_ACTIONS: Dict[str, str] = {
     "cancel_unfilled": "③ 미체결 매수 취소 + 결과 메일",
     "sell_all": "④ 전량 매도 (청산)",
     "report": "⑤ 최종 리포트 메일",
-    # 매도 '설정'은 별도 단계가 아니다 — 익절/손절 라인은 엔진 시작 시 적용되어 있고,
-    # 매수로 포지션이 생기는 순간 RiskManager.check_portfolio_exit 감시가 자동으로 붙는다.
+    # 매도 '설정'은 별도 단계가 아니다 — 손절 라인은 엔진 시작 시 적용되어 있고,
+    # 매수로 포지션이 생기는 순간 RiskManager.check_position_exits 감시가 자동으로 붙는다.
     "full": "매수 및 매도설정까지 일괄 수행",
     # ①~⑤ 버튼 그리드에는 넣지 않는다 — 대상 종목을 보유 종목 표에서 골라야 하므로
     # 버튼도 그 표 아래에 둔다. 여기 두는 것은 라벨과 잠금·확인 처리를 공유하기 위함이다.
@@ -173,7 +173,7 @@ def manual_steps(runtime, action: str, tickers: Iterable[str] = ()) -> List[Manu
         ],
     }
     # 일괄 실행은 '진입'까지만 — 청산과 리포트는 스케줄에 맡긴다.
-    # 청산(③)을 넣으면 매수 직후 곧바로 되팔아 익절/손절 감시 구간이 사라지고 왕복 비용만 남는다.
+    # 청산(③)을 넣으면 매수 직후 곧바로 되팔아 청산 감시 구간이 사라지고 왕복 비용만 남는다.
     # 당일 매도 원칙은 FORCE_CLOSE_TIME(15:15)이 지키고, 리포트는 당일 매매가 끝난 뒤에야
     # 의미가 있는 집계이므로 REPORT_TIME(15:35)에 맡긴다. 지금 당장 필요하면 ③·④ 버튼으로 따로 실행한다.
     step_factories["full"] = lambda: step_factories["recommend"]() + step_factories["buy"]()
@@ -265,7 +265,7 @@ class ActionRunner:
             for step in steps:
                 logger.info("[실행] %s — 시작", step.label)
                 if step.touches_orders:
-                    # 실시간 익절/손절 콜백과 겹치지 않도록 루프 스레드에서 직접 실행한다
+                    # 실시간 손절 콜백과 겹치지 않도록 루프 스레드에서 직접 실행한다
                     result = step.run()
                     if asyncio.iscoroutine(result):
                         await result

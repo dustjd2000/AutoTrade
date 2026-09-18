@@ -24,8 +24,8 @@ class LLMMomentumStrategy(BaseStrategy):
 
     09:05 LLM 추천 → 09:08 매수를 스케줄러가 트리거하는 시간 기반 전략이므로,
     실시간 시세 콜백(generate_signal)에서는 신규 진입 신호를 내지 않는다.
-    보유 포지션의 청산은 RiskManager.check_portfolio_exit(보유 종목 합산 익절/손절)과
-    장 마감 강제청산이 담당한다.
+    보유 포지션의 청산은 RiskManager.check_position_exits(종목별 손절), AI 매도 판단
+    (보유 종목 전체를 한 번에 판단), 장 마감 강제청산이 담당한다.
     """
 
     def __init__(self, investable_ratio: float = 0.5, target_stock_count: int = 3):

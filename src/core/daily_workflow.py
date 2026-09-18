@@ -379,7 +379,7 @@ class DailyWorkflow:
     def _watch_plan_prices(self, tickers: List[str]) -> None:
         """추천 종목의 실시간 시세를 미리 구독한다 — UI '매수 예정' 표 현재가의 출처.
 
-        매수 접수분 구독(`execute_buys`)은 익절/손절 감시가 목적이라 매수 시각에야 걸린다.
+        매수 접수분 구독(`execute_buys`)은 청산 감시가 목적이라 매수 시각에야 걸린다.
         추천~매수 사이에 현재가를 보려면(=어느 종목을 뺄지 판단하려면) 여기서 미리 걸어야 한다.
         """
         if not tickers or self.ws_client is None:
@@ -602,21 +602,22 @@ class DailyWorkflow:
             # 이 보유분이 전량 매도되면 리포트를 다시 보내고, 남으면 15:35가 보낸다.
             self._clear_report_mark()
 
-        # 접수된 종목만 실시간 시세를 구독한다 — 익절/손절 감시(RiskManager.check_portfolio_exit)의 전제.
+        # 접수된 종목만 실시간 시세를 구독한다 — 손절 감시(RiskManager.check_position_exits)와
+        # AI 매도 판단의 전제.
         # 거부된 종목까지 구독하면 보유하지도 않은 종목의 시세를 받는다.
         if ordered and self.ws_client is not None:
             self.ws_client.subscribe(ordered)
             if getattr(self.ws_client, "is_connected", True):
                 logger.info("실시간 시세 구독: %s", ordered)
             else:
-                # 구독 목록에는 담기지만 재접속까지 시세가 오지 않는다 = 그동안 익절/손절 공백
+                # 구독 목록에는 담기지만 재접속까지 시세가 오지 않는다 = 그동안 청산 감시 공백
                 logger.error(
                     "실시간 시세 구독 보류 — WebSocket 미연결 상태입니다. "
-                    "재접속까지 익절/손절 감시가 동작하지 않습니다: %s",
+                    "재접속까지 청산 감시가 동작하지 않습니다: %s",
                     ordered,
                 )
                 self.engine.notify(
-                    "[경고] 실시간 시세 미연결 — 재접속까지 익절/손절 감시가 멈춥니다. "
+                    "[경고] 실시간 시세 미연결 — 재접속까지 청산 감시가 멈춥니다. "
                     f"대상: {ordered}"
                 )
 
