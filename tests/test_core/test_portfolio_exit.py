@@ -1,7 +1,11 @@
-"""합산 손절 — 판정은 보유 종목 전체로 하고, 걸리면 전량 매도한다 (PRD 5.5-B).
+"""종목별 손절 — 판정은 종목 단위로 하고, 손절선에 닿은 종목만 판다 (PRD 5.5-B, 2026-09-18).
 
 엔진 테스트 대부분은 RiskManager를 스텁으로 대체하지만, 여기서는 실물을 그대로 써서
-'합산으로 판정한 결과가 실제 주문으로 이어지는가'를 끝까지 확인한다.
+'종목별로 판정한 결과가 실제 주문으로 이어지는가'를 끝까지 확인한다.
+
+2026-08-10부터 2026-09-18까지는 합산(보유 종목 전체)으로 판정해 닿으면 전량을 팔았다.
+그 시절을 검증하던 테스트는 지우지 않고 새 동작(닿은 종목만 판다)을 확인하도록 고쳤다 —
+각 자리에 남긴 주석을 참고.
 
 익절 자동 청산과 단순익절(종목별 0% 익절)은 2026-09-09에 걷어냈다 (PRD 10절, 실매매 27건
 대조 — 어떤 익절선도 "익절 없음"보다 낫지 않았다). 그 둘을 검증하던 테스트는 지우거나
@@ -101,26 +105,38 @@ def two_holdings(price_a=1010.0, price_b=970.0):
     }
 
 
-def test_losing_stock_is_not_sold_while_the_rest_offsets_it():
-    """한 종목이 손절선(-2%)을 넘겨도 합산이 밴드 안이면 매도하지 않는다 — 합산 판정의 대가다."""
-    engine, orders, _ = make_engine(two_holdings())  # +1% / -3% → 합산 -1%
+def test_losing_stock_is_sold_while_the_healthy_one_stays():
+    """한 종목만 손절선(-2%)을 넘기면 그 종목만 팔고 건강한 종목은 그대로 둔다.
+
+    종목별 판정으로 바뀌면서(2026-09-18) 기대값이 뒤집혔다 — 합산 판정 시절에는 이
+    시나리오(+1% / -3% → 합산 -1%)가 밴드 안이라 아무것도 팔리지 않는 것이 정답이었다
+    (옛 이름 test_losing_stock_is_not_sold_while_the_rest_offsets_it, 옛 주석 "종목별로
+    손절이 나갔다 — 판정은 합산이어야 한다").
+    """
+    engine, orders, _ = make_engine(two_holdings())  # +1% / -3%
 
     engine.on_market_data(MarketData(ticker="000660", price=970.0, volume=1))
 
-    assert orders == [], "종목별로 손절이 나갔다 — 판정은 합산이어야 한다"
+    assert [o.ticker for o in orders] == ["000660"], "손절선에 닿은 종목만 팔려야 한다"
 
 
-def test_all_holdings_are_sold_when_the_total_hits_the_stop_loss():
-    """합산이 손절선을 넘으면 손실 종목만이 아니라 보유 종목 전량을 판다."""
+def test_only_the_broken_stock_is_sold_when_the_stop_loss_hits():
+    """손절선을 넘긴 종목만 팔고 넘기지 않은 종목은 감시 목록에 남긴다.
+
+    종목별 판정으로 바뀌면서(2026-09-18) 기대값이 바뀌었다 — 합산 판정 시절에는
+    000660이 -6%로 밀려 합산 -2.5%가 손절선을 넘기면 보유 종목 전량(두 종목)이 팔렸다
+    (옛 이름 test_all_holdings_are_sold_when_the_total_hits_the_stop_loss). 이제는 -6%인
+    000660만 팔리고, +1%인 005930은 손절선에 닿지 않아 그대로 남는다.
+    """
     engine, orders, _ = make_engine(two_holdings())
 
-    # 000660이 -6%로 밀리면 합산은 (+1% -6%)/2 = -2.5% → 손절선 통과
+    # 000660만 -6%로 밀린다 — 005930은 +1%로 손절선에 닿지 않는다
     engine.on_market_data(MarketData(ticker="000660", price=940.0, volume=1))
 
-    assert [o.side for o in orders] == [OrderSide.SELL, OrderSide.SELL]
-    assert {o.ticker for o in orders} == {"005930", "000660"}
-    assert all(o.quantity == 100 for o in orders)
-    assert engine.open_tickers == [], "전량 매도 후에도 감시 목록이 남았다"
+    assert [o.side for o in orders] == [OrderSide.SELL]
+    assert [o.ticker for o in orders] == ["000660"]
+    assert orders[0].quantity == 100
+    assert engine.open_tickers == ["005930"], "닿지 않은 종목은 감시 목록에 남아야 한다"
 
 
 def test_take_profit_no_longer_triggers_a_selloff():
@@ -138,29 +154,38 @@ def test_take_profit_no_longer_triggers_a_selloff():
     assert orders == []
 
 
-def test_exit_alert_is_sent_once_for_the_whole_list():
-    """종목마다 보내면 보유 3종목에 메일 3통이 나간다 — 합산 손익과 함께 한 통으로 묶는다."""
+def test_exit_alert_names_only_the_sold_stock():
+    """알림은 이번에 판 종목만 담는다 — 손절선에 닿지 않은 종목까지 끌어들이지 않는다.
+
+    합산 판정 시절에는 000660이 -6%로 밀리면 합산 -2.5%로 두 종목이 함께 팔려 한 통에
+    묶였다 (옛 이름 test_exit_alert_is_sent_once_for_the_whole_list). 이제는 000660만
+    팔리므로 알림에도 000660의 순손익(-6.00%)과 이름만 실린다.
+    """
     engine, _, alerts = make_engine(two_holdings())
 
     engine.on_market_data(MarketData(ticker="000660", price=940.0, volume=1))
 
     assert len(alerts) == 1, f"청산 알림이 {len(alerts)}통 나갔다"
     [message] = alerts
-    assert "-2.50%" in message          # 합산 순손익
-    assert "삼성전자" in message and "SK하이닉스" in message
+    assert "-6.00%" in message          # 팔린 종목(000660)만의 순손익
+    assert "SK하이닉스" in message and "삼성전자" not in message
 
 
 def test_sold_positions_leave_the_calculation():
-    """체결이 잔고에 반영되기 전 다음 틱이 와도, 이미 판 물량으로 다시 판정하면 안 된다."""
+    """체결이 잔고에 반영되기 전 다음 틱이 와도, 이미 판 물량으로 다시 판정하면 안 된다.
+
+    종목별 판정으로 바뀌면서(2026-09-18) 첫 틱에 팔리는 종목이 000660 하나뿐이라
+    기대 주문 수를 2에서 1로 바꿨다 — 005930은 애초에 손절선에 닿지 않아 팔리지 않는다.
+    """
     engine, orders, _ = make_engine(two_holdings())
     engine.on_market_data(MarketData(ticker="000660", price=940.0, volume=1))
-    assert len(orders) == 2
+    assert len(orders) == 1
 
-    # 잔고는 아직 두 종목을 보유 중이라고 답한다
+    # 잔고는 아직 000660을 보유 중이라고 답한다
     engine._invalidate_positions()
     engine.on_market_data(MarketData(ticker="000660", price=940.0, volume=1))
 
-    assert len(orders) == 2, "이미 매도한 종목에 청산 주문이 또 나갔다"
+    assert len(orders) == 1, "이미 매도한 종목에 청산 주문이 또 나갔다"
 
 
 def test_snapshot_reports_the_value_the_engine_judges_on():
@@ -171,11 +196,16 @@ def test_snapshot_reports_the_value_the_engine_judges_on():
 
 
 def test_snapshot_drops_sold_positions():
-    """전량 매도한 뒤에는 판정 대상이 없다 — 잔고 반영 전이라도 값이 남으면 안 된다."""
+    """판 종목은 판정 대상에서 빠지고, 남은 종목의 값만 스냅샷에 반영된다.
+
+    합산 판정 시절에는 손절선에 닿으면 보유 종목 전량이 팔려 대상이 하나도 안 남았다
+    (그래서 옛 기대값은 None). 종목별 판정에서는 000660만 팔리고 005930(+1%)은 남으므로,
+    스냅샷도 그 값으로 남는다.
+    """
     engine, _, _ = make_engine(two_holdings())
     engine.on_market_data(MarketData(ticker="000660", price=940.0, volume=1))
 
-    assert engine.portfolio_return_snapshot() is None
+    assert engine.portfolio_return_snapshot() == 0.01
 
 
 def test_position_without_a_price_does_not_trigger_a_selloff():
@@ -198,12 +228,17 @@ def test_position_without_a_price_does_not_trigger_a_selloff():
 
 # ── 청산 사유 기록 (확정 2026-08-12) ────────────────────────────
 def test_stop_loss_is_recorded_with_its_reason():
+    """종목별 판정에서는 손절선에 닿은 종목만 사유가 기록된다 — 나머지는 대상이 아니다.
+
+    합산 판정 시절에는 전량이 팔려 005930도 같이 기록됐다. 여기서는 005930(+1%)이
+    손절선에 닿지 않으므로 000660 하나만 남는다.
+    """
     store = RecordingStore()
     engine, _, _ = make_engine(two_holdings(price_b=940.0), trade_store=store)
 
     engine.on_market_data(MarketData(ticker="000660", price=940.0, volume=1))
 
-    assert sorted(store.reasons) == [("000660", "stop_loss"), ("005930", "stop_loss")]
+    assert store.reasons == [("000660", "stop_loss")]
 
 
 # 단순익절 사유("simple_take_profit")를 percent take_profit과 구분해 기록하는지 보던
@@ -271,3 +306,22 @@ def test_position_exits_empty_when_disabled():
     positions = [_pos("000660", 100_000, 90_000)]
 
     assert _risk(stop_loss_enabled=False).check_position_exits(positions) == []
+
+
+# ── 엔진이 종목별로 판다 (2026-09-18) ──────────────────────────
+def test_engine_sells_only_the_broken_position():
+    """손절선에 닿은 종목만 팔고 나머지는 보유한다 (2026-09-18).
+
+    합산 판정이던 시절에는 한 종목이 닿으면 전량이 나갔다.
+    """
+    engine, orders, _ = make_engine(
+        {
+            "000660": Position("000660", 1, 100_000, 100_000, name="하이닉스"),
+            "005930": Position("005930", 1, 100_000, 100_000, name="삼성전자"),
+        }
+    )
+    engine.risk_manager.stop_loss_ratio = 0.05
+
+    engine.on_market_data(MarketData(ticker="000660", price=93_000, volume=1))
+
+    assert [o.ticker for o in orders] == ["000660"]

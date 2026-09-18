@@ -3,7 +3,7 @@ from datetime import datetime
 import pytest
 
 from src.api.account import BalanceSnapshot, Position
-from src.core.events import ExitReason, OrderRequest, OrderResult, OrderSide, OrderStatus, OrderType
+from src.core.events import OrderRequest, OrderResult, OrderSide, OrderStatus, OrderType
 from src.risk.manager import (
     RiskManager,
     exit_trigger_price,
@@ -44,23 +44,29 @@ def held(ticker, quantity, avg_price, current_price):
     )
 
 
-# 익절 자동 청산(check_portfolio_exit의 TAKE_PROFIT 분기)은 2026-09-09에 걷어냈다 (PRD 10절,
-# 실매매 27건 대조 — 어떤 익절선도 "익절 없음"보다 낫지 않았다). 그 분기만 확인하던
-# test_portfolio_exit_triggers_take_profit_at_threshold / test_portfolio_exit_take_profit_reflects_costs /
+# 익절 자동 청산(옛 check_portfolio_exit의 TAKE_PROFIT 분기)은 2026-09-09에 걷어냈다
+# (PRD 10절, 실매매 27건 대조 — 어떤 익절선도 "익절 없음"보다 낫지 않았다). 그 분기만
+# 확인하던 test_portfolio_exit_triggers_take_profit_at_threshold / test_portfolio_exit_take_profit_reflects_costs /
 # test_take_profit_can_be_disabled_without_affecting_stop_loss /
 # test_stop_loss_can_be_disabled_without_affecting_take_profit / test_both_disabled_leaves_only_the_forced_close는
 # 지웠다 — 아래 test_portfolio_exit_no_longer_takes_profit / test_stop_loss_can_still_be_disabled가
 # 새 동작을 대신 확인한다.
+#
+# check_portfolio_exit(합산 판정) 자체도 2026-09-18에 지워졌다 (PRD 5.5-B) — 손절 판정
+# 단위가 합산에서 종목별로 바뀌면서 그 자리를 check_position_exits가 대신한다. 아래
+# test_portfolio_exit_* 이름의 테스트들은 원래 확인하던 시나리오(단일 종목 손절 판정)를
+# 그대로 두고 호출부만 check_position_exits로 바꿨다 — 반환값이 ExitReason 하나에서
+# 손절선에 닿은 종목코드 목록으로 바뀌었다.
 def test_portfolio_exit_triggers_stop_loss_at_threshold():
     manager = make_manager(stop_loss_ratio=0.02)
 
-    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 980.0)]) == ExitReason.STOP_LOSS
+    assert manager.check_position_exits([held("005930", 10, 1000.0, 980.0)]) == ["005930"]
 
 
 def test_portfolio_exit_returns_none_within_band():
     manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02)
 
-    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, 1002.0)]) is None
+    assert manager.check_position_exits([held("005930", 10, 1000.0, 1002.0)]) == []
 
 
 def test_portfolio_exit_stop_loss_triggers_earlier_with_costs():
@@ -69,18 +75,18 @@ def test_portfolio_exit_stop_loss_triggers_earlier_with_costs():
         stop_loss_ratio=0.02, commission_rate=0.00015, tax_rate=0.0018, slippage_rate=0.001
     )
     shallower_drop = [held("005930", 10, 1000.0, 982.0)]
-    assert manager.check_portfolio_exit(shallower_drop) == ExitReason.STOP_LOSS
+    assert manager.check_position_exits(shallower_drop) == ["005930"]
 
     trigger_price = exit_trigger_price(1000.0, -0.02, 0.00015, 0.0018, 0.001)
-    assert manager.check_portfolio_exit([held("005930", 10, 1000.0, trigger_price)]) == ExitReason.STOP_LOSS
+    assert manager.check_position_exits([held("005930", 10, 1000.0, trigger_price)]) == ["005930"]
 
 
 def test_portfolio_exit_returns_none_without_anything_to_measure():
     """보유가 없거나 평단·수량이 0이면 판정하지 않는다."""
     manager = make_manager()
 
-    assert manager.check_portfolio_exit([]) is None
-    assert manager.check_portfolio_exit([held("005930", 0, 0.0, 1000.0)]) is None
+    assert manager.check_position_exits([]) == []
+    assert manager.check_position_exits([held("005930", 0, 0.0, 1000.0)]) == []
 
 
 def test_single_position_matches_the_per_stock_formula():
@@ -94,29 +100,41 @@ def test_single_position_matches_the_per_stock_formula():
 
 
 def test_profit_and_loss_offset_each_other():
-    """한 종목이 손절선을 넘겨도 다른 종목이 상쇄하면 매도하지 않는다 (합산 판정의 대가)."""
+    """`portfolio_return`(표시용 합산)은 여전히 상쇄된다 — 손절 판정만 종목별로 바뀌었다.
+
+    합산 판정 시절에는 이 시나리오(+1% / -3% → 합산 -1%)가 밴드 안이라 000660(-3%)도
+    팔리지 않았다 (옛 이름이 확인하던 것). 종목별 판정(2026-09-18)에서는 손절선(-2%)에
+    닿은 000660만 걸리고, 그 사실은 `portfolio_return`(표시값)에는 영향을 주지 않는다 —
+    그 값은 여전히 합산 가중평균이다.
+    """
     manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02)
     positions = [
         held("005930", 100, 1000.0, 1010.0),  # +1%
-        held("000660", 100, 1000.0, 970.0),   # -3% — 종목별이었다면 손절
+        held("000660", 100, 1000.0, 970.0),   # -3% — 손절선(-2%)을 넘겼다
     ]
 
-    assert manager.check_portfolio_exit(positions) is None  # 합산 -1%
-    assert manager.portfolio_return(positions) == pytest.approx(-0.01)
+    assert manager.check_position_exits(positions) == ["000660"]
+    assert manager.portfolio_return(positions) == pytest.approx(-0.01)  # 표시용 합산은 그대로
 
 
 def test_weighting_follows_invested_amount_not_stock_count():
-    """비중은 투입금액을 따른다 — 종목 개수로 나누는 단순평균이면 정반대 결과가 나온다."""
+    """비중은 투입금액을 따른다 — 종목 개수로 나누는 단순평균이면 정반대 결과가 나온다.
+
+    `portfolio_return`(표시용 합산)에 대한 검증은 그대로다. 손절 판정만 종목별로 바뀌어
+    (2026-09-18), 이제 000660(-30%)은 005930의 비중과 무관하게 그 자체로 손절선을 넘겨
+    걸린다 — 옛 이름이 확인하던 "합산은 익절선을 넘지만 자동 청산이 없어 팔지 않는다"는
+    더 이상 이 시나리오가 보여주는 것이 아니다.
+    """
     manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02)
     positions = [
         held("005930", 1000, 1000.0, 1010.0),  # 매입 100만원, +1%  → +1만원
-        held("000660", 10, 1000.0, 700.0),     # 매입 1만원,  -30% → -3천원
+        held("000660", 10, 1000.0, 700.0),     # 매입 1만원,  -30% → -3천원, 손절선을 넘었다
     ]
 
-    # 단순평균이면 (+1% -30%)/2 = -14.5%로 손절이 나가야 하지만, 실제 손익은 +7,000원이다
+    # 단순평균이면 (+1% -30%)/2 = -14.5%지만, 실제 손익은 투입금액 가중으로 +7,000원이다
     assert manager.portfolio_return(positions) == pytest.approx(7_000 / 1_010_000)
-    # 합산 +0.69%는 옛 익절선(0.5%)을 넘지만, 익절 자동 청산은 걷어냈으므로 팔지 않는다
-    assert manager.check_portfolio_exit(positions) is None
+    # 005930은 +1%라 손절선에 닿지 않지만, 000660은 -30%로 그 자체가 손절선(-2%)을 넘는다
+    assert manager.check_position_exits(positions) == ["000660"]
 
 
 def test_positions_without_a_price_are_excluded():
@@ -141,19 +159,19 @@ def test_portfolio_exit_no_longer_takes_profit():
     """익절은 자동 청산에서 빠졌다 — 이익이 아무리 커도 여기서는 팔지 않는다."""
     manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02)
     profitable = [held("005930", 10, 1000.0, 1100.0)]
-    assert manager.check_portfolio_exit(profitable) is None
+    assert manager.check_position_exits(profitable) == []
 
 
 def test_portfolio_exit_still_stops_loss():
     manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02)
     losing = [held("005930", 10, 1000.0, 900.0)]
-    assert manager.check_portfolio_exit(losing) is ExitReason.STOP_LOSS
+    assert manager.check_position_exits(losing) == ["005930"]
 
 
 def test_stop_loss_can_still_be_disabled():
     manager = make_manager(stop_loss_ratio=0.02, stop_loss_enabled=False)
     losing = [held("005930", 10, 1000.0, 900.0)]
-    assert manager.check_portfolio_exit(losing) is None
+    assert manager.check_position_exits(losing) == []
 
 
 def test_take_profit_ratio_survives_as_a_reference_line():

@@ -482,12 +482,17 @@ def test_portfolio_exit_note_reaches_the_alert():
 
 # ── engine.py에 새로 추가한 메서드 (실물 TradingEngine으로 직접 확인) ────
 def test_exit_candidates_excludes_tickers_already_being_sold():
-    engine, orders, _ = make_engine(two_holdings())
-    # 000660이 -6%로 밀리면 합산 -2.5% → 손절선(-2%) 통과, 두 종목 다 전량 매도
-    engine.on_market_data(MarketData(ticker="000660", price=940.0, volume=1))
-    assert len(orders) == 2
+    """종목별 판정으로 바뀌면서(2026-09-18) 000660만 팔리고 005930은 후보로 남는다.
 
-    assert engine.exit_candidates() == []
+    합산 판정 시절에는 000660이 -6%로 밀리면 합산 -2.5%가 손절선(-2%)을 넘어 두 종목이
+    함께 전량 매도됐다. 이제는 -6%인 000660만 팔리고, +1%인 005930은 손절선에 닿지
+    않아 그대로 AI 매도 판단 후보로 남는다.
+    """
+    engine, orders, _ = make_engine(two_holdings())
+    engine.on_market_data(MarketData(ticker="000660", price=940.0, volume=1))
+    assert len(orders) == 1
+
+    assert [p.ticker for p in engine.exit_candidates()] == ["005930"]
 
 
 def test_position_net_return_matches_position_snapshot_ratio():

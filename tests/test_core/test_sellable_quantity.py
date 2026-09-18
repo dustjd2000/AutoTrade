@@ -53,7 +53,10 @@ def make_engine(account, exit_reason=None):
         risk_manager=SimpleNamespace(
             initialize=lambda s: None,
             record_order=lambda *a, **kw: None,
-            check_portfolio_exit=lambda ps: exit_reason,
+            # check_portfolio_exit(합산)은 2026-09-18에 없어졌다 — 이제 엔진은
+            # check_position_exits(종목별)를 부른다. 이 파일의 시나리오는 종목이 하나뿐이라
+            # exit_reason이 있으면 그 한 종목을 그대로 "닿았다"고 흉내 낸다.
+            check_position_exits=lambda ps: [p.ticker for p in ps] if exit_reason is not None else [],
             commission_rate=0.0,
             tax_rate=0.0,
             position_net_pnl=lambda p: (p.current_price - p.avg_price) * p.quantity,

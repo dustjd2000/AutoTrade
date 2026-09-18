@@ -255,36 +255,6 @@ class RiskManager:
                 broken.append(position.ticker)
         return broken
 
-    def check_portfolio_exit(self, positions: Iterable[Position]) -> Optional[ExitReason]:
-        """보유 종목 **전체**가 손절 라인에 도달했는지 확인한다.
-
-        판정은 종목별이 아니라 합산이다 (확정 2026-08-10, PRD 5.5-B). 조건에 닿으면
-        보유 종목을 전량 매도한다. 종목별 손절은 두지 않으므로, 한 종목이 크게 무너져도
-        다른 종목이 상쇄하면 매도가 나가지 않고 15:15 강제청산까지 간다.
-
-        키움 REST API에 조건부 예약주문(스탑오더) 엔드포인트가 확인되지 않아, 이 실시간
-        모니터링이 **1차이자 사실상 유일한 청산 수단**이다 (PRD 5.5-B, 2026-07-27 확정).
-        즉 손절은 증권사 서버가 아니라 이 프로그램이 떠 있는 동안에만 동작한다 —
-        앱이 꺼지거나 WebSocket이 끊기면 감시 공백이 생긴다.
-
-        판정은 가격 변동률이 아니라 왕복 수수료·매도세금·슬리피지를 뺀 순손익률 기준이다.
-
-        `stop_loss_enabled`가 꺼져 있으면 손절도 건너뛴다 — 그러면 실시간 청산이 사라지고
-        15:15 강제청산만 남는다. 합산 순손익률 계산 자체는 멈추지 않으므로 UI에는 그대로
-        표시된다.
-
-        익절(자동 청산)과 단순익절은 2026-09-09에 걷어냈다 (PRD 10절) — 실매매 27건을
-        당일 고가와 대조한 결과 익절선 0%·0.5%·1%·2%·2.3%·3%·4% 어느 값도 "익절 없음"보다
-        낫지 않았다. `take_profit_ratio`는 지우지 않고 남겨, 추후 AI 판단에 기준선으로
-        넘긴다 — 이 메서드는 더 이상 그 값을 읽지 않는다.
-        """
-        ret = self.portfolio_return(positions)
-        if ret is None:
-            return None
-        if self.stop_loss_enabled and ret <= -self.stop_loss_ratio:
-            return ExitReason.STOP_LOSS
-        return None
-
     def record_order(self, result: OrderResult, avg_price: Optional[float] = None) -> None:
         if (
             result.side == OrderSide.SELL

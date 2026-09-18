@@ -748,9 +748,13 @@ class TradingEngine:
     def _check_portfolio_exit(self, positions: Dict[str, Position]) -> bool:
         """청산 조건에 닿았으면 매도한다. 매도를 시도했으면 True.
 
-        판정은 **합산 손절** 하나다 (PRD 5.5-B, 확정 2026-08-10). 닿으면 보유 종목을
-        전량 매도한다. 익절 자동 청산과 종목별 단순익절은 2026-09-09에 걷어냈다 (PRD 10절)
-        — 실매매 대조에서 어떤 익절선도 "익절 없음"보다 낫지 않았기 때문이다.
+        판정은 **종목별 손절** 하나다 (PRD 5.5-B, 확정 2026-09-18). 손절선에 닿은 종목만
+        판다 — 나머지는 그대로 들고 간다. 2026-08-10부터 2026-09-18까지는 합산으로 판정해
+        전량을 팔았다. 익절 자동 청산은 2026-09-09에, 익절 설정 자체는 2026-09-18에
+        걷어냈다 (PRD 10절).
+
+        AI 매도 판단은 여전히 **전량**이다 — 그쪽은 "지금 전부 정리할 상황인가"를 묻는
+        별개 경로이고, 같은 `_execute_portfolio_exit`을 보유 목록 전체로 부른다.
 
         이미 매도 주문을 낸 종목(`_exiting`)은 판정에서 뺀다 — 체결이 잔고에 반영되기까지
         시차가 있어, 남겨두면 이미 판 물량이 다음 틱의 판정을 계속 왜곡한다.
@@ -759,9 +763,10 @@ class TradingEngine:
         if not holdings:
             return False
 
-        reason = self.risk_manager.check_portfolio_exit(holdings)
-        if reason is not None:
-            self._execute_portfolio_exit(holdings, reason)
+        broken = self.risk_manager.check_position_exits(holdings)
+        if broken:
+            targets = [p for p in holdings if p.ticker in set(broken)]
+            self._execute_portfolio_exit(targets, ExitReason.STOP_LOSS)
             return True
 
         return False
@@ -769,7 +774,7 @@ class TradingEngine:
     def _execute_portfolio_exit(
         self, holdings: List[Position], reason: ExitReason, note: Optional[str] = None
     ) -> None:
-        """합산 손익이 손절 라인에 닿아 보유 종목을 전량 청산한다.
+        """넘겨받은 종목을 청산한다 — 손절은 손절선에 닿은 종목만, AI 판단은 보유 목록 전체다.
 
         종목별 청산(`_execute_exit`)을 그대로 돌려 매도가능수량·주문 거부·상장폐지 제외
         처리를 공유하고, **성공 알림만 한 통으로 묶는다** — 종목마다 보내면 보유 3종목에
@@ -783,7 +788,7 @@ class TradingEngine:
         ret = self.risk_manager.portfolio_return(holdings)
         percent = f"{ret * 100:+.2f}%" if ret is not None else "-"
         logger.info(
-            "합산 청산 조건 도달 (%s): 합산 순손익 %s, 대상 %d종목%s",
+            "청산 조건 도달 (%s): 합산 순손익 %s, 대상 %d종목%s",
             reason.value,
             percent,
             len(holdings),
@@ -797,7 +802,7 @@ class TradingEngine:
         ]
         if sold:
             body = (
-                f"{reason.value} 전량 청산 (합산 순손익 {percent}) — {len(sold)}종목\n"
+                f"{reason.value} 청산 (합산 순손익 {percent}) — {len(sold)}종목\n"
                 + "\n".join(sold)
             )
             if note:
