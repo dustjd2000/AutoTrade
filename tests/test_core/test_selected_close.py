@@ -73,7 +73,7 @@ def test_only_selected_tickers_are_sold():
 
 
 def test_unselected_positions_stay_under_watch():
-    """고르지 않은 종목은 그대로 보유하며 익절/손절 감시도 이어져야 한다."""
+    """고르지 않은 종목은 그대로 보유하며 청산 감시도 이어져야 한다."""
     sent = []
     engine = make_three(sent)
 

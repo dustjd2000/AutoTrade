@@ -254,7 +254,7 @@ def test_watch_survives_a_failing_check():
 def test_buy_orders_filled_check_runs_off_the_loop_thread():
     """체결내역 조회는 페이지네이션 걸린 블로킹 requests 호출이다 — 이벤트 루프에서
 
-    그대로 돌리면 그 사이 WebSocket PING 응답도, 실시간 익절/손절 콜백도 멈춘다
+    그대로 돌리면 그 사이 WebSocket PING 응답도, 실시간 손절 콜백도 멈춘다
     (`watch_closeout_report`·`watch_cash_refresh`와 같은 이유로 executor에 맡겨야 한다).
     """
     threads = {}

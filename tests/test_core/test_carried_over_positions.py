@@ -1,4 +1,4 @@
-"""전일 이월 포지션 — 아무도 구독하지 않으면 익절/손절 감시가 한 번도 돌지 않는다."""
+"""전일 이월 포지션 — 아무도 구독하지 않으면 손절 감시가 한 번도 돌지 않는다."""
 from types import SimpleNamespace
 
 from src.api.account import BalanceSnapshot, Position
@@ -74,7 +74,7 @@ def make_runtime(positions, exit_reason=None, connected=True):
 
 
 def test_carried_over_positions_are_subscribed_for_quotes():
-    """구독하지 않으면 시세가 오지 않아 익절/손절 판정 자체가 돌지 않는다."""
+    """구독하지 않으면 시세가 오지 않아 손절 판정 자체가 돌지 않는다."""
     runtime, _ = make_runtime(carried_over())
     runtime.engine.start()
 

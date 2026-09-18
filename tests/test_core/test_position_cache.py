@@ -1,4 +1,4 @@
-"""잔고 조회 캐시 — 틱마다 REST를 때리면 429가 나고 익절/손절 판정이 통째로 멈춘다."""
+"""잔고 조회 캐시 — 틱마다 REST를 때리면 429가 나고 손절 판정이 통째로 멈춘다."""
 from types import SimpleNamespace
 
 import pytest
@@ -93,7 +93,7 @@ def test_repeated_ticks_do_not_refetch_balance():
 
 
 def test_stale_snapshot_keeps_exit_watch_alive_when_refresh_fails():
-    """429로 갱신이 실패해도 직전 스냅샷으로 익절/손절 판정을 이어가야 한다."""
+    """429로 갱신이 실패해도 직전 스냅샷으로 손절 판정을 이어가야 한다."""
     account = CountingAccount(held(), fail_after=1)  # start()의 스냅샷만 성공
     engine, orders = make_engine(account, exit_reason=ExitReason.STOP_LOSS)
     engine.start()

@@ -49,7 +49,7 @@ def test_full_action_stops_after_buy():
 
 
 def test_full_action_never_liquidates():
-    """매수 직후 되파는 일이 없어야 한다 — 익절/손절 감시 구간이 사라지고 왕복 비용만 남는다."""
+    """매수 직후 되파는 일이 없어야 한다 — 청산 감시 구간이 사라지고 왕복 비용만 남는다."""
     calls = []
     for step in manual_steps(make_runtime(calls), "full"):
         step.run()
@@ -95,7 +95,7 @@ def test_sell_selected_passes_the_chosen_tickers():
 
 
 def test_sell_selected_needs_confirmation_and_the_engine_loop():
-    """실제 매도가 나가므로 확인을 받고, 실시간 익절/손절 콜백과 직렬화되어야 한다."""
+    """실제 매도가 나가므로 확인을 받고, 실시간 손절 콜백과 직렬화되어야 한다."""
     assert "sell_selected" in ORDER_ACTIONS
     steps = manual_steps(make_runtime([]), "sell_selected", ["005930"])
     assert [step.touches_orders for step in steps] == [True]

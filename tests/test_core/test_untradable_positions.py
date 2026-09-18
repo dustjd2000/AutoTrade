@@ -240,7 +240,7 @@ def test_excluded_ticker_is_not_ordered_again():
 
 
 def test_exit_rejection_also_excludes_the_ticker():
-    """익절/손절 청산이 같은 사유로 거부돼도 목록에서 빠져야 한다."""
+    """손절 청산이 같은 사유로 거부돼도 목록에서 빠져야 한다."""
     account = RejectingAccount(delisted())
     engine, orders = make_engine(account, exit_reason=ExitReason.STOP_LOSS)
     engine.start()

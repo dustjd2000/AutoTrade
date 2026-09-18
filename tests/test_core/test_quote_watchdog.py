@@ -1,4 +1,4 @@
-"""시세 끊김 감시 — 익절/손절이 실시간 시세에만 의존하므로 공백을 반드시 알려야 한다."""
+"""시세 끊김 감시 — 손절이 실시간 시세에만 의존하므로 공백을 반드시 알려야 한다."""
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 

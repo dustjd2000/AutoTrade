@@ -148,7 +148,7 @@ def test_validate_accepts_a_later_pair(monkeypatch):
     _valid_settings(monkeypatch).validate()
 
 
-# ── 매매 비용 (익절/손절 순손익률 판정에 그대로 들어간다) ──────────────
+# ── 매매 비용 (손절 순손익률 판정에 그대로 들어간다) ──────────────
 def test_tax_defaults_to_the_measured_rate(monkeypatch):
     """실제 키움 매도세금은 0.20%다 — 매도 49건(2026-07-29~09-01) 전수 대조로 확인했다.
 
