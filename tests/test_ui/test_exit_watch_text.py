@@ -2,12 +2,13 @@
 
 Task 1(2026-09-09)이 익절 자동 청산과 단순익절을 엔진에서 걷어냈고, Task 6이 그 자리의
 체크박스(`익절`/`단순익절적용`)를 `AI 매도 판단` 하나로 정리했다(PRD 10절). 이제 청산
-경로는 두 갈래다 — 손절은 그대로 실시간 감시되는 자동 매도선이고, AI 매도 판단은 켜져
-있으면 호출 주기(`_ai_exit_interval` 콤보)마다 보유 종목 전체를 보고 전량 매도 여부를
-LLM이 판단한다. 입력값(%)은 손절선(자동)이자 AI에게 넘기는 참고선(비자동)이라는 이중
-의미를 갖는데, 이 문구가 그 구분을 흐리면 "AI 매도 판단을 껐는데도 이익 쪽 청산이 되는
-줄 알았다"거나 "손절이 꺼진 줄 몰랐다" 같은 사고로 이어진다 — 실계좌로 도는 프로그램이라
-이 문구의 정확성이 곧 안전장치다.
+경로는 두 갈래다 — 손절은 종목별 순손익이 선에 닿는 순간 그 종목만 실시간으로 팔리는
+자동선이고(2026-09-18부터 — 그 전에는 보유 종목 합산이었다), AI 매도 판단은 켜져 있으면
+호출 주기(`_ai_exit_interval` 콤보)마다 보유 종목 전체를 보고 전량 매도 여부를 LLM이
+판단한다. 입력값(%)은 이제 손절선 하나만 정한다 — 예전에는 AI에게 넘기는 참고선이기도
+했지만 그 쓰임은 없앴다(2026-09-18). 이 문구가 손절/AI 매도 판단의 구분을 흐리면
+"AI 매도 판단을 껐는데도 이익 쪽 청산이 되는 줄 알았다"거나 "손절이 꺼진 줄 몰랐다" 같은
+사고로 이어진다 — 실계좌로 도는 프로그램이라 이 문구의 정확성이 곧 안전장치다.
 
 이 저장소에는 PyQt6 위젯을 실제로 띄우는 테스트가 없다(QApplication 기반 테스트 인프라
 부재). 여기서는 QApplication 없이도 되도록, 위젯이 필요로 하는 최소 인터페이스
@@ -123,14 +124,14 @@ def test_exit_watch_text_flags_ai_exit_being_off_even_when_stop_loss_is_on():
 
 
 def test_exit_watch_text_describes_ai_exit_as_periodic_judgement_not_an_auto_sell_line():
-    """익절 목표선은 참고선일 뿐이다 — AI가 켜져 있어도 '닿으면 자동으로 팔린다'는 인상을 주면 안 된다."""
+    """AI 매도 판단에는 가격 기준선이 없다 — 켜져 있어도 '닿으면 자동으로 팔린다'는 인상을 주면 안 된다."""
     fake = make_fake_window(ai_exit=True, stop_loss=True, exit_percent="2", interval_text="15분")
 
     text = fake._exit_watch_text()
 
     assert "손절 -2%" in text
     assert "15분마다" in text
-    assert "참고선" in text
+    assert "가격 기준선" in text
     assert "자동으로 걸리지" in text or "자동으로 팔리지" in text
 
 

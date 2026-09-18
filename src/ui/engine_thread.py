@@ -93,14 +93,14 @@ class EngineThread(QThread):
         return runtime.engine.ai_exit_snapshot()
 
     def portfolio_return(self) -> Optional[float]:
-        """익절/손절 판정에 쓰이는 합산 순손익률 (UI 표시용 — API 호출 없이 캐시값만 읽는다)."""
+        """보유 종목 합산 순손익률 (표시용 — 손절 판정은 종목별로 따로 한다. API 호출 없이 캐시값만 읽는다)."""
         runtime = self._runtime
         if runtime is None:
             return None
         return runtime.engine.portfolio_return_snapshot()
 
     def portfolio_net_pnl(self) -> tuple:
-        """표시용 합산 (순손익 금액, 순손익률). 판정값과 달리 슬리피지가 빠져 있다."""
+        """표시용 합산 (순손익 금액, 순손익률). `portfolio_return`과 달리 슬리피지가 빠져 있다."""
         runtime = self._runtime
         if runtime is None:
             return (0.0, None)

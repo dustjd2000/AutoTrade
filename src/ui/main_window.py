@@ -161,7 +161,7 @@ def _in_scroll(page: QWidget) -> QScrollArea:
 def _with_toggle(field: QLineEdit, *toggles: QCheckBox) -> QWidget:
     """입력란 오른쪽에 적용 여부 체크박스를 붙여 폼의 한 줄로 만든다.
 
-    익절/손절은 입력란을 공유하는 한 행이라 체크박스 세 개를 나란히 단다.
+    AI 매도 판단·손절 체크박스 두 개가 손절 입력란과 한 행을 이룬다.
     """
     row = QWidget()
     layout = QHBoxLayout(row)
@@ -210,7 +210,7 @@ class MainWindow(QMainWindow):
         # 추천 프롬프트 버전을 읽기만 한다 — 엔진이 꺼져 있어도 파일은 그대로 있다
         self._prompt_store = PromptStore()
         # 실행 중인 엔진이 읽어간 설정값 — 저장 시 실제로 바뀐 게 있는지 비교해,
-        # 값이 그대로면 굳이 재시작하지 않는다 (재시작 사이에는 익절/손절 감시가 멈춘다).
+        # 값이 그대로면 굳이 재시작하지 않는다 (재시작 사이에는 손절·AI 매도 판단 감시가 멈춘다).
         self._applied_env: Optional[dict] = None
         # 정지 완료 신호를 받은 뒤 이어서 다시 시작해야 하는지 (설정 저장에 따른 재시작)
         self._restart_pending = False
@@ -506,7 +506,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self._mode_hint)
         self._update_mode_hint()
 
-        # 자금 배분 (1호 전략) · 리스크 관리 (익절 / 손절) — 한 줄에 나란히 배치
+        # 자금 배분 (1호 전략) · 리스크 관리 (손절) — 한 줄에 나란히 배치
         fund_risk_row = QHBoxLayout()
         fund_risk_row.setSpacing(10)
 
@@ -552,19 +552,19 @@ class MainWindow(QMainWindow):
         fund_form.addRow("총 매수가능 금액", self._investable_amount)
         fund_risk_row.addWidget(fund_box, 1)
 
-        risk_box = QGroupBox("리스크 관리 (익절 목표 / 손절 / 갭 허용치)")  # 갭은 상승·하락 두 값이다
+        risk_box = QGroupBox("리스크 관리 (손절 / 갭 허용치)")  # 갭은 상승·하락 두 값이다
         risk_form = QFormLayout(risk_box)
         risk_form.setSpacing(8)
         risk_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # 익절과 손절은 **입력란 하나를 공유한다** (확정 2026-08-21, PRD 5.5-B "익절·손절
-        # 폭 통합"). 한 칸의 값이 익절 +N%·손절 -N%로 동시에 쓰이고, 저장할 때 `.env`의
-        # `TAKE_PROFIT_PERCENT`/`STOP_LOSS_PERCENT` 두 키에 같은 값으로 들어간다 —
-        # 엔진은 종전대로 두 비율을 따로 받으며, 그 두 값이 항상 같아질 뿐이다.
-        # 수수료·세금·슬리피지를 뺀 '순손익률' 기준이며, 보유 종목을 합산한 값으로
-        # 판정한다. 종목별 판정은 단순익절 하나뿐이다.
+        # 손절 전용 입력란이다 (2026-09-18부터 — 그 전에는 이 칸의 값이
+        # `TAKE_PROFIT_PERCENT`/`STOP_LOSS_PERCENT` 두 키에 같은 값으로 들어갔지만, 이제
+        # `STOP_LOSS_PERCENT` 하나만 쓴다). 기존 값이 그대로 손절값으로 이어지므로 다시
+        # 입력할 필요는 없다.
+        # 수수료·세금·슬리피지를 뺀 '순손익률' 기준이며, 종목별로 판정한다
+        # (2026-09-18부터 — 그 전에는 보유 종목 합산이었다).
         self._exit_percent = QLineEdit()
-        self._exit_percent.setPlaceholderText("예: 2 (손절 -2%는 자동 / 익절 목표 +2%는 AI 참고선)")
+        self._exit_percent.setPlaceholderText("예: 5 (순손익 -5%에 닿은 종목을 자동 매도)")
         self._exit_percent.setValidator(QDoubleValidator(0.0, 100.0, 2))
         # 09:08 현재가가 목표 매수가보다 이만큼 넘게 높으면 그 종목을 건너뛴다
         self._buy_price_tolerance = QLineEdit()
@@ -590,7 +590,7 @@ class MainWindow(QMainWindow):
             "끄면 이익 실현 쪽 청산이 통째로 없어져 15:15 강제청산까지 갑니다."
         )
         self._stop_loss_enabled.setToolTip(
-            "보유 종목을 합산한 순손익이 -입력값(%)에 닿으면 실시간으로 전량 매도합니다."
+            "보유 종목 중 순손익률이 -입력값(%)에 닿은 종목을 실시간으로 매도합니다."
         )
         self._ai_exit_enabled.toggled.connect(self._on_exit_flag_toggled)
         self._stop_loss_enabled.toggled.connect(self._on_exit_flag_toggled)
@@ -606,7 +606,7 @@ class MainWindow(QMainWindow):
         )
 
         risk_form.addRow(
-            "익절 목표 / 손절 (%)",
+            "손절 (%)",
             _with_toggle(
                 self._exit_percent,
                 self._ai_exit_enabled,
@@ -615,17 +615,15 @@ class MainWindow(QMainWindow):
         )
         risk_form.addRow("AI 호출 주기", self._ai_exit_interval)
 
-        # 종목별 판정이 아니라는 점을 입력란 바로 아래에서 알려야 한다 — 한 종목이 크게
-        # 무너져도 다른 종목이 상쇄하면 매도가 나가지 않는다 (PRD 5.5-B, 확정 2026-08-10)
+        # 종목별 판정이라는 점을 입력란 바로 아래에서 알려야 한다 — 한 종목이 손절선에
+        # 닿으면 다른 종목과 무관하게 그 종목만 매도된다 (2026-09-18부터 — 그 전에는
+        # 보유 종목 합산 판정이었다)
         exit_hint = QLabel(
-            "(입력값 하나가 손절선(-)과 익절 목표(+)를 함께 정합니다 — 2를 넣으면 손절 -2% / "
-            "익절 목표 +2%입니다. 성격은 다릅니다: 손절은 보유 종목 합산 순손익이 그 값에 "
-            "닿는 순간 실시간으로 전량 매도되는 자동선이고, 익절 목표는 자동으로 걸리지 않는 "
-            "참고선이라 AI 매도 판단에 '이 정도면 만족'이라는 기준으로만 넘어갑니다. 이익 쪽 "
-            "청산은 AI가 호출 주기마다 보유 종목 전체를 보고 정합니다 — 끄면 이익 실현이 "
-            "통째로 없어져 15:15 강제청산까지 갑니다. 두 체크박스 상태는 켜고 끄는 즉시 "
-            "`.env`에 저장되어 다시 시작해도 그대로 이어집니다(엔진은 재시작되지 않고 바로 "
-            "반영됩니다). 호출 주기도 `.env`에 저장되지만 이쪽은 바꾸면 엔진이 재시작됩니다)"
+            "손절선입니다. 보유 종목 중 순손익률이 이 값에 닿은 종목을 실시간으로 시장가 매도합니다 "
+            "(2026-09-18부터 종목별 판정 — 그 전에는 보유 종목 합산이었습니다). 순손익률은 "
+            "수수료·세금·슬리피지를 뺀 값이라 화면의 평가손익률보다 낮습니다.\n"
+            "이익 실현은 자동선이 없고 AI 매도 판단이 맡습니다 — 그쪽은 보유 종목 전체를 한 번에 "
+            "정리할지 판단합니다."
         )
         exit_hint.setWordWrap(True)
         exit_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
@@ -633,7 +631,7 @@ class MainWindow(QMainWindow):
 
         risk_form.addRow("갭 허용치 (%)", self._buy_price_tolerance)
 
-        # 이름만으로는 무엇에 대한 허용치인지 알 수 없다 — 익절/손절과 달리 '팔 때'가 아니라
+        # 이름만으로는 무엇에 대한 허용치인지 알 수 없다 — 손절과 달리 '팔 때'가 아니라
         # '사기 전'을 보는 값이라는 점이 특히 드러나야 한다
         gap_hint = QLabel(
             "(09:08 현재가가 목표 매수가보다 이 비율을 넘게 높으면 갭 상승으로 보고 "
@@ -700,8 +698,8 @@ class MainWindow(QMainWindow):
         run_hint = QLabel(
             "스케줄(추천 시각 / 09:08 / 10:10 / 15:15 / 15:35)과 무관하게 지금 바로 실행합니다. "
             "엔진이 실행 중일 때만 동작하며, 장 시간 외에는 주문이 거부될 수 있습니다.\n"
-            "일괄 수행은 ①② (추천→지정가 매수)만 돌립니다. 매수 후에는 합산 순손익 기준 "
-            "익절/손절이 자동 감시되며, "
+            "일괄 수행은 ①② (추천→지정가 매수)만 돌립니다. 매수 후에는 순손익 기준 손절이 "
+            "종목별로 자동 감시되며, "
             "미체결 취소·매수 결과 메일(10:10), 청산(15:15), 리포트(15:35)는 스케줄에 맡깁니다.\n"
             "엔진을 10:10 이후에 켠 날은 그 취소가 스케줄에서 빠지므로 ③을 직접 눌러야 합니다 "
             "(누르지 않아도 15:15 청산 직전에 한 번 더 거둡니다)."
@@ -916,8 +914,8 @@ class MainWindow(QMainWindow):
         self._holdings_hint.setText(self._holdings_summary(rows))
         self._holdings_hint.setToolTip(
             "표시값은 수수료·세금을 뺀 순손익입니다 (현재가에 팔린다고 가정).\n"
-            "익절/손절 판정은 여기에 시장가 슬리피지까지 더 빼고 하므로, 표시값이\n"
-            "익절선에 닿아도 실제 매도는 조금 뒤에 일어납니다."
+            "손절 판정은 여기에 시장가 슬리피지까지 더 빼고 하므로, 표시값이\n"
+            "손절선에 닿아도 실제 매도는 조금 뒤에 일어납니다."
         )
         self._refresh_ai_exit()
         # 체크된 종목이 늘거나 줄면 '선택 매도' 버튼의 활성 여부가 달라진다
@@ -1006,11 +1004,10 @@ class MainWindow(QMainWindow):
         return f"{len(rows)}종목 · 순손익 {amount:+,.0f}원{percent}{self._exit_progress()}"
 
     def _exit_progress(self) -> str:
-        """익절/손절 판정에 실제로 쓰이는 합산 순손익률.
+        """보유 종목 합산 순손익률 (표시용 — 손절 판정은 종목별로 따로 한다, 2026-09-18부터).
 
-        평가손익률과는 수수료·세금·슬리피지만큼 벌어진다 — 판정이 보유 목록 전체 합산으로
-        바뀐 뒤로 이 값이 곧 매도 트리거라(PRD 5.5-B), 평가손익률만 보이면 익절선이 +0.5%인데
-        +0.8%에서 팔린 것처럼 읽힌다. 계산은 엔진이 판정에 쓴 값을 그대로 가져온다.
+        평가손익률과는 수수료·세금·슬리피지만큼 벌어진다 — 평가손익률만 보이면 손절선과의
+        거리가 헷갈린다. 계산은 엔진이 쓰는 값을 그대로 가져온다.
         """
         ret = self._engine_thread.portfolio_return()
         if ret is None:
@@ -1085,7 +1082,7 @@ class MainWindow(QMainWindow):
         """추천 종목과 매수 진행 상태를 표에 채운다 (workflow.buy_plan_snapshot).
 
         매수지정가·매도예상가·상태 문구는 전부 엔진이 계산해 둔 값을 그대로 그린다 —
-        UI가 수수료율을 따로 읽어 익절가를 다시 계산하면 실제 판정과 어긋날 수 있다
+        UI가 수수료율을 따로 읽어 매도예상가를 다시 계산하면 실제 값과 어긋날 수 있다
         (보유 종목 요약 줄과 같은 원칙).
         """
         thread = self._engine_thread
@@ -1168,7 +1165,7 @@ class MainWindow(QMainWindow):
 
         if all(plan.status == BUY_PENDING_STATUS for plan in rows):
             return f"{detail} — 매수 시각에 목표 매수가로 지정가 주문을 넣습니다."
-        return f"{detail} — 매도예상가는 익절선에 닿는 가격입니다 (합산 판정이라 근사치)."
+        return f"{detail} — 매도예상가는 참고용 목표가일 뿐 실제 매도 조건이 아닙니다."
 
     def _build_unsellable_box(self) -> QGroupBox:
         """오늘 매도하지 못한 종목과 사유. 해당 건이 없으면 박스 자체를 숨긴다."""
@@ -1238,7 +1235,7 @@ class MainWindow(QMainWindow):
             "제외된 종목은 계좌에 남아 있으며 자동 청산되지 않습니다. 직접 확인하세요."
         )
 
-    # ── 익절/손절 적용 여부 ──────────────────────────────────
+    # ── 손절 · AI 매도 판단 적용 여부 ────────────────────────
     def _uncheck_quietly(self, toggle: QCheckBox) -> None:
         """반대쪽 체크박스를 끄되, 그때 딸려오는 toggled 처리는 건너뛴다.
 
@@ -1256,8 +1253,8 @@ class MainWindow(QMainWindow):
     def _sync_exit_flag_widgets(self) -> None:
         """체크박스 상태에 딸린 화면 요소를 맞춘다 (AI 호출 주기 활성 여부·해제 경고 문구).
 
-        익절/손절 폭 입력란은 늘 열어 둔다 — 같은 칸이 손절선도 정하므로, AI 매도 판단을
-        꺼도 잠그면 손절 폭을 못 고치게 된다 (PRD 5.5-B "익절·손절 폭 통합").
+        손절 폭 입력란은 늘 열어 둔다 — AI 매도 판단을 꺼도 잠그면 손절 폭을 못 고치게
+        된다.
         """
         self._ai_exit_interval.setEnabled(self._ai_exit_enabled.isChecked())
         self._refresh_exit_flag_hint()
@@ -1317,10 +1314,10 @@ class MainWindow(QMainWindow):
     def _exit_watch_text(self) -> str:
         """매수 확인 팝업에 넣을 청산 안내 — 두 경로의 성격을 갈라 적는다.
 
-        손절은 합산 순손익이 선에 닿는 순간 실시간으로 팔리는 자동선이고, AI 매도 판단은
-        주기마다 한 번씩 보고 정하는 판단이다. 익절 목표(%)는 AI에게 넘기는 참고선일 뿐
-        그 값에 닿는다고 자동으로 팔리지 않는다 — 이 구분이 흐려지면 없는 보호를 있다고
-        믿게 된다 (PRD 5.5-B).
+        손절은 종목별 순손익이 선에 닿는 순간 그 종목만 실시간으로 팔리는 자동선이고
+        (2026-09-18부터 — 그 전에는 보유 종목 합산이었다), AI 매도 판단은 주기마다
+        보유 종목 전체를 보고 정하는 판단이라 가격 기준선이 없다 — 이 구분이 흐려지면
+        없는 보호를 있다고 믿게 된다.
         """
         percent = self._exit_percent.text().strip() or "2"
         ai_exit = self._ai_exit_enabled.isChecked()
@@ -1335,7 +1332,7 @@ class MainWindow(QMainWindow):
         lines = []
         if stop_loss:
             lines.append(
-                f"손절 -{percent}% — 보유 종목 합산 순손익이 닿는 순간 실시간으로 전량 매도합니다."
+                f"손절 -{percent}% — 순손익이 이 값에 닿은 종목을 실시간으로 매도합니다."
             )
         else:
             lines.append("⚠ 손절이 꺼져 있어 손실 쪽 실시간 청산이 없습니다.")
@@ -1343,8 +1340,8 @@ class MainWindow(QMainWindow):
         if ai_exit:
             lines.append(
                 f"AI 매도 판단 — {self._ai_exit_interval.currentText()}마다 보유 종목 전체를 보고 "
-                f"전량 매도할지 정합니다. 익절 목표 +{percent}%는 AI에게 넘기는 참고선이라 "
-                "그 값에 닿아도 자동으로 팔리지 않습니다."
+                "전량 매도할지 정합니다. 가격 기준선 없이 판단하므로 특정 값에 닿는다고 "
+                "자동으로 팔리지 않습니다."
             )
         else:
             lines.append("⚠ AI 매도 판단이 꺼져 있어 이익 실현 쪽 실시간 청산이 없습니다.")
@@ -1384,9 +1381,7 @@ class MainWindow(QMainWindow):
         self._dart_key.setText(env.get("DART_API_KEY", ""))
         self._email_from.setText(env.get("EMAIL_FROM", ""))
         self._email_to.setText(env.get("EMAIL_TO", ""))
-        # 두 키를 한 칸으로 읽는다 — 손으로 서로 다르게 적어 두면 익절 쪽 값이 보이고,
-        # 저장하는 순간 손절 값도 그 값으로 덮인다 (PRD 5.5-B "익절·손절 폭 통합")
-        self._exit_percent.setText(env.get("TAKE_PROFIT_PERCENT", "2"))
+        self._exit_percent.setText(env.get("STOP_LOSS_PERCENT", "2"))
         self._buy_price_tolerance.setText(env.get("BUY_PRICE_TOLERANCE_PERCENT", "2"))
         self._gap_down_tolerance.setText(env.get("GAP_DOWN_TOLERANCE_PERCENT", "1"))
         self._select_combo_value(self._investable_ratio, env.get("INVESTABLE_RATIO_PERCENT"), default=50)
@@ -1447,7 +1442,6 @@ class MainWindow(QMainWindow):
             "SMTP_USER": self._email_from.text().strip(),  # 로그인 계정 = 발송 주소
             "EMAIL_FROM": self._email_from.text().strip(),
             "EMAIL_TO": self._email_to.text().strip(),
-            "TAKE_PROFIT_PERCENT": self._exit_percent.text().strip() or "2",
             "STOP_LOSS_PERCENT": self._exit_percent.text().strip() or "2",
             "BUY_PRICE_TOLERANCE_PERCENT": self._buy_price_tolerance.text().strip() or "2",
             "GAP_DOWN_TOLERANCE_PERCENT": self._gap_down_tolerance.text().strip() or "1",
@@ -1514,7 +1508,7 @@ class MainWindow(QMainWindow):
         box.setText(
             f"설정을 반영하려면 엔진을 다시 시작해야 합니다.\n"
             f"아직 청산되지 않은 보유 종목이 {len(held)}개 있습니다.\n{', '.join(held)}\n\n"
-            "다시 시작하는 동안에는 익절/손절 감시가 잠시 멈춥니다\n"
+            "다시 시작하는 동안에는 손절·AI 매도 판단 감시가 잠시 멈춥니다\n"
             "(재시작 후 보유 종목은 자동으로 감시 대상에 다시 편입됩니다).\n\n"
             "지금 재시작할까요?"
         )
@@ -1675,8 +1669,7 @@ class MainWindow(QMainWindow):
             "sell_selected": (
                 f"선택한 {len(tickers)}종목을 시장가로 매도합니다.\n"
                 f"{self._selected_labels(tickers)}\n\n"
-                "나머지 보유 종목은 그대로 두며, 익절/손절은 남은 종목의 합산 손익으로 "
-                "다시 판정됩니다."
+                "나머지 보유 종목은 그대로 두며, 손절은 종목별로 그대로 감시됩니다."
             ),
             "drop_plan": (
                 f"선택한 {len(tickers)}종목을 오늘 매수 대상에서 뺍니다.\n"
@@ -1749,7 +1742,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         # 창을 닫으면 엔진도 함께 정리한다 (UI가 유일한 제어 지점이므로)
         if self._engine_thread is not None:
-            # 익절/손절은 이 프로그램이 떠 있는 동안에만 동작한다 (키움 REST 스탑오더 미지원).
+            # 손절·AI 매도 판단은 이 프로그램이 떠 있는 동안에만 동작한다 (키움 REST 스탑오더 미지원).
             # 보유 종목을 남긴 채 닫으면 손절이 사라지므로 반드시 확인을 받는다.
             held = self._engine_thread.open_tickers()
             if held and not self._confirm_close_with_positions(held):
@@ -1768,7 +1761,7 @@ class MainWindow(QMainWindow):
         box.setIcon(QMessageBox.Icon.Warning)
         box.setText(
             f"아직 청산되지 않은 보유 종목이 {len(held)}개 있습니다.\n{', '.join(held)}\n\n"
-            "익절/손절 감시는 이 프로그램이 실행 중일 때만 동작합니다.\n"
+            "손절·AI 매도 판단 감시는 이 프로그램이 실행 중일 때만 동작합니다.\n"
             "지금 닫으면 손절이 걸리지 않고 장 마감 강제청산(15:15)도 실행되지 않아\n"
             "포지션이 다음 영업일로 넘어갑니다.\n\n"
             "그래도 종료할까요?"
