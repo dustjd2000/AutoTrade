@@ -502,7 +502,7 @@ def _report_html(
 
 
 # ── 09:08 매수 알림 ─────────────────────────────────────────
-BUY_HEADERS = ("종목", "상태", "수량", "단가", "투입금액", "익절가", "손절가")
+BUY_HEADERS = ("종목", "상태", "수량", "단가", "투입금액", "손절가")
 
 BUY_OUTCOME_LABELS = {
     BuyOutcome.FILLED: "체결",
@@ -529,36 +529,20 @@ def _buy_notes(execution: BuyExecution) -> List[str]:
             "그날 그 종목은 매수하지 않습니다."
         )
     notes.append(
-        "※ 익절가·손절가는 위 익절/손절 라인에 닿는 가격입니다 "
-        "(표의 단가 기준, 수수료·세금·슬리피지 반영)."
+        "※ 손절가는 위 손절 라인에 닿는 가격입니다 (표의 단가 기준, 수수료·세금·슬리피지 반영)."
     )
-    # 단순익절만 종목별 판정이라 익절가가 참고값이 아니라 그 종목의 실제 매도 지점이다
-    if execution.simple_take_profit:
-        notes.append(
-            "※ 단순익절은 종목마다 따로 판정해 그 종목만 매도하고 나머지는 계속 보유합니다. "
-            "손절만 보유 종목 전체를 합산해 판정하며, 닿으면 전량 매도합니다 — 이익 난 종목이 "
-            "먼저 빠지면 남은 종목의 손실을 상쇄할 것이 없어져 손절이 더 쉽게 걸립니다."
-        )
-    else:
-        notes.append(
-            "※ 실제 판정은 계좌 평단가로 보유 종목 전체를 합산해 하며, 손절 조건에 닿으면 전량 "
-            "매도합니다 — 익절가는 자동 매도로 이어지지 않는 참고값이고, 종목별 익절/손절도 "
-            "없습니다. 위 가격은 '이 종목 혼자였다면' 기준의 참고값입니다."
-        )
+    notes.append(
+        "※ 손절은 종목마다 따로 판정합니다 — 그 종목의 순손익률이 손절 조건에 닿으면 그 종목만 "
+        "전량 매도하고 나머지는 계속 보유합니다. 위 손절가는 참고값이 아니라 그 종목의 실제 "
+        "매도 지점입니다."
+    )
     notes.extend(
         [
-            "※ 익절/손절 감시는 이 프로그램이 실행 중일 때만 동작합니다 (키움 REST 스탑오더 미지원).",
+            "※ 손절 감시는 이 프로그램이 실행 중일 때만 동작합니다 (키움 REST 스탑오더 미지원).",
             "※ 체결가·수수료·손익은 15:35 리포트에서 확정됩니다.",
         ]
     )
     return notes
-
-
-def _take_profit_line(execution: BuyExecution) -> str:
-    """익절선 표기 — 단순익절이면 '+0.00%'로 적어 꺼진 것처럼 보이지 않게 이름으로 적는다."""
-    if execution.simple_take_profit:
-        return "단순익절 (종목별 0% 초과)"
-    return f"+{execution.take_profit_percent:.2f}%"
 
 
 def _buy_facts(execution: BuyExecution) -> List[tuple[str, str]]:
@@ -576,10 +560,7 @@ def _buy_facts(execution: BuyExecution) -> List[tuple[str, str]]:
         ("주문가능금액", _balance(execution.cash)),
         ("종목당 배정", f"{_balance(execution.amount_per_stock)}{share}"),
         ("총 투입금액", _balance(execution.invested)),
-        (
-            "익절 / 손절 라인 (합산 순손익)",
-            f"{_take_profit_line(execution)} / -{execution.stop_loss_percent:.2f}%",
-        ),
+        ("손절 라인 (순손익 기준, 종목별 판정)", f"-{execution.stop_loss_percent:.2f}%"),
     ]
 
 
@@ -587,13 +568,10 @@ def _buy_row_cells(record: BuyRecord, execution: BuyExecution) -> tuple[str, ...
     """표 한 줄의 셀 값 — 매수하지 못한 종목은 금액 칸을 비운다 (사유는 표 아래에 적는다)."""
     state = BUY_OUTCOME_LABELS[record.outcome]
     if not record.outcome.is_ordered or record.price <= 0 or record.shares <= 0:
-        return (record.label, state, "-", "-", "-", "-", "-")
+        return (record.label, state, "-", "-", "-", "-")
     commission_rate = execution.commission_percent / 100
     tax_rate = execution.tax_percent / 100
     slippage_rate = execution.slippage_percent / 100
-    take_profit_price = exit_trigger_price(
-        record.price, execution.take_profit_percent / 100, commission_rate, tax_rate, slippage_rate
-    )
     stop_loss_price = exit_trigger_price(
         record.price, -execution.stop_loss_percent / 100, commission_rate, tax_rate, slippage_rate
     )
@@ -603,7 +581,6 @@ def _buy_row_cells(record: BuyRecord, execution: BuyExecution) -> tuple[str, ...
         f"{record.shares:,}",
         f"{record.price:,.0f}",
         f"{record.amount:,.0f}",
-        f"{take_profit_price:,.0f}",
         f"{stop_loss_price:,.0f}",
     )
 

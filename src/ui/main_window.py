@@ -89,7 +89,7 @@ AI_EXIT_VIEW_HEIGHT = 64
 # 절차가 어디까지 갔는지 알 수 없어 따로 보여준다 (PRD 5.10 "매수 예정 표")
 # 0번 열은 '선택 삭제' 대상 체크 — 보유 종목 표와 같은 방식이다 (HOLDINGS_CHECK_COLUMN 참고).
 # 현재가는 엔진이 받아둔 마지막 시세로, 지정가가 체결될 자리인지 보고 뺄 종목을 고르는 데 쓴다.
-BUY_PLAN_COLUMNS = ("선택", "종목", "상태", "수량", "매수지정가", "현재가", "매도예상가", "비고")
+BUY_PLAN_COLUMNS = ("선택", "종목", "상태", "수량", "매수지정가", "현재가", "비고")
 BUY_PLAN_CHECK_COLUMN = 0
 # 매수가 확정된 상태만 강조한다 — 나머지(대기·건너뜀·실패·취소)는 기본색/흐린색이다.
 # '체결'은 표에서 아예 빠지지만(보유 종목 표로 넘어간다) 부분체결 표기를 위해 남겨둔다.
@@ -1081,9 +1081,8 @@ class MainWindow(QMainWindow):
     def _refresh_buy_plans(self) -> None:
         """추천 종목과 매수 진행 상태를 표에 채운다 (workflow.buy_plan_snapshot).
 
-        매수지정가·매도예상가·상태 문구는 전부 엔진이 계산해 둔 값을 그대로 그린다 —
-        UI가 수수료율을 따로 읽어 매도예상가를 다시 계산하면 실제 값과 어긋날 수 있다
-        (보유 종목 요약 줄과 같은 원칙).
+        매수지정가·상태 문구는 전부 엔진이 계산해 둔 값을 그대로 그린다 — UI가 값을
+        따로 다시 계산하면 실제 값과 어긋날 수 있다 (보유 종목 요약 줄과 같은 원칙).
         """
         thread = self._engine_thread
         # 엔진이 멈춰 있으면 오늘 무엇을 살지 알 수 없다 — 빈 표 대신 박스를 숨긴다
@@ -1113,8 +1112,6 @@ class MainWindow(QMainWindow):
                  Qt.AlignmentFlag.AlignRight, COLOR_TEXT),
                 (f"{plan.current_price:,.0f}" if plan.current_price else "-",
                  Qt.AlignmentFlag.AlignRight, _gap_color(plan)),
-                (f"{plan.sell_price:,.0f}" if plan.sell_price else "-",
-                 Qt.AlignmentFlag.AlignRight, COLOR_TEXT),
                 (plan.note, Qt.AlignmentFlag.AlignLeft, COLOR_TEXT_DIM),
             )
             for col, (value, align, color) in enumerate(cells, start=1):
@@ -1165,7 +1162,7 @@ class MainWindow(QMainWindow):
 
         if all(plan.status == BUY_PENDING_STATUS for plan in rows):
             return f"{detail} — 매수 시각에 목표 매수가로 지정가 주문을 넣습니다."
-        return f"{detail} — 매도예상가는 참고용 목표가일 뿐 실제 매도 조건이 아닙니다."
+        return detail
 
     def _build_unsellable_box(self) -> QGroupBox:
         """오늘 매도하지 못한 종목과 사유. 해당 건이 없으면 박스 자체를 숨긴다."""

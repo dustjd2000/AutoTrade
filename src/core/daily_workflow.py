@@ -26,7 +26,6 @@ from src.llm.recommender import LLMRecommender, build_locked_prompt_text, tick_s
 from src.logger.trade_store import TradeStore
 from src.notification.email import EmailNotifier
 from src.notification import chart, templates
-from src.risk.manager import exit_trigger_price
 from src.strategy.llm_momentum import LLMMomentumStrategy
 
 logger = logging.getLogger(__name__)
@@ -308,22 +307,6 @@ class DailyWorkflow:
     def _set_buy_board(self, day: date, rows: List[BuyPlanView]) -> None:
         self._buy_board = (day, tuple(rows))
 
-    def _take_profit_price(self, price: float) -> float:
-        """익절 기준선에 닿는 가격 — 표의 '매도예상가'. 자동 매도 조건이 아니라 참고값이다.
-
-        LLM의 목표 매도가가 아니라 `take_profit_ratio`를 순손익 기준으로 역산한 값이다.
-        목표 매도가는 주문에 쓰이지 않는 참고 수치라(PRD 5.5-B) "언제 팔리나"에 답하지
-        못한다. 익절 자동 청산과 단순익절은 2026-09-09에 걷어냈으므로(PRD 10절) 이 가격에
-        닿아도 실제로 팔리지 않는다 — `take_profit_ratio`는 추후 AI 판단에 넘길 기준선으로
-        남아 있고, 여기서는 그 기준선이 "이 종목 혼자였다면" 어디인지 보여줄 뿐이다.
-        """
-        risk = self.engine.risk_manager
-        if price <= 0:
-            return 0.0
-        return exit_trigger_price(
-            price, risk.take_profit_ratio, risk.commission_rate, risk.tax_rate, risk.slippage_rate
-        )
-
     def _board_from_recommendations(self, recommendations) -> List[BuyPlanView]:
         """추천 직후의 표 — 실제로 매수할 상위 몇 종목만 담는다 (build_buy_plans와 같은 기준)."""
         return [
@@ -332,13 +315,12 @@ class DailyWorkflow:
                 label=format_stock(r.ticker, r.name),
                 status=BUY_PENDING_STATUS,
                 buy_price=float(r.target_price),
-                sell_price=self._take_profit_price(float(r.target_price)),
             )
             for r in recommendations[: self.strategy.target_stock_count]
         ]
 
     def _board_from_records(self, records: List[BuyRecord]) -> List[BuyPlanView]:
-        """매수 시각 이후의 표 — 매수하지 못한 종목은 수량·매도예상가를 비우고 사유만 남긴다.
+        """매수 시각 이후의 표 — 매수하지 못한 종목은 수량을 비우고 사유만 남긴다.
 
         완전 체결된 종목은 뺀다 — 이미 산 것은 '매수 예정'이 아니고, 바로 아래 '보유 종목'
         표에 현재가·손익과 함께 실린다. 부분체결은 남은 수량이 아직 미체결이라 남긴다.
@@ -350,7 +332,6 @@ class DailyWorkflow:
                 status=templates.BUY_OUTCOME_LABELS[r.outcome],
                 quantity=(r.filled_quantity or r.quantity) if r.outcome.is_ordered else 0,
                 buy_price=r.price,
-                sell_price=self._take_profit_price(r.price) if r.outcome.is_ordered else 0.0,
                 note=r.note or "",
             )
             for r in records
@@ -968,11 +949,6 @@ class DailyWorkflow:
             cash=cash,
             amount_per_stock=amount_per_stock,
             records=records,
-            # 익절 자동 청산과 단순익절은 걷어냈다(2026-09-09, PRD 10절) — take_profit_percent는
-            # 이제 항상 참고 기준선(take_profit_ratio) 값이고, simple_take_profit은 그 모드가
-            # 없어졌으므로 항상 False다. 필드 자체는 과거 메일과 형식을 맞추려 남겨 둔다.
-            take_profit_percent=self.engine.risk_manager.take_profit_ratio * 100,
-            simple_take_profit=False,
             stop_loss_percent=self.engine.risk_manager.stop_loss_ratio * 100,
             commission_percent=self.engine.risk_manager.commission_rate * 100,
             tax_percent=self.engine.risk_manager.tax_rate * 100,

@@ -149,10 +149,6 @@ class BuyExecution:
     cash: float                       # 매수 산정에 쓴 예수금
     amount_per_stock: float           # 종목당 배정액
     records: List[BuyRecord] = field(default_factory=list)
-    take_profit_percent: float = 0.0
-    # 단순익절 모드는 2026-09-09에 걷어냈다(PRD 10절) — 이 플래그는 항상 False이고,
-    # 과거 메일과 템플릿 형식을 맞추려 필드만 남겨 둔다.
-    simple_take_profit: bool = False
     stop_loss_percent: float = 0.0
     commission_percent: float = 0.0
     tax_percent: float = 0.0
@@ -185,7 +181,6 @@ class BuyPlanView:
     status: str              # '매수 대기' 또는 BUY_OUTCOME_LABELS의 문구
     quantity: int = 0        # 0 = 아직 주문 전이거나 매수하지 못한 종목
     buy_price: float = 0.0   # 매수지정가 — 체결됐으면 체결가
-    sell_price: float = 0.0  # 익절 환산가. 0 = 익절이 꺼져 있거나 산출 불가 (표에서 빈칸)
     current_price: float = 0.0  # 마지막 수신 시세. 0 = 아직 틱이 오지 않음 (표에서 빈칸)
     note: str = ""           # 건너뜀·실패·취소 사유
 

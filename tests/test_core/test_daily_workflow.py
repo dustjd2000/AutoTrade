@@ -810,10 +810,9 @@ def test_buy_result_email_lists_ordered_stocks():
     assert "2,000" in body                    # 수량 2000주
     assert "총 투입금액" in body
     assert "4,000,000원" in body               # 2종목 × 200만
-    # 익절/손절 라인은 순손익 설정값(기본 +0.5% / -2%) 기준이다
-    tp_price = exit_trigger_price(1000.0, 0.005, 0.00015, 0.0018, 0.001)
+    # 손절 라인은 순손익 설정값(기본 -2%) 기준이다
     sl_price = exit_trigger_price(1000.0, -0.02, 0.00015, 0.0018, 0.001)
-    assert f"{tp_price:,.0f}" in body and f"{sl_price:,.0f}" in body
+    assert f"{sl_price:,.0f}" in body
     assert "<table" in html
 
 
@@ -1064,17 +1063,11 @@ def test_buy_plan_snapshot_is_filled_at_recommendation_time():
     assert plan.status == daily_workflow.BUY_PENDING_STATUS
     assert plan.buy_price == 1000
     assert plan.quantity == 0  # 아직 주문 전이라 수량을 모른다
-    # 매도예상가는 LLM 목표 매도가(1,100)가 아니라 익절선에 닿는 가격이다
-    assert plan.sell_price == pytest.approx(
-        exit_trigger_price(1000, 0.005, 0.00015, 0.0018, 0.001)
-    )
 
 
-# 단순익절(simple_take_profit_enabled)과 익절 적용 해제(take_profit_enabled)는 2026-09-09에
-# 걷어냈다 (PRD 10절) — 매도예상가가 그 값을 따라 바뀌는지 보던
-# test_buy_plan_sell_price_follows_simple_take_profit / test_buy_plan_sell_price_is_blank_when_take_profit_is_off
-# 두 테스트를 지웠다. 매도예상가는 이제 항상 take_profit_ratio를 참고값으로 쓴다 —
-# 위 test_buy_plan_snapshot_is_filled_at_recommendation_time이 그 계산을 계속 확인한다.
+# 매도예상가(BuyPlanView.sell_price, 익절선을 역산한 값)는 2026-09-18에 걷어냈다 —
+# 익절 자동 청산이 없는 지금 "이 종목 혼자였다면 익절선이 어디인지" 보여주는 값이
+# 의미가 없어졌다. 그 값을 확인하던 테스트도 함께 지운다.
 
 
 def test_buy_plan_snapshot_shows_order_status_after_buying():
@@ -1102,7 +1095,6 @@ def test_buy_plan_snapshot_keeps_the_result_after_the_records_file_is_cleared():
     (plan,) = workflow.buy_plan_snapshot()
     assert plan.status == "미체결 취소"
     assert plan.quantity == 0        # 사지 못했으므로 수량을 비운다
-    assert plan.sell_price == 0.0    # 팔 것이 없으니 매도예상가도 없다
     assert "목표 매수가에 닿지 않아" in plan.note
 
 
