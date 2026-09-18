@@ -154,9 +154,8 @@ class Settings:
         """스케줄러에 넘길 매수 시각 (자금 산정 → 목표 매수가 지정가 주문)."""
         return _parse_hhmm(self.buy_time_hhmm, DEFAULT_BUY_TIME_HHMM, "BUY_TIME")
 
-    # 익절/손절 라인 — UI/환경변수에는 %(예: 0.5)로 저장, 내부 계산은 비율(0.005)로 환산.
-    # 둘 다 수수료·세금·슬리피지를 뺀 순손익률 기준이다 (PRD 5.5-B).
-    take_profit_percent: float = field(default_factory=lambda: float(os.getenv("TAKE_PROFIT_PERCENT", "0.5")))
+    # 손절 라인 — UI/환경변수에는 %(예: 2)로 저장, 내부 계산은 비율(0.02)로 환산.
+    # 수수료·세금·슬리피지를 뺀 순손익률 기준이다 (PRD 5.5-B).
     stop_loss_percent: float = field(default_factory=lambda: float(os.getenv("STOP_LOSS_PERCENT", "2")))
     # 종목 순손익률이 당일 고점 대비 이만큼(%p) 밀리면 호출 주기를 기다리지 않고 AI 매도
     # 판단을 앞당긴다 (PRD 5.5-B "이익 반납 감시"). 0을 넣으면 이 감시를 끈다. UI에는
@@ -164,10 +163,6 @@ class Settings:
     ai_exit_drawdown_percent: float = field(
         default_factory=lambda: float(os.getenv("AI_EXIT_DRAWDOWN_PERCENT", "1"))
     )
-
-    @property
-    def take_profit_ratio(self) -> float:
-        return self.take_profit_percent / 100
 
     @property
     def ai_exit_drawdown_ratio(self) -> float:

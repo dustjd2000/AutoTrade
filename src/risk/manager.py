@@ -33,9 +33,7 @@ def exit_trigger_price(
     """순손익률이 target_ratio에 도달하는 현재가 — net_return의 역함수 (표시용).
 
     합산으로 판정하는 손절에서는 이 가격에 닿아도 그 종목만 팔리지는 않는다 (PRD 5.5-B)
-    — "이 종목 혼자였다면 조건에 닿는 가격"이라는 참고값이다. 익절선(target_ratio에
-    `take_profit_ratio`를 넘긴 경우)은 자동 매도를 하지 않으므로 항상 참고값이다
-    (2026-09-09, 익절 자동 청산 제거 — PRD 10절).
+    — "이 종목 혼자였다면 조건에 닿는 가격"이라는 참고값이다.
     """
     return (
         avg_price
@@ -148,10 +146,6 @@ class RiskManager:
         self,
         max_position_ratio: float = 0.1,      # 종목당 최대 계좌 비중
         max_daily_loss_ratio: float = 0.02,   # 일일 최대 손실 비중
-        take_profit_ratio: float = 0.005,     # 익절 기준선 (순손익률) — 자동 청산에는 쓰지 않는다.
-                                               # AI 판단(추후 Task)에 넘길 참고 라인으로만 남겨 둔다
-                                               # (2026-09-09, 익절 자동 청산 제거 — PRD 10절: 실매매
-                                               # 27건 대조에서 어떤 익절선도 "익절 없음"을 못 이겼다).
         stop_loss_ratio: float = 0.02,        # 손절 라인 (순손익률)
         max_total_exposure_ratio: float = 0.7,  # 전체 계좌 대비 최대 노출 비중
         commission_rate: float = 0.00015,     # 매매수수료 (매수·매도 동일 적용)
@@ -161,7 +155,6 @@ class RiskManager:
     ):
         self.max_position_ratio = max_position_ratio
         self.max_daily_loss_ratio = max_daily_loss_ratio
-        self.take_profit_ratio = take_profit_ratio
         self.stop_loss_ratio = stop_loss_ratio
         self.max_total_exposure_ratio = max_total_exposure_ratio
         self.commission_rate = commission_rate

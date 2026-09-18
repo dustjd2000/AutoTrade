@@ -82,7 +82,6 @@ class FakeEngine:
         self.risk_manager = SimpleNamespace(
             portfolio_return=lambda hs: portfolio_return,
             stop_loss_ratio=0.02,
-            take_profit_ratio=0.005,
         )
         self.trade_store = SimpleNamespace(recommendations_for=lambda day: [])
         self.exit_candidates_calls = []  # force 인자 기록

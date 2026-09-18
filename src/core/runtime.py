@@ -168,7 +168,6 @@ def build_runtime(settings: Settings) -> Runtime:
     risk_manager = RiskManager(
         max_position_ratio=settings.max_position_ratio,
         max_daily_loss_ratio=settings.max_daily_loss_ratio,
-        take_profit_ratio=settings.take_profit_ratio,
         stop_loss_ratio=settings.stop_loss_ratio,
         stop_loss_enabled=settings.stop_loss_enabled,
         max_total_exposure_ratio=settings.max_total_exposure_ratio,

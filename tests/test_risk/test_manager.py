@@ -16,7 +16,6 @@ from src.risk.manager import (
 
 
 def make_manager(
-    take_profit_ratio=0.005,
     stop_loss_ratio=0.02,
     initial_asset=10_000_000,
     max_total_exposure_ratio=0.7,
@@ -26,7 +25,6 @@ def make_manager(
     stop_loss_enabled=True,
 ):
     manager = RiskManager(
-        take_profit_ratio=take_profit_ratio,
         stop_loss_ratio=stop_loss_ratio,
         max_total_exposure_ratio=max_total_exposure_ratio,
         commission_rate=commission_rate,
@@ -64,7 +62,7 @@ def test_portfolio_exit_triggers_stop_loss_at_threshold():
 
 
 def test_portfolio_exit_returns_none_within_band():
-    manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02)
+    manager = make_manager(stop_loss_ratio=0.02)
 
     assert manager.check_position_exits([held("005930", 10, 1000.0, 1002.0)]) == []
 
@@ -107,7 +105,7 @@ def test_profit_and_loss_offset_each_other():
     닿은 000660만 걸리고, 그 사실은 `portfolio_return`(표시값)에는 영향을 주지 않는다 —
     그 값은 여전히 합산 가중평균이다.
     """
-    manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02)
+    manager = make_manager(stop_loss_ratio=0.02)
     positions = [
         held("005930", 100, 1000.0, 1010.0),  # +1%
         held("000660", 100, 1000.0, 970.0),   # -3% — 손절선(-2%)을 넘겼다
@@ -125,7 +123,7 @@ def test_weighting_follows_invested_amount_not_stock_count():
     걸린다 — 옛 이름이 확인하던 "합산은 익절선을 넘지만 자동 청산이 없어 팔지 않는다"는
     더 이상 이 시나리오가 보여주는 것이 아니다.
     """
-    manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02)
+    manager = make_manager(stop_loss_ratio=0.02)
     positions = [
         held("005930", 1000, 1000.0, 1010.0),  # 매입 100만원, +1%  → +1만원
         held("000660", 10, 1000.0, 700.0),     # 매입 1만원,  -30% → -3천원, 손절선을 넘었다
@@ -157,13 +155,13 @@ def test_disabled_flags_do_not_stop_the_return_calculation():
 
 def test_portfolio_exit_no_longer_takes_profit():
     """익절은 자동 청산에서 빠졌다 — 이익이 아무리 커도 여기서는 팔지 않는다."""
-    manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02)
+    manager = make_manager(stop_loss_ratio=0.02)
     profitable = [held("005930", 10, 1000.0, 1100.0)]
     assert manager.check_position_exits(profitable) == []
 
 
 def test_portfolio_exit_still_stops_loss():
-    manager = make_manager(take_profit_ratio=0.005, stop_loss_ratio=0.02)
+    manager = make_manager(stop_loss_ratio=0.02)
     losing = [held("005930", 10, 1000.0, 900.0)]
     assert manager.check_position_exits(losing) == ["005930"]
 
@@ -172,12 +170,6 @@ def test_stop_loss_can_still_be_disabled():
     manager = make_manager(stop_loss_ratio=0.02, stop_loss_enabled=False)
     losing = [held("005930", 10, 1000.0, 900.0)]
     assert manager.check_position_exits(losing) == []
-
-
-def test_take_profit_ratio_survives_as_a_reference_line():
-    """자동 청산에는 안 쓰지만 AI에게 넘길 기준선이라 설정은 남는다."""
-    manager = make_manager(take_profit_ratio=0.005)
-    assert manager.take_profit_ratio == 0.005
 
 
 def test_simple_take_profit_is_gone():

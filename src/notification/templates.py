@@ -70,8 +70,8 @@ def recommendation_email(
 def _sell_target_line(r: StockRecommendation) -> str:
     """추천 메일의 목표 매도가 한 줄. 산출되지 않았으면(0) 빈 문자열이라 줄이 통째로 빠진다.
 
-    매수가 대비 상승률을 함께 적는다 — 절대 가격만으로는 이 목표가 익절선(순손익 기준)보다
-    위인지 아래인지 한눈에 들어오지 않는다.
+    매수가 대비 상승률을 함께 적는다 — 절대 가격만으로는 LLM이 이 종목에 어느 정도의
+    상승을 기대하는지 한눈에 들어오지 않는다.
     """
     if r.target_sell_price <= 0 or r.target_price <= 0:
         return ""

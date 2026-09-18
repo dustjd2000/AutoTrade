@@ -78,9 +78,6 @@ def make_engine(positions, trade_store=None):
         account=FakeAccount(positions),
         strategy=SimpleNamespace(name="s", generate_signal=lambda d: Signal.HOLD),
         risk_manager=RiskManager(
-            # take_profit_ratio는 자동 청산에 더는 쓰이지 않지만(2026-09-09, PRD 10절),
-            # 옛 익절선 근방에서도 매도가 나가지 않는지 확인하는 테스트를 위해 그대로 둔다
-            take_profit_ratio=0.005,
             stop_loss_ratio=0.02,
             commission_rate=0.0,
             tax_rate=0.0,

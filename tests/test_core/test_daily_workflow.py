@@ -103,7 +103,6 @@ def make_workflow(recommendations=None, collected=True, cash=12_000_000):
         risk_manager=SimpleNamespace(
             approve=lambda *a, **kw: True,
             record_order=lambda *a, **kw: None,
-            take_profit_ratio=0.005,
             stop_loss_ratio=0.02,
             commission_rate=0.00015,
             tax_rate=0.0018,
@@ -1503,7 +1502,6 @@ def build_workflow(tmp_path):
         risk_manager=SimpleNamespace(
             approve=lambda *a, **kw: True,
             record_order=lambda *a, **kw: None,
-            take_profit_ratio=0.005,
             stop_loss_ratio=0.02,
             commission_rate=0.00015,
             tax_rate=0.0018,
