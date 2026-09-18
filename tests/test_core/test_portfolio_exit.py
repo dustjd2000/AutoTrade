@@ -208,3 +208,64 @@ def test_stop_loss_is_recorded_with_its_reason():
 
 # 단순익절 사유("simple_take_profit")를 percent take_profit과 구분해 기록하는지 보던
 # test_simple_take_profit_is_recorded_apart_from_the_percent_one은 단순익절과 함께 지웠다.
+
+
+# ── 종목별 손절 판정 (2026-09-18) ──────────────────────────
+def _risk(stop_loss_ratio=0.05, stop_loss_enabled=True):
+    return RiskManager(
+        stop_loss_ratio=stop_loss_ratio,
+        stop_loss_enabled=stop_loss_enabled,
+        commission_rate=0.0,
+        tax_rate=0.0,
+        slippage_rate=0.0,
+    )
+
+
+def _pos(ticker, avg_price, current_price):
+    return Position(
+        ticker=ticker,
+        quantity=1,
+        avg_price=avg_price,
+        current_price=current_price,
+        name=ticker,
+    )
+
+
+def test_position_exits_picks_only_the_broken_one():
+    """한 종목만 손절선에 닿으면 그 종목만 돌려준다."""
+    positions = [
+        _pos("000660", 100_000, 93_000),   # -7.0%
+        _pos("005930", 100_000, 101_000),  # +1.0%
+    ]
+
+    assert _risk().check_position_exits(positions) == ["000660"]
+
+
+def test_position_exits_returns_all_broken():
+    """여러 종목이 동시에 닿으면 전부 돌려준다."""
+    positions = [
+        _pos("000660", 100_000, 93_000),
+        _pos("005930", 100_000, 94_000),
+    ]
+
+    assert sorted(_risk().check_position_exits(positions)) == ["000660", "005930"]
+
+
+def test_position_exits_ignores_portfolio_average():
+    """합산은 손절선인데 개별은 아무도 안 닿으면 매도하지 않는다.
+
+    합산 판정이던 시절에는 전량 매도였다 — 종목별로 바꾸며 의도적으로 달라진 지점이다.
+    """
+    positions = [
+        _pos("000660", 100_000, 96_000),   # -4.0%
+        _pos("005930", 100_000, 95_500),   # -4.5%
+    ]                                       # 합산 -4.25%, 손절선 -4%
+
+    assert sorted(_risk(stop_loss_ratio=0.04).check_position_exits(positions)) == ["000660", "005930"]
+
+
+def test_position_exits_empty_when_disabled():
+    """손절을 끄면 빈 목록 — 판정 자체를 하지 않는다."""
+    positions = [_pos("000660", 100_000, 90_000)]
+
+    assert _risk(stop_loss_enabled=False).check_position_exits(positions) == []

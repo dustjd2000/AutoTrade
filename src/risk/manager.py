@@ -1,6 +1,6 @@
 import logging
 import math
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from src.api.account import BalanceSnapshot, Position
 from src.core.events import ExitReason, OrderRequest, OrderResult, OrderSide, OrderStatus
@@ -219,6 +219,41 @@ class RiskManager:
         닿아도 실제 매도는 조금 뒤에 일어난다 — 요약줄 툴팁이 이걸 알린다.
         """
         return portfolio_net_pnl(positions, self.commission_rate, self.tax_rate)
+
+    def check_position_exits(self, positions: Iterable[Position]) -> List[str]:
+        """손절선에 닿은 **종목**을 골라 돌려준다 (확정 2026-09-18, PRD 5.5-B).
+
+        판정 단위를 합산에서 종목별로 되돌린 것이다. 2026-08-10에 합산으로 간 근거는
+        "익절과 손절 두 규칙을 두면 먼저 팔린 종목의 확정 손실이 이후 합산에서 빠져
+        순서에 따라 결과가 달라진다"였는데, 익절을 걷어내 규칙이 손절 하나만 남으면서
+        그 근거가 해소됐다.
+
+        판정은 가격 변동률이 아니라 왕복 수수료·매도세금·슬리피지를 뺀 순손익률 기준이다
+        — 합산 판정이 쓰던 것과 같은 식(`net_return`)을 종목 단위로 적용한다.
+
+        `stop_loss_enabled`가 꺼져 있으면 빈 목록이다. 합산 순손익률(`portfolio_return`)
+        계산은 멈추지 않으므로 UI 표시와 AI 프롬프트는 그대로다.
+
+        키움 REST API에 조건부 예약주문(스탑오더)이 없어, 이 실시간 감시가 하방의
+        사실상 유일한 청산 수단이다 — 앱이 꺼지거나 WebSocket이 끊기면 그 사이 손절도
+        멈춘다.
+        """
+        if not self.stop_loss_enabled:
+            return []
+        broken = []
+        for position in positions:
+            if position.avg_price <= 0 or position.current_price <= 0:
+                continue
+            ret = net_return(
+                position.current_price,
+                position.avg_price,
+                self.commission_rate,
+                self.tax_rate,
+                self.slippage_rate,
+            )
+            if ret <= -self.stop_loss_ratio:
+                broken.append(position.ticker)
+        return broken
 
     def check_portfolio_exit(self, positions: Iterable[Position]) -> Optional[ExitReason]:
         """보유 종목 **전체**가 손절 라인에 도달했는지 확인한다.
