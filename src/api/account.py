@@ -157,7 +157,7 @@ class AccountClient:
                 continue
 
             # 키움은 가격에 등락 방향 부호를 붙여 보낸다(하락 시 '-'). 절댓값을 취하지 않으면
-            # 하락 종목의 현재가가 음수가 되어 손절/익절 판정이 완전히 어긋난다.
+            # 하락 종목의 현재가가 음수가 되어 손절 판정이 완전히 어긋난다.
             name = _first_present(row, "stk_nm", "prdt_name", "stk_nm_shrt", "hts_kor_isnm")
             # 매도가능수량도 TR마다 이름이 다르다. 못 찾으면 None으로 두어야
             # closable_quantity가 보유수량으로 폴백한다 (0으로 읽으면 매도가 아예 막힌다).

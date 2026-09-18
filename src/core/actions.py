@@ -85,7 +85,7 @@ CONFIRM_ACTIONS = ORDER_ACTIONS
 class ManualStep:
     label: str
     run: Callable[[], None]
-    # True면 엔진 루프 스레드에서 실행해 실시간 익절·손절 감시와 직렬화한다
+    # True면 엔진 루프 스레드에서 실행해 실시간 손절 감시와 직렬화한다
     # (같은 종목을 동시에 청산하는 경쟁 상태 방지). False면 별도 스레드 — ActionRunner 참고.
     touches_orders: bool = False
 

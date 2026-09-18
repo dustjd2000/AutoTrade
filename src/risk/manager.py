@@ -209,8 +209,9 @@ class RiskManager:
     def portfolio_net_pnl(self, positions: Iterable[Position]) -> Tuple[float, Optional[float]]:
         """보유 종목 합산 (순손익 금액, 순손익률) — 표시용이라 슬리피지를 빼지 않는다.
 
-        판정에 쓰는 `portfolio_return`과는 슬리피지만큼 다르다. 표시값이 익절선에
-        닿아도 실제 매도는 조금 뒤에 일어난다 — 요약줄 툴팁이 이걸 알린다.
+        AI 프롬프트·표시에 쓰는 `portfolio_return`과는 슬리피지만큼 다르다 — 이쪽이 항상
+        조금 높다. 손절 판정 자체는 이 값도 `portfolio_return`도 쓰지 않는다(종목별
+        `net_return` 기준, `check_position_exits`).
         """
         return portfolio_net_pnl(positions, self.commission_rate, self.tax_rate)
 

@@ -173,7 +173,7 @@ class Settings:
         return self.stop_loss_percent / 100
 
     # 청산 경로 적용 여부 — UI 체크박스가 켜고 끄며, 바뀔 때마다 `.env`에 저장된다
-    # (확정 2026-09-09, PRD 5.5-B "익절/손절 적용 여부"). 다른 리스크 설정과 달리 엔진을
+    # (확정 2026-09-09, PRD 5.5-B "청산 적용 여부"). 다른 리스크 설정과 달리 엔진을
     # 재시작하지 않고 돌고 있는 엔진에 바로 밀어 넣으므로(`EngineThread.set_exit_flags`),
     # 여기서 읽은 값이 쓰이는 것은 엔진이 새로 뜨는 순간뿐이다.
     # 둘 다 꺼져 있으면 실시간 청산이 사라지고 15:15 강제청산까지 보유한다.
@@ -207,7 +207,8 @@ class Settings:
     def gap_down_tolerance_ratio(self) -> float:
         return self.gap_down_tolerance_percent / 100
 
-    # 익절/손절 판정에 반영할 비용 — 매매수수료(매수·매도 동일), 세금(매도 시만), 슬리피지(추정)
+    # 손절 판정(및 AI 매도 판단 프롬프트·UI의 합산 순손익 표시)에 반영할 비용 —
+    # 매매수수료(매수·매도 동일), 세금(매도 시만), 슬리피지(추정)
     commission_percent: float = field(default_factory=lambda: float(os.getenv("COMMISSION_PERCENT", "0.015")))
     tax_percent: float = field(default_factory=lambda: float(os.getenv("TAX_PERCENT", "0.20")))
     slippage_percent: float = field(default_factory=lambda: float(os.getenv("SLIPPAGE_PERCENT", "0.1")))
