@@ -251,17 +251,19 @@ def test_position_exits_returns_all_broken():
     assert sorted(_risk().check_position_exits(positions)) == ["000660", "005930"]
 
 
-def test_position_exits_ignores_portfolio_average():
-    """합산은 손절선인데 개별은 아무도 안 닿으면 매도하지 않는다.
+def test_position_exits_spares_the_healthy_one():
+    """합산이 손절선을 넘어도 닿지 않은 종목은 남긴다 — 합산 방식이면 전량이 나갔다.
 
-    합산 판정이던 시절에는 전량 매도였다 — 종목별로 바꾸며 의도적으로 달라진 지점이다.
+    합산 순손익률은 매입금액 가중평균이라 합산이 손절선에 닿으면 개별 중 최소 하나는
+    반드시 닿아 있다. 그래서 "합산은 닿는데 개별은 아무도 안 닿는" 상황은 없고,
+    실제 차이는 **닿지 않은 종목을 함께 파느냐**에서 갈린다.
     """
     positions = [
-        _pos("000660", 100_000, 96_000),   # -4.0%
-        _pos("005930", 100_000, 95_500),   # -4.5%
-    ]                                       # 합산 -4.25%, 손절선 -4%
+        _pos("000660", 100_000, 50_000),   # -50%, 매입금액 100,000
+        _pos("005930", 900_000, 891_000),  # -1%,  매입금액 900,000
+    ]                                       # 합산 -5.9% (손절선 -4% 아래)
 
-    assert sorted(_risk(stop_loss_ratio=0.04).check_position_exits(positions)) == ["000660", "005930"]
+    assert _risk(stop_loss_ratio=0.04).check_position_exits(positions) == ["000660"]
 
 
 def test_position_exits_empty_when_disabled():

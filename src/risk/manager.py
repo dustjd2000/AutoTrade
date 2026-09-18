@@ -242,7 +242,7 @@ class RiskManager:
             return []
         broken = []
         for position in positions:
-            if position.avg_price <= 0 or position.current_price <= 0:
+            if position.avg_price <= 0 or position.quantity <= 0 or position.current_price <= 0:
                 continue
             ret = net_return(
                 position.current_price,
