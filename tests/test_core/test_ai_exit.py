@@ -123,10 +123,9 @@ class SpyAdvisor:
         holdings,
         trace,
         portfolio_return,
-        stop_loss_ratio,
-        take_profit_ratio,
         minutes_to_close,
         partial,
+        portfolio_peak=None,
         timeout_seconds=120.0,
     ):
         self.threads.append(threading.get_ident())
@@ -135,10 +134,9 @@ class SpyAdvisor:
                 holdings=holdings,
                 trace=trace,
                 portfolio_return=portfolio_return,
-                stop_loss_ratio=stop_loss_ratio,
-                take_profit_ratio=take_profit_ratio,
                 minutes_to_close=minutes_to_close,
                 partial=partial,
+                portfolio_peak=portfolio_peak,
             )
         )
         return self.result

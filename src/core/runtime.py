@@ -620,8 +620,6 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
                 holdings_view,
                 trace,
                 portfolio_return,
-                engine.risk_manager.stop_loss_ratio,
-                engine.risk_manager.take_profit_ratio,
                 minutes_to_close,
                 partial,
                 portfolio_peak_view.peak if portfolio_peak_view is not None else None,

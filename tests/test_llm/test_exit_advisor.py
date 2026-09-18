@@ -54,13 +54,10 @@ def test_parse_defaults_to_hold_when_sell_is_missing():
 def test_user_prompt_carries_the_trace_and_the_lines():
     prompt = build_exit_user_prompt(
         [holding()], trace_points(), portfolio_return=0.004,
-        stop_loss_ratio=0.02, take_profit_ratio=0.005,
         minutes_to_close=330, partial=False,
     )
     assert "09:20" in prompt and "09:35" in prompt      # 궤적
     assert "+0.90%" in prompt and "+0.40%" in prompt    # 경로가 숫자로 보인다
-    assert "-2.00%" in prompt                            # 손절선
-    assert "+0.50%" in prompt                            # 익절 기준선
     assert "330" in prompt                               # 남은 시간
     assert "36,150원 돌파" in prompt                     # 아침 전망
 
@@ -68,7 +65,6 @@ def test_user_prompt_carries_the_trace_and_the_lines():
 def test_user_prompt_states_when_the_trace_is_partial():
     prompt = build_exit_user_prompt(
         [holding()], [], portfolio_return=0.004,
-        stop_loss_ratio=0.02, take_profit_ratio=0.005,
         minutes_to_close=330, partial=True,
     )
     assert "궤적 일부 없음" in prompt
@@ -77,7 +73,6 @@ def test_user_prompt_states_when_the_trace_is_partial():
 def test_system_prompt_makes_holding_the_default():
     prompt = build_exit_system_prompt()
     assert "기본은 보유" in prompt
-    assert "손절" in prompt
 
 
 def test_decide_returns_none_when_api_raises():
@@ -89,7 +84,7 @@ def test_decide_returns_none_when_api_raises():
             raise RuntimeError("network down")
 
     advisor._client = Boom()
-    assert advisor.decide([holding()], [], 0.004, 0.02, 0.005, 330, False) is None
+    assert advisor.decide([holding()], [], 0.004, 330, False) is None
 
 
 class FakeBlock:
@@ -138,13 +133,13 @@ def test_decide_returns_none_when_stop_reason_is_max_tokens():
     advisor = _advisor_with_response(
         FakeResponse(stop_reason="max_tokens", content=[FakeBlock("아무 텍스트")])
     )
-    assert advisor.decide([holding()], [], 0.004, 0.02, 0.005, 330, False) is None
+    assert advisor.decide([holding()], [], 0.004, 330, False) is None
 
 
 def test_decide_returns_none_when_stop_reason_is_refusal():
     """모델이 응답을 거부한 경우도 예외 없이 None으로 끝나야 한다."""
     advisor = _advisor_with_response(FakeResponse(stop_reason="refusal", content=[]))
-    assert advisor.decide([holding()], [], 0.004, 0.02, 0.005, 330, False) is None
+    assert advisor.decide([holding()], [], 0.004, 330, False) is None
 
 
 def test_decide_returns_none_when_response_text_is_empty():
@@ -152,7 +147,7 @@ def test_decide_returns_none_when_response_text_is_empty():
     advisor = _advisor_with_response(
         FakeResponse(stop_reason="end_turn", content=[FakeBlock("   ")])
     )
-    assert advisor.decide([holding()], [], 0.004, 0.02, 0.005, 330, False) is None
+    assert advisor.decide([holding()], [], 0.004, 330, False) is None
 
 
 def test_decide_returns_none_when_response_text_is_malformed_json():
@@ -163,7 +158,7 @@ def test_decide_returns_none_when_response_text_is_malformed_json():
             content=[FakeBlock("이 자리에 답을 드릴 수 없습니다.")],
         )
     )
-    assert advisor.decide([holding()], [], 0.004, 0.02, 0.005, 330, False) is None
+    assert advisor.decide([holding()], [], 0.004, 330, False) is None
 
 
 # ── 장중 공시 (PRD 5.5-B '장중 공시') ──────────────────────────
@@ -173,14 +168,14 @@ def test_prompt_marks_intraday_disclosures_as_new():
         headlines=["유상증자 결정", "분기보고서"],
         new_headlines=["유상증자 결정"],
     )
-    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 0.02, 0.005, 330, False)
+    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 330, False)
 
     assert "오늘 공시: [신규] 유상증자 결정 / 분기보고서" in prompt
 
 
 def test_prompt_says_none_when_there_is_no_disclosure():
     """조회 실패와 '공시 없음'을 구분하지 않는다 — 실패를 적으면 악재 신호로 읽힐 수 있다."""
-    prompt = build_exit_user_prompt([holding()], trace_points(), 0.004, 0.02, 0.005, 330, False)
+    prompt = build_exit_user_prompt([holding()], trace_points(), 0.004, 330, False)
 
     assert "오늘 공시: 없음" in prompt
 
@@ -197,14 +192,14 @@ def test_system_prompt_warns_against_selling_on_disclosure_alone():
 def test_prompt_says_when_the_sell_target_is_already_passed():
     """가격만 적어 두면 모델이 현재가와 대조하지 않는다 — 비교는 코드가 한다."""
     view = holding(target_sell_price=35_000.0, current_price=36_100.0)
-    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 0.02, 0.005, 330, False)
+    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 330, False)
 
     assert "아침 목표 매도가: 35,000원 — 현재가가 이미 +3.14% 넘어섰습니다" in prompt
 
 
 def test_prompt_says_when_the_sell_target_is_not_reached():
     view = holding(target_sell_price=38_000.0, current_price=36_100.0)
-    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 0.02, 0.005, 330, False)
+    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 330, False)
 
     assert "아직 -5.00% 아래입니다" in prompt
 
@@ -212,39 +207,24 @@ def test_prompt_says_when_the_sell_target_is_not_reached():
 def test_prompt_reports_the_giveback_as_a_number():
     """2026-09-10 현대중공업 궤적 — 고점 +4.46%에서 +1.41%면 3.05%p, 고점 이익의 68%다."""
     view = holding(net_return=0.0141, peak_return=0.0446)
-    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 0.02, 0.005, 330, False)
+    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 330, False)
 
     assert "되돌림: 당일 고점 +4.46% → 현재 +1.41% (3.05%p 반납, 고점 이익의 68%를 반납)" in prompt
 
 
 def test_prompt_says_so_when_now_is_the_peak():
     view = holding(net_return=0.0446, peak_return=0.0446)
-    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 0.02, 0.005, 330, False)
+    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 330, False)
 
     assert "지금이 당일 고점입니다" in prompt
 
 
 def test_prompt_shows_the_portfolio_peak():
     prompt = build_exit_user_prompt(
-        [holding()], trace_points(), 0.0085, 0.02, 0.05, 25, False, portfolio_peak=0.0236
+        [holding()], trace_points(), 0.0085, 25, False, portfolio_peak=0.0236
     )
 
     assert "합산 당일 고점: +2.36% (1.51%p 반납)" in prompt
-
-
-def test_take_profit_line_is_marked_as_a_portfolio_level_reference():
-    """합산 기준이라는 사실을 안 적으면 종목별 수치와 곧장 비교한다."""
-    prompt = build_exit_user_prompt([holding()], trace_points(), 0.004, 0.02, 0.05, 330, False)
-
-    assert "**보유 종목 합산** 기준이며" in prompt
-    assert "미달 자체는 보유 근거가 되지 않습니다" in prompt
-
-
-def test_system_prompt_forbids_using_the_take_profit_line_as_a_hold_reason():
-    """2026-09-10에 모델이 '아직 익절선 미달'을 여섯 번 보유 근거로 썼다."""
-    system = build_exit_system_prompt()
-
-    assert "익절 기준선 미달을 보유 근거로 쓰지 마십시오" in system
 
 
 def test_system_prompt_makes_a_big_giveback_a_sell_reason():
@@ -252,3 +232,28 @@ def test_system_prompt_makes_a_big_giveback_a_sell_reason():
 
     assert "고점 이익의 절반 이상을 반납했다면 그것" in system
     assert "여전히 플러스" in system
+
+
+def test_prompt_has_no_stop_loss_line():
+    """손절선을 주면 AI가 '아직 여유가 있다'를 보유 근거로 쓴다 — 아예 주지 않는다.
+
+    2026-09-09~18 로그에서 보유 유지 사유가 거의 전부 "손절선(-5.00%)까지 여유"였다.
+    시스템 프롬프트가 신경 쓰지 말라고 했는데도 그랬다 (2026-09-18).
+    """
+    prompt = build_exit_user_prompt(
+        holdings=[],
+        trace=[],
+        portfolio_return=-0.012,
+        minutes_to_close=300,
+        partial=False,
+    )
+
+    assert "손절선" not in prompt
+    assert "남은 거리" not in prompt
+    assert "익절" not in prompt
+
+
+def test_system_prompt_has_no_baseline_section():
+    prompt = build_exit_system_prompt()
+
+    assert "손절선과 익절 기준선" not in prompt

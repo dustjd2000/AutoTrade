@@ -120,19 +120,6 @@ def build_exit_system_prompt() -> str:
 자체가 무의미해집니다. "이 정도면 팔아도 되지 않을까" 수준의 애매한 근거로는
 `sell`을 `false`로 남기십시오.
 
-## 손절선과 익절 기준선
-- **손절선은 이 판단과 무관하게 코드가 실시간으로 자동 처리합니다.** 순손익률이
-  손절선에 닿으면 이 판단이 실행되기 전에 이미 매도가 끝난 상태입니다. 손절선
-  아래로 내려갈까 봐 미리 파는 것은 이 판단의 역할이 아니니 걱정하지 마십시오.
-- **익절 기준선은 자동 청산 트리거가 아니라 사용자가 정한 목표치**입니다. 순손익률이
-  그 위에 있다고 반드시 팔아야 하는 것도 아니고, 그 아래에 있다고 팔면 안 되는
-  것도 아닙니다. 참고 지표일 뿐입니다.
-- **익절 기준선 미달을 보유 근거로 쓰지 마십시오.** "아직 익절선에 못 미쳤다",
-  "익절선에 근접했지만 도달 전이다" 같은 문장은 근거가 아닙니다. 기준선은 **보유
-  종목 합산** 기준이라, 종목이 여러 개면 한 종목이 크게 올라도 나머지가 희석해
-  합산은 좀처럼 그 선에 닿지 않습니다. 도달 여부가 아니라 **지금 흐름이 꺾였는지**로
-  판단하십시오.
-
 ## 시간
 15:15가 되면 보유 종목 전체가 강제로 청산됩니다. 남은 시간이 짧을수록 지금 팔지
 않아도 되는 이유(반등을 기다릴 시간)가 줄어든다는 뜻이므로, 남은 시간을 판단에
@@ -164,8 +151,6 @@ def build_exit_user_prompt(
     holdings: List[HoldingView],
     trace: List[TracePoint],
     portfolio_return: float,
-    stop_loss_ratio: float,
-    take_profit_ratio: float,
     minutes_to_close: int,
     partial: bool,
     portfolio_peak: Optional[float] = None,
@@ -174,14 +159,8 @@ def build_exit_user_prompt(
         "보유 종목을 지금 전량 정리할지 판단하기 위한 현재 상황입니다.",
         "\n## 시간",
         f"- 15:15 강제청산까지 {minutes_to_close}분 남았습니다.",
-        "\n## 기준선",
-        f"- 손절선: {_pct(-stop_loss_ratio)} "
-        f"(남은 거리 {(portfolio_return + stop_loss_ratio) * 100:.2f}%p — "
-        "닿으면 코드가 자동으로 처리하므로 이 판단이 신경 쓸 필요는 없습니다)",
-        f"- 익절 기준선: {_pct(take_profit_ratio)} "
-        "(**보유 종목 합산** 기준이며 자동 청산 트리거가 아닙니다. 미달 자체는 보유 근거가 "
-        "되지 않습니다)",
-        f"- 현재 합산 순손익률: {_pct(portfolio_return)}",
+        "\n## 현재",
+        f"- 합산 순손익률: {_pct(portfolio_return)}",
     ]
     if portfolio_peak is not None:
         given_back = max(0.0, portfolio_peak - portfolio_return)
@@ -246,8 +225,6 @@ class ExitAdvisor:
         holdings: List[HoldingView],
         trace: List[TracePoint],
         portfolio_return: float,
-        stop_loss_ratio: float,
-        take_profit_ratio: float,
         minutes_to_close: int,
         partial: bool,
         portfolio_peak: Optional[float] = None,
@@ -258,8 +235,6 @@ class ExitAdvisor:
             holdings,
             trace,
             portfolio_return,
-            stop_loss_ratio,
-            take_profit_ratio,
             minutes_to_close,
             partial,
             portfolio_peak,
