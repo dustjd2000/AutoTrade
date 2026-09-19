@@ -105,8 +105,9 @@ class FakeEngine:
     def _execute_portfolio_exit(self, holdings, reason, note=None):
         self.executed.append((holdings, reason, note))
 
-    def note_ai_exit_result(self, at, sell, reason, ok=True):
+    def note_ai_exit_result(self, at, sell, reason, ok=True, sold_tickers=()):
         self.ai_exit_results.append((at, sell, reason, ok))
+        self.ai_exit_sold_tickers = tuple(sold_tickers)
 
 
 class SpyAdvisor:
@@ -576,8 +577,9 @@ def test_ai_exit_snapshot_verdict_labels():
     engine.note_ai_exit_result(at, sell=False, reason="관망")
     assert engine.ai_exit_snapshot().verdict == "보유 유지"
 
-    engine.note_ai_exit_result(at, sell=True, reason="추세 이탈")
-    assert engine.ai_exit_snapshot().verdict == "전량 매도"
+    # 판단이 종목별이므로(확정 2026-09-19) "전량"이 아니라 판 종목 수를 보여준다
+    engine.note_ai_exit_result(at, sell=True, reason="추세 이탈", sold_tickers=("005930",))
+    assert engine.ai_exit_snapshot().verdict == "1종목 매도"
 
     engine.note_ai_exit_result(at, sell=False, reason="판단 실패", ok=False)
     assert engine.ai_exit_snapshot().verdict == "판단 실패"

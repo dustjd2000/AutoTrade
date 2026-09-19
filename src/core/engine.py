@@ -91,13 +91,17 @@ class AIExitView:
     sell: bool
     reason: str
     ok: bool = True
+    # 매도로 판정된 종목코드 (확정 2026-09-19 — 종목별 판단 전에는 sell=True가 곧 전량이었다).
+    sold_tickers: Tuple[str, ...] = ()
 
     @property
     def verdict(self) -> str:
         """표에 한 단어로 적을 판단 결과."""
         if not self.ok:
             return "판단 실패"
-        return "전량 매도" if self.sell else "보유 유지"
+        if not self.sell:
+            return "보유 유지"
+        return f"{len(self.sold_tickers)}종목 매도" if self.sold_tickers else "매도"
 
 
 def _position_summary(position: Position) -> str:
@@ -210,9 +214,18 @@ class TradingEngine:
         """AI 매도 판단을 한 번 불렀음을 기록한다 (하루 호출 상한 카운터, 08:40에만 초기화)."""
         self._ai_exit_calls += 1
 
-    def note_ai_exit_result(self, at: datetime, sell: bool, reason: str, ok: bool = True) -> None:
+    def note_ai_exit_result(
+        self,
+        at: datetime,
+        sell: bool,
+        reason: str,
+        ok: bool = True,
+        sold_tickers: Iterable[str] = (),
+    ) -> None:
         """마지막 AI 매도 판단 결과를 남긴다 (UI 표시용 — 매도 여부는 호출측이 이미 처리했다)."""
-        self._last_ai_exit = AIExitView(at=at, sell=sell, reason=reason, ok=ok)
+        self._last_ai_exit = AIExitView(
+            at=at, sell=sell, reason=reason, ok=ok, sold_tickers=tuple(sold_tickers)
+        )
 
     def ai_exit_snapshot(self) -> Optional[AIExitView]:
         """마지막 AI 매도 판단 (UI 스레드에서 호출 — API를 호출하지 않는다).
@@ -723,7 +736,7 @@ class TradingEngine:
 
         여기서는 팔지 않는다 — `DrawdownTracker`에 표시만 남기고, 실제 호출은
         `runtime.ai_exit_due`가 그 표시를 보고 다음 폴링(최대 30초)에서 앞당긴다.
-        판단 자체는 종전대로 보유 목록 전체에 대해 AI가 한 번 내린다.
+        판단 자체는 종목마다 이뤄지고(확정 2026-09-19), 앞당기는 것은 호출 시점뿐이다.
 
         AI 매도 판단이 꺼져 있으면 아무것도 하지 않는다 — 앞당길 호출이 없다.
         """
@@ -735,9 +748,7 @@ class TradingEngine:
             return
 
         per_ticker = {p.ticker: self.position_net_return(p) for p in holdings}
-        crossed = self.exit_drawdown.update(
-            per_ticker, self.risk_manager.portfolio_return(holdings)
-        )
+        crossed = self.exit_drawdown.update(per_ticker)
         for ticker in crossed:
             retracement = self.exit_drawdown.retracement(ticker, per_ticker[ticker])
             if retracement is None:
@@ -760,8 +771,9 @@ class TradingEngine:
         전량을 팔았다. 익절 자동 청산은 2026-09-09에, 익절 설정 자체는 2026-09-18에
         걷어냈다 (PRD 10절).
 
-        AI 매도 판단은 여전히 **전량**이다 — 그쪽은 "지금 전부 정리할 상황인가"를 묻는
-        별개 경로이고, 같은 `_execute_portfolio_exit`을 보유 목록 전체로 부른다.
+        AI 매도 판단은 종목마다 따로 판정한다(확정 2026-09-19) — 그쪽은 "이 종목을 지금
+        팔 상황인가"를 종목별로 묻는 별개 경로이고, 판정된 종목만 `_execute_portfolio_exit`으로
+        넘긴다.
 
         이미 매도 주문을 낸 종목(`_exiting`)은 판정에서 뺀다 — 체결이 잔고에 반영되기까지
         시차가 있어, 남겨두면 이미 판 물량이 다음 틱의 판정을 계속 왜곡한다.
@@ -782,7 +794,7 @@ class TradingEngine:
     def _execute_portfolio_exit(
         self, holdings: List[Position], reason: ExitReason, note: Optional[str] = None
     ) -> None:
-        """넘겨받은 종목을 청산한다 — 손절은 손절선에 닿은 종목만, AI 판단은 보유 목록 전체다.
+        """넘겨받은 종목을 청산한다 — 손절도 AI 판단도 넘겨받은 그 종목들만 판다(둘 다 종목별).
 
         종목별 청산(`_execute_exit`)을 그대로 돌려 매도가능수량·주문 거부·상장폐지 제외
         처리를 공유하고, **성공 알림만 한 통으로 묶는다** — 종목마다 보내면 보유 3종목에

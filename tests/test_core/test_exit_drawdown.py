@@ -133,25 +133,14 @@ def test_take_urgent_consumes_the_flag():
     assert t.take_urgent() is False
 
 
-def test_portfolio_peak_is_tracked_for_the_prompt():
-    t = tracker()
-    t.update({TICKER: 0.04}, portfolio=0.0236)
-    t.update({TICKER: 0.02}, portfolio=0.0085)
-
-    r = t.portfolio_retracement(0.0085)
-    assert r.peak == 0.0236
-    assert abs(r.given_back - 0.0151) < 1e-9
-
-
 def test_clear_forgets_yesterday():
     t = tracker()
-    t.update({TICKER: 0.04}, portfolio=0.02)
+    t.update({TICKER: 0.04})
     t.update({TICKER: 0.00})
 
     t.clear()
 
     assert t.retracement(TICKER, 0.0) is None
-    assert t.portfolio_retracement(0.0) is None
     assert t.urgent_pending is False
 
 

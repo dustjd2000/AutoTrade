@@ -47,7 +47,8 @@ class DrawdownTracker:
     판정 단위가 **종목별**인 이유: 합산 순손익률은 종목별 순손익률의 매입금액 가중평균이라
     합산 반납폭은 언제나 최대 종목의 반납폭 이하다. 합산으로 걸면 한 종목이 크게 밀려도
     다른 종목이 희석해 발동하지 않는다 — 2026-09-10이 정확히 그랬다(합산 반납 1.51%p,
-    종목별 최대 3.05%p). 발동만 종목별이고, 팔 때는 그대로 보유 목록 전체다.
+    종목별 최대 3.05%p). **발동은 원래 종목별이었고, AI 판단도 2026-09-19부터 종목별이 됐다**
+    — 이 트래커가 앞당기는 것은 그 종목의 호출 시점뿐, 파는 것은 AI가 정한다.
 
     **고점이 임계값 이상일 때만 감시한다** (2026-09-18). 임계값이 절대값(%p)이라 고점이
     작으면 "1%p 반납"이 사실상 "매수가 대비 -1%"가 되어, 이익을 지키는 감시가 아니라
@@ -60,23 +61,16 @@ class DrawdownTracker:
         self._peaks: Dict[str, float] = {}
         # 발동한 뒤 내려간 종목 — 새 고점을 찍어야 다시 무장한다
         self._armed: Dict[str, bool] = {}
-        self._portfolio_peak: Optional[float] = None
         self._urgent_pending = False
         self._urgent_triggers = 0
 
     # ── 갱신 ────────────────────────────────────────────────
-    def update(
-        self, per_ticker: Dict[str, float], portfolio: Optional[float] = None
-    ) -> List[str]:
+    def update(self, per_ticker: Dict[str, float]) -> List[str]:
         """고점을 갱신하고, 이번 틱에 임계치를 새로 넘긴 종목코드를 돌려준다.
 
         **고점이 임계값 이상일 때만 발동한다** (2026-09-18) — 종일 마이너스인 종목이 더
         밀리는 것은 '반납'이 아니라 그냥 손실이고, 그 구간은 손절이 맡는다.
         """
-        if portfolio is not None:
-            if self._portfolio_peak is None or portfolio > self._portfolio_peak:
-                self._portfolio_peak = portfolio
-
         crossed: List[str] = []
         for ticker, current in per_ticker.items():
             peak = self._peaks.get(ticker)
@@ -118,11 +112,6 @@ class DrawdownTracker:
             return None
         return Retracement(peak=peak, current=current)
 
-    def portfolio_retracement(self, current: float) -> Optional[Retracement]:
-        if self._portfolio_peak is None:
-            return None
-        return Retracement(peak=self._portfolio_peak, current=current)
-
     # ── 즉시 판단 트리거 ─────────────────────────────────────
     @property
     def urgent_pending(self) -> bool:
@@ -138,6 +127,5 @@ class DrawdownTracker:
         """일일 초기화(08:40)에서 비운다 — 어제 고점을 오늘 기준으로 쓰면 안 된다."""
         self._peaks.clear()
         self._armed.clear()
-        self._portfolio_peak = None
         self._urgent_pending = False
         self._urgent_triggers = 0

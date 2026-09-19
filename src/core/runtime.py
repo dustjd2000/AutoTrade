@@ -531,7 +531,8 @@ def ai_exit_due(
 
 
 async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) -> None:
-    """AI 매도 판단 한 사이클을 실행한다 — 궤적에 점을 남기고 필요하면 전량 매도한다.
+    """AI 매도 판단 한 사이클을 실행한다 — 궤적에 점을 남기고 종목마다 판정해 매도로 정해진
+    종목만 판다.
 
     호출 전에 `ai_exit_due`로 이번 사이클을 돌 조건인지 먼저 확인해야 한다. 이 함수
     자체는 보유 종목 유무 등을 다시 확인하지 않는다 (게이트와 실행을 분리해 각각 따로
@@ -634,8 +635,12 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
     held = [position.ticker for position in holdings]
     targets = decision.sell_tickers(held)
     if not targets:
-        # 판정은 받았으나 전부 보유 — 종목별 사유를 그대로 남겨 다음 주기에 되짚을 수 있게 한다
-        reason_text = " / ".join(f"{d.ticker}: {d.reason}" for d in decision.decisions)
+        # 판정은 받았으나 전부 보유 — 종목별 사유를 남겨 다음 주기에 되짚을 수 있게 한다.
+        # 보유하지 않은 종목코드(응답의 환각 포함)는 걸러낸다 — UI 기록에 실릴 이유가 없다.
+        held_set = set(held)
+        reason_text = " / ".join(
+            f"{d.ticker}: {d.reason}" for d in decision.decisions if d.ticker in held_set
+        )
         logger.info("AI 매도 판단: 보유 유지 (%s)", reason_text)
         engine.note_ai_exit_result(now, sell=False, reason=reason_text)
         return
@@ -646,7 +651,7 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
     fresh_holdings = engine.exit_candidates(force=True)
     fresh_targets = [p for p in fresh_holdings if p.ticker in set(targets)]
     note = decision.note(held)
-    engine.note_ai_exit_result(now, sell=True, reason=note)
+    engine.note_ai_exit_result(now, sell=True, reason=note, sold_tickers=targets)
     if not fresh_targets:
         logger.info("AI 매도 판단: 매도로 판단했지만 그 사이 그 종목이 이미 정리되었습니다.")
         return

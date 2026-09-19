@@ -26,8 +26,8 @@ class DisclosureWatch:
     실린다.
 
     새로 뜬 공시가 배제 키워드(`BLOCKING_KEYWORDS`)에 걸리면 호출 주기를 기다리지 않고
-    AI 판단을 한 번 앞당긴다(`urgent_pending`). 여기서 곧바로 매도하지는 않는다 — 판정
-    단위가 보유 목록 전체라, 키워드 하나로 멀쩡한 다른 종목까지 던지게 된다.
+    AI 판단을 한 번 앞당긴다(`urgent_pending`). 여기서 곧바로 매도하지는 않는다 — 판단은
+    종목마다 이뤄지므로(확정 2026-09-19), 공시가 뜬 종목이 팔릴지는 그 판단에 맡긴다.
     """
 
     def __init__(self, client: DisclosureClient):

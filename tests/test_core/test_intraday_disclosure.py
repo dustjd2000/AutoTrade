@@ -228,7 +228,7 @@ def test_cycle_consumes_the_giveback_trigger():
 def test_peak_reaches_the_advisor():
     """실시간 콜백이 잡은 고점이 프롬프트까지 도달해야 한다 — 궤적에는 없는 봉우리다."""
     runtime, engine, advisor = make_runtime(holdings=[holding()], drawdown_ratio=0.03)
-    engine.exit_drawdown.update({"005930": 0.0446}, portfolio=0.0236)
+    engine.exit_drawdown.update({"005930": 0.0446})
 
     asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW, None))
 
