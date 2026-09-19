@@ -586,8 +586,8 @@ class MainWindow(QMainWindow):
         self._stop_loss_enabled = QCheckBox("손절")
         self._stop_loss_enabled.setChecked(True)
         self._ai_exit_enabled.setToolTip(
-            "호출 주기마다 보유 종목 전체를 AI가 보고 전량 매도할지 정합니다. "
-            "끄면 이익 실현 쪽 청산이 통째로 없어져 15:15 강제청산까지 갑니다."
+            "호출 주기마다 보유 종목을 하나씩 AI가 보고 종목마다 매도할지 정합니다 — "
+            "판정된 종목만 팔립니다. 끄면 이익 실현 쪽 청산이 통째로 없어져 15:15 강제청산까지 갑니다."
         )
         self._stop_loss_enabled.setToolTip(
             "보유 종목 중 순손익률이 -입력값(%)에 닿은 종목을 실시간으로 매도합니다."
@@ -622,8 +622,8 @@ class MainWindow(QMainWindow):
             "손절선입니다. 보유 종목 중 순손익률이 이 값에 닿은 종목을 실시간으로 시장가 매도합니다 "
             "(2026-09-18부터 종목별 판정 — 그 전에는 보유 종목 합산이었습니다). 순손익률은 "
             "수수료·세금·슬리피지를 뺀 값이라 화면의 평가손익률보다 낮습니다.\n"
-            "이익 실현은 자동선이 없고 AI 매도 판단이 맡습니다 — 그쪽은 보유 종목 전체를 한 번에 "
-            "정리할지 판단합니다."
+            "이익 실현은 자동선이 없고 AI 매도 판단이 맡습니다 — 그쪽은 보유 종목을 하나씩 보고 "
+            "종목마다 판단해, 팔기로 정한 종목만 매도합니다."
         )
         exit_hint.setWordWrap(True)
         exit_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
@@ -794,10 +794,13 @@ class MainWindow(QMainWindow):
         self._holdings_view = table
         layout.addWidget(table)
 
-        # AI 매도 판단은 종목별이 아니라 보유 목록 전체에 한 번이라(PRD 5.5-B) 표의 열이
-        # 아니라 표 아래다 — 열로 넣으면 모든 행이 같은 값으로 반복된다. 라벨이 아니라
-        # 실행 로그와 같은 읽기 전용 QTextEdit인 것은 근거가 길어 한 줄에 담기지 않기
-        # 때문이다. 전역 QTextEdit 스타일(표면색·테두리·고정폭 글꼴)을 그대로 받는다.
+        # 도입 당시(2026-09-10)에는 AI 매도 판단이 보유 목록 전체에 한 번이라 표의 열이
+        # 아니라 표 아래에 뒀다 — 열로 넣으면 모든 행이 같은 값으로 반복됐다. 2026-09-19에
+        # 판정이 종목별로 바뀐 뒤에도 표시는 그대로다(PRD 5.5-B) — 종목마다 다른 사유가
+        # 나오므로 한 줄 요약은 verdict(매도/N종목 매도)만 구분하고, 종목별 사유는 이어붙인
+        # 문장으로 같은 블록에 싣는다. 라벨이 아니라 실행 로그와 같은 읽기 전용 QTextEdit인
+        # 것은 근거가 길어 한 줄에 담기지 않기 때문이다. 전역 QTextEdit 스타일(표면색·테두리·
+        # 고정폭 글꼴)을 그대로 받는다.
         self._ai_exit_view = QTextEdit()
         self._ai_exit_view.setReadOnly(True)
         self._ai_exit_view.setFixedHeight(AI_EXIT_VIEW_HEIGHT)
@@ -1313,7 +1316,8 @@ class MainWindow(QMainWindow):
 
         손절은 종목별 순손익이 선에 닿는 순간 그 종목만 실시간으로 팔리는 자동선이고
         (2026-09-18부터 — 그 전에는 보유 종목 합산이었다), AI 매도 판단은 주기마다
-        보유 종목 전체를 보고 정하는 판단이라 가격 기준선이 없다 — 이 구분이 흐려지면
+        종목마다 판단해 매도로 정한 종목만 파는 판단이라 가격 기준선이 없다(2026-09-19부터
+        종목별 — 그 전에는 보유 종목 전체를 한 번에 정리할지 판단했다) — 이 구분이 흐려지면
         없는 보호를 있다고 믿게 된다.
         """
         percent = self._exit_percent.text().strip() or "2"
@@ -1336,9 +1340,9 @@ class MainWindow(QMainWindow):
 
         if ai_exit:
             lines.append(
-                f"AI 매도 판단 — {self._ai_exit_interval.currentText()}마다 보유 종목 전체를 보고 "
-                "전량 매도할지 정합니다. 가격 기준선 없이 판단하므로 특정 값에 닿는다고 "
-                "자동으로 팔리지 않습니다."
+                f"AI 매도 판단 — {self._ai_exit_interval.currentText()}마다 보유 종목을 하나씩 보고 "
+                "종목마다 매도할지 정해 판정된 종목만 팝니다. 가격 기준선 없이 판단하므로 특정 "
+                "값에 닿는다고 자동으로 팔리지 않습니다."
             )
         else:
             lines.append("⚠ AI 매도 판단이 꺼져 있어 이익 실현 쪽 실시간 청산이 없습니다.")

@@ -465,13 +465,15 @@ class TradingEngine:
         return views
 
     def portfolio_return_snapshot(self) -> Optional[float]:
-        """UI 표시와 AI 프롬프트에 쓰이는 합산 순손익률 (UI 스레드에서 호출 — API를 호출하지 않는다).
+        """UI 표시에 쓰이는 합산 순손익률 (UI 스레드에서 호출 — API를 호출하지 않는다).
 
         손절 판정은 종목별(`RiskManager.check_position_exits`)이라 이 값에 의존하지 않는다 —
-        여기서 쓰는 `RiskManager.portfolio_return`은 AI 매도 판단 프롬프트와 화면 요약줄이
-        읽는 값이다. UI가 수수료율을 다시 읽어 따로 계산하면 엔진과 어긋날 수 있어 같은 함수를
-        그대로 부른다. `position_snapshot`과 같이 `_positions` 참조를 한 번만 집어 일관된
-        사본으로 계산한다.
+        여기서 쓰는 `RiskManager.portfolio_return`은 화면 요약줄이 읽는 값이다. **AI 매도
+        판단 프롬프트에서는 2026-09-19에 뺐다** — 종목별 판단에 합산 숫자를 주면 그것으로
+        판단하기 때문이다(`run_ai_exit_cycle`은 이 값을 사이클을 건너뛸지 판정하는 내부
+        게이트로만 쓰고, 프롬프트 문자열에는 싣지 않는다). UI가 수수료율을 다시 읽어 따로
+        계산하면 엔진과 어긋날 수 있어 같은 함수를 그대로 부른다. `position_snapshot`과
+        같이 `_positions` 참조를 한 번만 집어 일관된 사본으로 계산한다.
         """
         holdings = [p for t, p in self._positions.items() if t not in self._exiting]
         return self.risk_manager.portfolio_return(holdings)

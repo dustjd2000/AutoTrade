@@ -144,7 +144,7 @@ class Runtime:
     scheduler: TimeScheduler
     ws_client: WebSocketClient
     workflow: DailyWorkflow
-    # 보유 종목을 지금 전량 정리할지 판단하는 LLM 모듈 (PRD 5.5-B 'AI 매도 판단').
+    # 보유 종목을 하나씩 지금 매도할지 판단하는 LLM 모듈 (PRD 5.5-B 'AI 매도 판단').
     exit_advisor: ExitAdvisor
     # 장중에 새로 뜬 공시를 가려내 위 판단에 넘긴다 (PRD 5.5-B '장중 공시').
     disclosure_watch: Optional[DisclosureWatch] = None
