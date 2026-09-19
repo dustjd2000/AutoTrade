@@ -53,7 +53,7 @@ def test_parse_reads_sell_and_reason():
 
 def test_parse_defaults_to_hold_when_sell_is_missing():
     """형식이 어긋나도 매도 쪽으로 기울지 않는다 — 기본은 보유다."""
-    raw = '{"decisions": [{"ticker": "005930", "sell": false, "reason": "판단 불가"}]}'
+    raw = '{"decisions": [{"ticker": "005930", "reason": "판단 불가"}]}'
     result = parse_exit_decision(raw)
     assert len(result.decisions) == 1
     assert result.decisions[0].sell is False

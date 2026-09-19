@@ -268,7 +268,8 @@ def test_sell_true_executes_portfolio_exit_with_ai_judgment_reason():
     assert reason is ExitReason.AI_JUDGMENT
     assert [p.ticker for p in sold_holdings] == [h.ticker]
     # 근거를 함께 넘겨야 청산 로그와 알림 메일에 남는다 — 사유 코드만으로는 왜 팔았는지 모른다
-    assert note == "추세 이탈"
+    # 종목별 판정이므로 ticker를 포함한 형식
+    assert note == "005930: 추세 이탈"
 
 
 def test_sell_false_does_not_execute_anything():
@@ -333,7 +334,8 @@ def test_hold_decision_is_recorded_for_the_ui():
     )
     asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
 
-    assert engine.ai_exit_results == [(IN_WINDOW, False, "합산 +0.9%에서 +0.4%", True)]
+    # 종목별 판정이므로 모든 종목의 사유를 포함한 형식
+    assert engine.ai_exit_results == [(IN_WINDOW, False, "005930: 합산 +0.9%에서 +0.4%", True)]
 
 
 def test_sell_decision_is_recorded_for_the_ui():
@@ -342,7 +344,8 @@ def test_sell_decision_is_recorded_for_the_ui():
     )
     asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
 
-    assert engine.ai_exit_results == [(IN_WINDOW, True, "추세 이탈", True)]
+    # 종목별 판정이므로 매도 종목의 사유를 포함한 형식
+    assert engine.ai_exit_results == [(IN_WINDOW, True, "005930: 추세 이탈", True)]
 
 
 def test_failed_decision_is_recorded_as_not_ok():
@@ -370,7 +373,8 @@ def test_sell_decision_is_recorded_even_when_holdings_vanished():
     )
     asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
 
-    assert engine.ai_exit_results == [(IN_WINDOW, True, "추세 이탈", True)]
+    # 종목별 판정이므로 매도 종목의 사유를 포함한 형식
+    assert engine.ai_exit_results == [(IN_WINDOW, True, "005930: 추세 이탈", True)]
     assert engine.executed == []
 
 

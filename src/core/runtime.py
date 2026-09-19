@@ -628,31 +628,36 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
         logger.exception("AI 매도 판단 사이클 처리 중 오류 — 이번 주기는 매도하지 않습니다.")
         return
 
-    if decision is None or not decision.sell:
-        # 실패 사유를 "판단 실패"로 두면 표에서 판정 문구와 그대로 겹쳐 읽을 것이 없어진다
-        reason_text = (
-            decision.reason
-            if decision is not None
-            else "LLM 호출 실패·타임아웃·형식 오류 (이번 주기는 매도하지 않습니다)"
-        )
+    if decision is None:
+        reason_text = "LLM 호출 실패·타임아웃·형식 오류 (이번 주기는 매도하지 않습니다)"
         logger.info("AI 매도 판단: 보유 유지 (%s)", reason_text)
-        # 로그는 흘러가므로 마지막 판단을 엔진에도 남긴다 — UI 보유 종목 표가 이 값을 읽는다.
-        engine.note_ai_exit_result(now, sell=False, reason=reason_text, ok=decision is not None)
+        engine.note_ai_exit_result(now, sell=False, reason=reason_text, ok=False)
+        return
+
+    held = [position.ticker for position in holdings]
+    targets = decision.sell_tickers(held)
+    if not targets:
+        # 판정은 받았으나 전부 보유 — 종목별 사유를 그대로 남겨 다음 주기에 되짚을 수 있게 한다
+        reason_text = " / ".join(f"{d.ticker}: {d.reason}" for d in decision.decisions)
+        logger.info("AI 매도 판단: 보유 유지 (%s)", reason_text)
+        engine.note_ai_exit_result(now, sell=False, reason=reason_text)
         return
 
     # 매도 주문은 루프 스레드에서 그대로 실행해 실시간 손절 감시와 직렬화한다. LLM 응답을
     # 기다리는 동안(최대 120초) 손절이 먼저 정리했을 수 있어, 판단 시점 스냅샷을 그대로
     # 팔지 않고 매도 직전에 보유 종목을 다시 읽는다 (force_close_all_positions와 같은 이유).
     fresh_holdings = engine.exit_candidates(force=True)
-    engine.note_ai_exit_result(now, sell=True, reason=decision.reason)
-    if not fresh_holdings:
-        logger.info("AI 매도 판단: 전량 매도로 판단했지만 그 사이 보유 종목이 이미 정리되었습니다.")
+    fresh_targets = [p for p in fresh_holdings if p.ticker in set(targets)]
+    note = decision.note(held)
+    engine.note_ai_exit_result(now, sell=True, reason=note)
+    if not fresh_targets:
+        logger.info("AI 매도 판단: 매도로 판단했지만 그 사이 그 종목이 이미 정리되었습니다.")
         return
 
-    logger.warning("AI 매도 판단: 전량 매도 (%s)", decision.reason)
+    logger.warning("AI 매도 판단: %d종목 매도 (%s)", len(fresh_targets), note)
     # 근거를 함께 넘겨 청산 로그와 알림 메일에 남긴다 — 사유 코드(ai_judgment)만으로는
     # 왜 팔았는지 나중에 되짚을 수 없다.
-    engine._execute_portfolio_exit(fresh_holdings, ExitReason.AI_JUDGMENT, note=decision.reason)
+    engine._execute_portfolio_exit(fresh_targets, ExitReason.AI_JUDGMENT, note=note)
 
 
 async def maybe_run_ai_exit_cycle(
