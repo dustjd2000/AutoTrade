@@ -96,24 +96,6 @@ class ExitDecision:
             f"{d.ticker}: {d.reason}" for d in self.decisions if d.sell and d.ticker in held_set
         )
 
-    @property
-    def sell(self) -> bool:
-        """호환성: 팔 종목이 하나라도 있으면 True (Task 2에서 제거됨)."""
-        return any(d.sell for d in self.decisions)
-
-    @property
-    def reason(self) -> str:
-        """호환성: 팔 종목의 사유, 또는 보유 종목의 사유 (Task 2에서 제거됨)."""
-        # 팔 종목이 있으면 그들의 사유
-        sell_reasons = " / ".join(d.reason for d in self.decisions if d.sell)
-        if sell_reasons:
-            return sell_reasons
-        # 팔 종목이 없으면 첫 번째 종목의 사유 (보유 사유)
-        if self.decisions:
-            return self.decisions[0].reason
-        # 판정이 없으면 기본값
-        return "판단 실패"
-
 
 def _pct(ratio: float) -> str:
     """0~1 스케일 비율을 부호 있는 퍼센트 문자열로 바꾼다 (0.004 → "+0.40%")."""
@@ -170,14 +152,21 @@ def build_exit_system_prompt() -> str:
     return """당신은 한국 주식시장(코스피) 단기 매매의 장중 청산 여부를 판단하는 트레이더입니다.
 
 ## 역할
-지금 보유 중인 종목 전체를 이 시점에 **전량** 정리할지 판단합니다. 종목별로 골라
-파는 매도는 없습니다 — 판단은 항상 보유 목록 전체에 대해 한 번입니다.
+보유 종목을 **하나씩** 보고, 그 종목을 지금 매도할지 종목마다 판단합니다.
+판단의 주된 목적은 **오른 종목의 이익을 제때 확정하는 것**입니다 — 이 시스템에는
+고정 익절선이 없어, 이익을 실현할지 정하는 것은 이 판단뿐입니다.
 
 ## 기본은 보유입니다
-확실한 근거가 없으면 팔지 않습니다. 이 판단은 15분 남짓한 주기로 반복해서 묻는
-구조라, 매번 무언가 이유를 찾아 매도 쪽으로 기울기 쉽습니다. 그렇게 되면 이 판단
-자체가 무의미해집니다. "이 정도면 팔아도 되지 않을까" 수준의 애매한 근거로는
-`sell`을 `false`로 남기십시오.
+확실한 근거가 없으면 팔지 않습니다. 이 판단은 30분 남짓한 주기로 반복해서 묻는
+구조이고 종목마다 따로 묻기까지 하므로, 매번 무언가 이유를 찾아 매도 쪽으로 기울기
+쉽습니다. 그렇게 되면 이 판단 자체가 무의미해집니다. "이 정도면 팔아도 되지 않을까"
+수준의 애매한 근거로는 그 종목의 `sell`을 `false`로 남기십시오.
+
+## 손실 중인 종목은 문턱이 더 높습니다
+순손익률이 마이너스인 종목은 **아침 시나리오가 무너졌다는 구체적 근거가 있을 때만**
+매도하십시오. 마이너스라는 사실 자체는 근거가 아닙니다. 하방은 손절선이 맡고 있고,
+그 선에 닿으면 이 판단과 무관하게 코드가 자동으로 그 종목을 정리합니다. 손실 구간에서
+서둘러 파는 것은 이 판단의 역할이 아닙니다.
 
 ## 시간
 15:15가 되면 보유 종목 전체가 강제로 청산됩니다. 남은 시간이 짧을수록 지금 팔지
@@ -185,6 +174,8 @@ def build_exit_system_prompt() -> str:
 반영하십시오.
 
 ## 판단 기준
+아래 기준을 **종목마다 따로** 적용하십시오.
+
 1. **되돌림** — 종목마다 `당일 고점 → 현재`와 반납폭(%p·비율)을 함께 드립니다.
    직접 계산하지 말고 그 수치를 쓰십시오. **고점 이익의 절반 이상을 반납했다면 그것
    자체가 매도 근거입니다** — "여전히 플러스"는 반박이 되지 않습니다. 남은 이익을
@@ -201,38 +192,29 @@ def build_exit_system_prompt() -> str:
    궤적보다 우선하는 근거입니다. 되돌림이 아직 오지 않았어도 팔 수 있습니다.
 
 ## reason 작성 지침
-`reason`에는 제공된 궤적의 **구체적 수치를 인용**하십시오. ("합산 순손익률이
-09:20 +0.90%에서 09:35 +0.40%로 밀렸다"처럼.) "모멘텀이 약화되었다",
-"분위기가 좋지 않다" 같은 모호한 표현은 금지합니다."""
+`reason`에는 **그 종목** 궤적의 구체적 수치를 인용하십시오. ("고점 +2.10%에서
++0.90%로 1.20%p 반납했다"처럼.) "모멘텀이 약화되었다", "분위기가 좋지 않다" 같은
+모호한 표현은 금지합니다."""
 
 
 def build_exit_user_prompt(
     holdings: List[HoldingView],
     trace: List[TracePoint],
-    portfolio_return: float,
     minutes_to_close: int,
     partial: bool,
-    portfolio_peak: Optional[float] = None,
 ) -> str:
     lines = [
-        "보유 종목을 지금 전량 정리할지 판단하기 위한 현재 상황입니다.",
+        "보유 종목을 종목마다 지금 매도할지 판단하기 위한 현재 상황입니다.",
         "\n## 시간",
         f"- 15:15 강제청산까지 {minutes_to_close}분 남았습니다.",
-        "\n## 현재",
-        f"- 합산 순손익률: {_pct(portfolio_return)}",
     ]
-    if portfolio_peak is not None:
-        given_back = max(0.0, portfolio_peak - portfolio_return)
-        lines.append(
-            f"- 합산 당일 고점: {_pct(portfolio_peak)} ({given_back * 100:.2f}%p 반납)"
-        )
 
-    lines.append("\n## 순손익률 궤적 (시각 → 합산 / 종목별)")
+    lines.append("\n## 순손익률 궤적 (시각 → 종목별)")
     if partial:
         lines.append("궤적 일부 없음 — 엔진을 장중에 다시 켰습니다.")
     for point in trace:
         per_ticker = ", ".join(f"{t} {_pct(v)}" for t, v in point.per_ticker.items())
-        lines.append(f"- {point.at:%H:%M} 합산 {_pct(point.portfolio_return)} ({per_ticker})")
+        lines.append(f"- {point.at:%H:%M} {per_ticker}")
 
     lines.append(f"\n## 보유 종목 ({len(holdings)}종목)")
     for h in holdings:
@@ -246,7 +228,7 @@ def build_exit_user_prompt(
         lines.append(f"  아침 전망: {h.outlook}")
         lines.append(f"  오늘 공시: {_headline_text(h)}")
 
-    lines.append("\n지금 전량 매도할지 판단하세요.")
+    lines.append("\n종목마다 지금 매도할지 판단하세요.")
     return "\n".join(lines)
 
 
@@ -278,11 +260,11 @@ def parse_exit_decision(raw_text: str) -> ExitDecision:
 
 
 class ExitAdvisor:
-    """보유 종목을 지금 전량 정리할지 판단하는 LLM 모듈 (PRD 5.5-B 'AI 매도 판단').
+    """보유 종목을 하나씩 지금 매도할지 판단하는 LLM 모듈 (PRD 5.5-B 'AI 매도 판단').
 
     합산 순손익 기준 익절 자동 청산을 걷어낸 자리를 대신한다. 손절선은 이 모듈과
     무관하게 실시간 시세 콜백이 그대로 지킨다 — 여기서는 그 위쪽, "지금 팔아야 할
-    만큼 되돌림이 왔는가"만 주기적으로 LLM에 묻는다.
+    만큼 되돌림이 왔는가"만 종목마다 주기적으로 LLM에 묻는다.
     """
 
     def __init__(self, settings: Settings):
@@ -293,20 +275,16 @@ class ExitAdvisor:
         self,
         holdings: List[HoldingView],
         trace: List[TracePoint],
-        portfolio_return: float,
         minutes_to_close: int,
         partial: bool,
-        portfolio_peak: Optional[float] = None,
         timeout_seconds: float = 120.0,
     ) -> Optional[ExitDecision]:
         """청산 여부를 판단해 돌려준다. 실패하면 None — 호출측은 그 주기에 아무것도 팔지 않는다."""
         user_prompt = build_exit_user_prompt(
             holdings,
             trace,
-            portfolio_return,
             minutes_to_close,
             partial,
-            portfolio_peak,
         )
         logger.info(
             "AI 매도 판단 요청 (exit_prompt_version=%s, 보유 %d종목):\n%s",

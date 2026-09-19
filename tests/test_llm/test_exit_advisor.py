@@ -61,7 +61,7 @@ def test_parse_defaults_to_hold_when_sell_is_missing():
 
 def test_user_prompt_carries_the_trace_and_the_lines():
     prompt = build_exit_user_prompt(
-        [holding()], trace_points(), portfolio_return=0.004,
+        [holding()], trace_points(),
         minutes_to_close=330, partial=False,
     )
     assert "09:20" in prompt and "09:35" in prompt      # 궤적
@@ -72,7 +72,7 @@ def test_user_prompt_carries_the_trace_and_the_lines():
 
 def test_user_prompt_states_when_the_trace_is_partial():
     prompt = build_exit_user_prompt(
-        [holding()], [], portfolio_return=0.004,
+        [holding()], [],
         minutes_to_close=330, partial=True,
     )
     assert "궤적 일부 없음" in prompt
@@ -92,7 +92,7 @@ def test_decide_returns_none_when_api_raises():
             raise RuntimeError("network down")
 
     advisor._client = Boom()
-    assert advisor.decide([holding()], [], 0.004, 330, False) is None
+    assert advisor.decide([holding()], [], 330, False) is None
 
 
 class FakeBlock:
@@ -141,13 +141,13 @@ def test_decide_returns_none_when_stop_reason_is_max_tokens():
     advisor = _advisor_with_response(
         FakeResponse(stop_reason="max_tokens", content=[FakeBlock("아무 텍스트")])
     )
-    assert advisor.decide([holding()], [], 0.004, 330, False) is None
+    assert advisor.decide([holding()], [], 330, False) is None
 
 
 def test_decide_returns_none_when_stop_reason_is_refusal():
     """모델이 응답을 거부한 경우도 예외 없이 None으로 끝나야 한다."""
     advisor = _advisor_with_response(FakeResponse(stop_reason="refusal", content=[]))
-    assert advisor.decide([holding()], [], 0.004, 330, False) is None
+    assert advisor.decide([holding()], [], 330, False) is None
 
 
 def test_decide_returns_none_when_response_text_is_empty():
@@ -155,7 +155,7 @@ def test_decide_returns_none_when_response_text_is_empty():
     advisor = _advisor_with_response(
         FakeResponse(stop_reason="end_turn", content=[FakeBlock("   ")])
     )
-    assert advisor.decide([holding()], [], 0.004, 330, False) is None
+    assert advisor.decide([holding()], [], 330, False) is None
 
 
 def test_decide_returns_none_when_response_text_is_malformed_json():
@@ -166,7 +166,7 @@ def test_decide_returns_none_when_response_text_is_malformed_json():
             content=[FakeBlock("이 자리에 답을 드릴 수 없습니다.")],
         )
     )
-    assert advisor.decide([holding()], [], 0.004, 330, False) is None
+    assert advisor.decide([holding()], [], 330, False) is None
 
 
 # ── 장중 공시 (PRD 5.5-B '장중 공시') ──────────────────────────
@@ -176,14 +176,14 @@ def test_prompt_marks_intraday_disclosures_as_new():
         headlines=["유상증자 결정", "분기보고서"],
         new_headlines=["유상증자 결정"],
     )
-    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 330, False)
+    prompt = build_exit_user_prompt([view], trace_points(), 330, False)
 
     assert "오늘 공시: [신규] 유상증자 결정 / 분기보고서" in prompt
 
 
 def test_prompt_says_none_when_there_is_no_disclosure():
     """조회 실패와 '공시 없음'을 구분하지 않는다 — 실패를 적으면 악재 신호로 읽힐 수 있다."""
-    prompt = build_exit_user_prompt([holding()], trace_points(), 0.004, 330, False)
+    prompt = build_exit_user_prompt([holding()], trace_points(), 330, False)
 
     assert "오늘 공시: 없음" in prompt
 
@@ -200,14 +200,14 @@ def test_system_prompt_warns_against_selling_on_disclosure_alone():
 def test_prompt_says_when_the_sell_target_is_already_passed():
     """가격만 적어 두면 모델이 현재가와 대조하지 않는다 — 비교는 코드가 한다."""
     view = holding(target_sell_price=35_000.0, current_price=36_100.0)
-    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 330, False)
+    prompt = build_exit_user_prompt([view], trace_points(), 330, False)
 
     assert "아침 목표 매도가: 35,000원 — 현재가가 이미 +3.14% 넘어섰습니다" in prompt
 
 
 def test_prompt_says_when_the_sell_target_is_not_reached():
     view = holding(target_sell_price=38_000.0, current_price=36_100.0)
-    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 330, False)
+    prompt = build_exit_user_prompt([view], trace_points(), 330, False)
 
     assert "아직 -5.00% 아래입니다" in prompt
 
@@ -215,24 +215,16 @@ def test_prompt_says_when_the_sell_target_is_not_reached():
 def test_prompt_reports_the_giveback_as_a_number():
     """2026-09-10 현대중공업 궤적 — 고점 +4.46%에서 +1.41%면 3.05%p, 고점 이익의 68%다."""
     view = holding(net_return=0.0141, peak_return=0.0446)
-    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 330, False)
+    prompt = build_exit_user_prompt([view], trace_points(), 330, False)
 
     assert "되돌림: 당일 고점 +4.46% → 현재 +1.41% (3.05%p 반납, 고점 이익의 68%를 반납)" in prompt
 
 
 def test_prompt_says_so_when_now_is_the_peak():
     view = holding(net_return=0.0446, peak_return=0.0446)
-    prompt = build_exit_user_prompt([view], trace_points(), 0.004, 330, False)
+    prompt = build_exit_user_prompt([view], trace_points(), 330, False)
 
     assert "지금이 당일 고점입니다" in prompt
-
-
-def test_prompt_shows_the_portfolio_peak():
-    prompt = build_exit_user_prompt(
-        [holding()], trace_points(), 0.0085, 25, False, portfolio_peak=0.0236
-    )
-
-    assert "합산 당일 고점: +2.36% (1.51%p 반납)" in prompt
 
 
 def test_system_prompt_makes_a_big_giveback_a_sell_reason():
@@ -251,7 +243,6 @@ def test_prompt_has_no_stop_loss_line():
     prompt = build_exit_user_prompt(
         holdings=[],
         trace=[],
-        portfolio_return=-0.012,
         minutes_to_close=300,
         partial=False,
     )
@@ -309,6 +300,29 @@ def test_parse_non_boolean_sell_is_hold():
 def test_parse_rejects_non_object():
     with pytest.raises(Exception):
         parse_exit_decision("[]")
+
+
+def test_user_prompt_has_no_portfolio_aggregate():
+    """합산을 주면 AI가 종목별 판단에 그 숫자를 쓴다 — 손절선을 뺀 것과 같은 이유다.
+
+    2026-09-18에 손절선을 뺀 근거가 그대로 적용된다: 시스템 프롬프트가 신경 쓰지
+    말라고 못박아도, 숫자가 주어지면 그것이 근거가 된다.
+    """
+    prompt = build_exit_user_prompt(
+        holdings=[],
+        trace=[],
+        minutes_to_close=300,
+        partial=False,
+    )
+
+    assert "합산" not in prompt
+
+
+def test_system_prompt_asks_per_position_judgment():
+    prompt = build_exit_system_prompt()
+
+    assert "전량" not in prompt
+    assert "종목마다" in prompt or "종목별" in prompt
 
 
 def test_note_carries_per_ticker_reasons():

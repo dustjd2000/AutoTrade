@@ -121,10 +121,8 @@ class SpyAdvisor:
         self,
         holdings,
         trace,
-        portfolio_return,
         minutes_to_close,
         partial,
-        portfolio_peak=None,
         timeout_seconds=120.0,
     ):
         self.threads.append(threading.get_ident())
@@ -132,10 +130,8 @@ class SpyAdvisor:
             dict(
                 holdings=holdings,
                 trace=trace,
-                portfolio_return=portfolio_return,
                 minutes_to_close=minutes_to_close,
                 partial=partial,
-                portfolio_peak=portfolio_peak,
             )
         )
         return self.result

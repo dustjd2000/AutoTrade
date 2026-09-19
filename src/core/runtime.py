@@ -577,7 +577,6 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
             for r in [engine.exit_drawdown.retracement(p.ticker, per_ticker[p.ticker])]
             if r is not None
         }
-        portfolio_peak_view = engine.exit_drawdown.portfolio_retracement(portfolio_return)
         holdings_view = []
         for p in holdings:
             rec = recommendations.get(p.ticker)
@@ -618,10 +617,8 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
             lambda: runtime.exit_advisor.decide(
                 holdings_view,
                 trace,
-                portfolio_return,
                 minutes_to_close,
                 partial,
-                portfolio_peak_view.peak if portfolio_peak_view is not None else None,
             ),
         )
     except Exception:
