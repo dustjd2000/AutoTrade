@@ -2,9 +2,12 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from src.core.exit_trace import TracePoint
+import pytest
+
 from src.llm.exit_advisor import (
     ExitAdvisor,
     HoldingView,
+    PositionExit,
     build_exit_system_prompt,
     build_exit_user_prompt,
     parse_exit_decision,
@@ -40,15 +43,20 @@ def trace_points():
 
 
 def test_parse_reads_sell_and_reason():
-    result = parse_exit_decision('{"sell": true, "reason": "고점 대비 되돌림"}')
-    assert result.sell is True
-    assert result.reason == "고점 대비 되돌림"
+    raw = '{"decisions": [{"ticker": "005930", "sell": true, "reason": "고점 대비 되돌림"}]}'
+    result = parse_exit_decision(raw)
+    assert len(result.decisions) == 1
+    assert result.decisions[0].ticker == "005930"
+    assert result.decisions[0].sell is True
+    assert result.decisions[0].reason == "고점 대비 되돌림"
 
 
 def test_parse_defaults_to_hold_when_sell_is_missing():
     """형식이 어긋나도 매도 쪽으로 기울지 않는다 — 기본은 보유다."""
-    result = parse_exit_decision('{"reason": "판단 불가"}')
-    assert result.sell is False
+    raw = '{"decisions": [{"ticker": "005930", "sell": false, "reason": "판단 불가"}]}'
+    result = parse_exit_decision(raw)
+    assert len(result.decisions) == 1
+    assert result.decisions[0].sell is False
 
 
 def test_user_prompt_carries_the_trace_and_the_lines():
@@ -257,3 +265,61 @@ def test_system_prompt_has_no_baseline_section():
     prompt = build_exit_system_prompt()
 
     assert "손절선과 익절 기준선" not in prompt
+
+
+# ── 종목별 판정 (2026-09-19) ──────────────────────────────
+def test_parse_picks_only_the_sold_tickers():
+    raw = """{"decisions": [
+        {"ticker": "005930", "sell": true, "reason": "고점 +2.1%에서 +0.9%로 절반 넘게 반납"},
+        {"ticker": "000660", "sell": false, "reason": "아침 시나리오가 아직 유효"}
+    ]}"""
+
+    decision = parse_exit_decision(raw)
+
+    assert decision.sell_tickers(["005930", "000660"]) == ["005930"]
+
+
+def test_parse_treats_missing_ticker_as_hold():
+    """응답에 없는 보유 종목은 보유 — 누락이 매도 쪽으로 기울면 안 된다."""
+    raw = '{"decisions": [{"ticker": "005930", "sell": true, "reason": "반납"}]}'
+
+    decision = parse_exit_decision(raw)
+
+    assert decision.sell_tickers(["005930", "000660"]) == ["005930"]
+
+
+def test_parse_drops_unheld_ticker():
+    """보유하지 않은 종목을 팔라고 해도 버린다 (환각 방어)."""
+    raw = '{"decisions": [{"ticker": "999999", "sell": true, "reason": "환각"}]}'
+
+    decision = parse_exit_decision(raw)
+
+    assert decision.sell_tickers(["005930"]) == []
+
+
+def test_parse_non_boolean_sell_is_hold():
+    """sell이 불리언 true가 아니면 보유 — 기존 원칙 그대로."""
+    raw = '{"decisions": [{"ticker": "005930", "sell": "yes", "reason": "애매"}]}'
+
+    decision = parse_exit_decision(raw)
+
+    assert decision.sell_tickers(["005930"]) == []
+
+
+def test_parse_rejects_non_object():
+    with pytest.raises(Exception):
+        parse_exit_decision("[]")
+
+
+def test_note_carries_per_ticker_reasons():
+    """매도한 종목의 사유만 묶는다 — 청산 로그와 알림 메일이 이걸 싣는다."""
+    raw = """{"decisions": [
+        {"ticker": "005930", "sell": true, "reason": "반납 절반 초과"},
+        {"ticker": "000660", "sell": false, "reason": "유효"}
+    ]}"""
+
+    note = parse_exit_decision(raw).note(["005930", "000660"])
+
+    assert "005930" in note
+    assert "반납 절반 초과" in note
+    assert "000660" not in note

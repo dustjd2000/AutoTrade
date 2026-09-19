@@ -30,7 +30,7 @@ from src.core.runtime import (
     run_ai_exit_cycle,
     watch_ai_exit,
 )
-from src.llm.exit_advisor import ExitDecision
+from src.llm.exit_advisor import ExitDecision, PositionExit
 
 from tests.test_core.test_portfolio_exit import make_engine, two_holdings
 
@@ -235,7 +235,7 @@ def test_no_call_over_the_daily_cap():
 def test_call_happens_once_every_condition_is_satisfied():
     """양성 대조군 — 위 게이트 테스트들이 우연히 통과한 게 아님을 확인한다."""
     runtime, engine, advisor = make_runtime(
-        holdings=[holding()], decide_result=ExitDecision(sell=False, reason="관망")
+        holdings=[holding()], decide_result=ExitDecision(decisions=[PositionExit(ticker="005930", sell=False, reason="관망")])
     )
     last_called_at = IN_WINDOW - timedelta(minutes=DEFAULT_INTERVAL_MINUTES)  # 정확히 주기만큼 경과
     result = asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW, last_called_at))
@@ -246,7 +246,7 @@ def test_call_happens_once_every_condition_is_satisfied():
 # ── 한 사이클의 동작 (게이트를 통과했다고 가정하고 run_ai_exit_cycle을 직접 돈다) ──
 def test_cycle_appends_one_trace_point():
     runtime, engine, advisor = make_runtime(
-        holdings=[holding()], decide_result=ExitDecision(sell=False, reason="관망")
+        holdings=[holding()], decide_result=ExitDecision(decisions=[PositionExit(ticker="005930", sell=False, reason="관망")])
     )
     asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
 
@@ -259,7 +259,7 @@ def test_cycle_appends_one_trace_point():
 def test_sell_true_executes_portfolio_exit_with_ai_judgment_reason():
     h = holding()
     runtime, engine, advisor = make_runtime(
-        holdings=[h], decide_result=ExitDecision(sell=True, reason="추세 이탈")
+        holdings=[h], decide_result=ExitDecision(decisions=[PositionExit(ticker="005930", sell=True, reason="추세 이탈")])
     )
     asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
 
@@ -273,7 +273,7 @@ def test_sell_true_executes_portfolio_exit_with_ai_judgment_reason():
 
 def test_sell_false_does_not_execute_anything():
     runtime, engine, advisor = make_runtime(
-        holdings=[holding()], decide_result=ExitDecision(sell=False, reason="관망")
+        holdings=[holding()], decide_result=ExitDecision(decisions=[PositionExit(ticker="005930", sell=False, reason="관망")])
     )
     asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
     assert engine.executed == []
@@ -291,7 +291,7 @@ def test_cycle_skips_when_portfolio_return_is_unavailable():
     runtime, engine, advisor = make_runtime(
         holdings=[holding()],
         portfolio_return=None,
-        decide_result=ExitDecision(sell=True, reason="x"),
+        decide_result=ExitDecision(decisions=[PositionExit(ticker="005930", sell=True, reason="x")]),
     )
     asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
     assert advisor.calls == []
@@ -308,7 +308,7 @@ def test_sell_true_rereads_holdings_immediately_before_executing():
     """
     h = holding()
     runtime, engine, advisor = make_runtime(
-        holdings=[h], decide_result=ExitDecision(sell=True, reason="추세 이탈")
+        holdings=[h], decide_result=ExitDecision(decisions=[PositionExit(ticker="005930", sell=True, reason="추세 이탈")])
     )
     asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
     assert True in engine.exit_candidates_calls
@@ -320,7 +320,7 @@ def test_sell_true_does_not_execute_if_holdings_were_cleared_meanwhile():
     runtime, engine, advisor = make_runtime(
         holdings=[h],
         fresh_holdings=[],  # force=True로 다시 읽으면 이미 청산된 상태
-        decide_result=ExitDecision(sell=True, reason="추세 이탈"),
+        decide_result=ExitDecision(decisions=[PositionExit(ticker="005930", sell=True, reason="추세 이탈")]),
     )
     asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
     assert engine.executed == []
@@ -329,7 +329,7 @@ def test_sell_true_does_not_execute_if_holdings_were_cleared_meanwhile():
 # ── 판단 결과 기록 (UI 보유 종목 표가 읽는 값) ─────────────────
 def test_hold_decision_is_recorded_for_the_ui():
     runtime, engine, advisor = make_runtime(
-        holdings=[holding()], decide_result=ExitDecision(sell=False, reason="합산 +0.9%에서 +0.4%")
+        holdings=[holding()], decide_result=ExitDecision(decisions=[PositionExit(ticker="005930", sell=False, reason="합산 +0.9%에서 +0.4%")])
     )
     asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
 
@@ -338,7 +338,7 @@ def test_hold_decision_is_recorded_for_the_ui():
 
 def test_sell_decision_is_recorded_for_the_ui():
     runtime, engine, advisor = make_runtime(
-        holdings=[holding()], decide_result=ExitDecision(sell=True, reason="추세 이탈")
+        holdings=[holding()], decide_result=ExitDecision(decisions=[PositionExit(ticker="005930", sell=True, reason="추세 이탈")])
     )
     asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
 
@@ -366,7 +366,7 @@ def test_sell_decision_is_recorded_even_when_holdings_vanished():
     runtime, engine, advisor = make_runtime(
         holdings=[holding()],
         fresh_holdings=[],
-        decide_result=ExitDecision(sell=True, reason="추세 이탈"),
+        decide_result=ExitDecision(decisions=[PositionExit(ticker="005930", sell=True, reason="추세 이탈")]),
     )
     asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
 
@@ -378,7 +378,7 @@ def test_sell_decision_is_recorded_even_when_holdings_vanished():
 def test_decide_runs_off_the_loop_thread():
     loop_thread = threading.get_ident()
     runtime, engine, advisor = make_runtime(
-        holdings=[holding()], decide_result=ExitDecision(sell=False, reason="관망")
+        holdings=[holding()], decide_result=ExitDecision(decisions=[PositionExit(ticker="005930", sell=False, reason="관망")])
     )
     asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
 
@@ -391,7 +391,7 @@ def test_execute_portfolio_exit_runs_on_the_loop_thread():
     threads = []
     h = holding()
     runtime, engine, advisor = make_runtime(
-        holdings=[h], decide_result=ExitDecision(sell=True, reason="추세 이탈")
+        holdings=[h], decide_result=ExitDecision(decisions=[PositionExit(ticker="005930", sell=True, reason="추세 이탈")])
     )
 
     original = engine._execute_portfolio_exit

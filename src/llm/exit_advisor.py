@@ -1,7 +1,7 @@
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 import anthropic
 
@@ -14,14 +14,29 @@ logger = logging.getLogger(__name__)
 # 청산 판단 프롬프트 버전 — 추천 프롬프트(PROMPT_TEMPLATE_VERSION)와 따로 움직인다.
 EXIT_PROMPT_TEMPLATE_VERSION = "v1"
 
-# 응답 스키마 — sell/reason 둘뿐이라 recommender/reviewer와 달리 배열로 감싸지 않는다.
+# 응답 스키마 — 종목마다 판정과 근거를 받는다 (확정 2026-09-19). 전량 판정이던 시절에는
+# {sell, reason} 하나였다.
 EXIT_SCHEMA = {
     "type": "object",
     "properties": {
-        "sell": {"type": "boolean", "description": "지금 전량 매도할지 여부"},
-        "reason": {"type": "string", "description": "판단 근거 — 궤적의 구체적 수치를 인용"},
+        "decisions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string", "description": "종목코드 6자리"},
+                    "sell": {"type": "boolean", "description": "이 종목을 지금 매도할지"},
+                    "reason": {
+                        "type": "string",
+                        "description": "판단 근거 — 그 종목 궤적의 구체적 수치를 인용",
+                    },
+                },
+                "required": ["ticker", "sell", "reason"],
+                "additionalProperties": False,
+            },
+        }
     },
-    "required": ["sell", "reason"],
+    "required": ["decisions"],
     "additionalProperties": False,
 }
 
@@ -51,9 +66,53 @@ class HoldingView:
 
 
 @dataclass
-class ExitDecision:
+class PositionExit:
+    """한 종목에 대한 판정."""
+
+    ticker: str
     sell: bool
     reason: str
+
+
+@dataclass
+class ExitDecision:
+    """한 주기의 종목별 판정 묶음 (확정 2026-09-19, PRD 5.5-B).
+
+    보유하지 않은 종목과 응답에서 빠진 종목은 `sell_tickers`가 걸러낸다 — 누락이
+    매도 쪽으로 기울면 안 되므로 **모르는 것은 전부 보유**로 떨어진다.
+    """
+
+    decisions: List[PositionExit]
+
+    def sell_tickers(self, held: Iterable[str]) -> List[str]:
+        """보유 중이면서 매도로 판정된 종목코드."""
+        held_set = set(held)
+        return [d.ticker for d in self.decisions if d.sell and d.ticker in held_set]
+
+    def note(self, held: Iterable[str]) -> str:
+        """매도한 종목의 사유만 묶는다 — 청산 로그와 알림 메일에 실린다."""
+        held_set = set(held)
+        return " / ".join(
+            f"{d.ticker}: {d.reason}" for d in self.decisions if d.sell and d.ticker in held_set
+        )
+
+    @property
+    def sell(self) -> bool:
+        """호환성: 팔 종목이 하나라도 있으면 True (Task 2에서 제거됨)."""
+        return any(d.sell for d in self.decisions)
+
+    @property
+    def reason(self) -> str:
+        """호환성: 팔 종목의 사유, 또는 보유 종목의 사유 (Task 2에서 제거됨)."""
+        # 팔 종목이 있으면 그들의 사유
+        sell_reasons = " / ".join(d.reason for d in self.decisions if d.sell)
+        if sell_reasons:
+            return sell_reasons
+        # 팔 종목이 없으면 첫 번째 종목의 사유 (보유 사유)
+        if self.decisions:
+            return self.decisions[0].reason
+        # 판정이 없으면 기본값
+        return "판단 실패"
 
 
 def _pct(ratio: float) -> str:
@@ -194,17 +253,27 @@ def build_exit_user_prompt(
 def parse_exit_decision(raw_text: str) -> ExitDecision:
     """청산 판단 응답을 파싱한다.
 
-    `sell`이 없거나 형식이 어긋나면(불리언 `true`가 아니면) sell=False로 떨어진다 —
-    기본은 보유이므로, 형식 오류가 매도 쪽으로 기울면 안 된다. JSON 자체가 깨졌거나
-    최상위가 객체가 아니면 이 함수가 예외를 던지고, 호출측(ExitAdvisor.decide)이
-    이를 None으로 받는다.
+    `sell`이 불리언 `true`가 아니면 그 종목은 보유로 떨어진다 — 기본은 보유이므로
+    형식 오류가 매도 쪽으로 기울면 안 된다. JSON 자체가 깨졌거나 최상위가 객체가
+    아니면 이 함수가 예외를 던지고, 호출측(`ExitAdvisor.decide`)이 이를 None으로 받아
+    그 주기에 아무것도 팔지 않는다.
     """
     data = json.loads(_extract_json(raw_text))
     if not isinstance(data, dict):
         raise ValueError("LLM exit response must be a JSON object")
+    items = data.get("decisions")
+    if not isinstance(items, list):
+        raise ValueError("LLM exit response must carry a 'decisions' array")
     return ExitDecision(
-        sell=data.get("sell") is True,
-        reason=str(data.get("reason", "")).strip(),
+        decisions=[
+            PositionExit(
+                ticker=str(item.get("ticker", "")).strip(),
+                sell=item.get("sell") is True,
+                reason=str(item.get("reason", "")).strip(),
+            )
+            for item in items
+            if isinstance(item, dict)
+        ]
     )
 
 
