@@ -1,6 +1,7 @@
 import json
 import logging
 from dataclasses import dataclass, field
+from time import monotonic
 from typing import Iterable, List, Optional
 
 import anthropic
@@ -306,8 +307,18 @@ class ExitAdvisor:
             len(holdings),
             user_prompt,
         )
+        deadline = monotonic() + timeout_seconds
         try:
-            response = self._client.with_options(timeout=timeout_seconds).messages.create(
+            # 비스트리밍은 응답이 다 만들어질 때까지 첫 바이트가 오지 않아, 출력이 길어진
+            # 날 read timeout에 그대로 걸린다 (2026-09-16 추천 경로에서 같은 일이 났다).
+            # 종목마다 사유를 쓰게 된 뒤로 출력이 보유 종목 수에 비례해 늘어 위험이 커졌다.
+            # 스트리밍은 블록이 오는 대로 받으므로 길어져도 연결이 끊기지 않고, 총 시간은
+            # 아래 deadline이 직접 지킨다.
+            # max_retries=0 — 재시도가 예산을 배로 늘린다. 시세를 보고 내리는 판단이라
+            # 오래 걸릴수록 낡고, 낡은 판단으로 파는 것이 한 주기 거르는 것보다 나쁘다.
+            with self._client.with_options(
+                timeout=timeout_seconds, max_retries=0
+            ).messages.stream(
                 model=self.settings.llm_model,
                 max_tokens=MAX_TOKENS,
                 system=build_exit_system_prompt(),
@@ -318,7 +329,14 @@ class ExitAdvisor:
                     "format": {"type": "json_schema", "schema": EXIT_SCHEMA},
                     "effort": "low",
                 },
-            )
+            ) as stream:
+                for _ in stream:
+                    # 낡은 판단으로 팔지 않는다 — 넘기면 이번 주기는 보유로 떨어진다
+                    if monotonic() > deadline:
+                        raise TimeoutError(
+                            f"AI 매도 판단 시간 예산 {timeout_seconds:.0f}초를 넘겨 중단합니다."
+                        )
+                response = stream.get_final_message()
         except Exception:
             logger.exception("AI 매도 판단 호출이 실패했거나 타임아웃되었습니다.")
             return None

@@ -111,28 +111,51 @@ class FakeResponse:
         self.content = content if content is not None else []
 
 
-class FakeMessages:
-    def __init__(self, response):
-        self._response = response
+class FakeStream:
+    """`with client.messages.stream(...) as stream:` 경로를 흉내낸다."""
 
-    def create(self, **kwargs):
+    def __init__(self, response, events=()):
+        self._response = response
+        self._events = events
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def __iter__(self):
+        return iter(self._events)
+
+    def get_final_message(self):
         return self._response
 
 
-class FakeClient:
-    """`self._client.with_options(...).messages.create(...)` 경로를 흉내내며 고정 응답을 돌려준다."""
+class FakeMessages:
+    def __init__(self, response, events=()):
+        self._response = response
+        self._events = events
 
-    def __init__(self, response):
-        self.messages = FakeMessages(response)
+    def stream(self, **kwargs):
+        return FakeStream(self._response, self._events)
+
+
+class FakeClient:
+    """`self._client.with_options(...).messages.stream(...)` 경로를 흉내내며 고정 응답을 돌려준다."""
+
+    def __init__(self, response, events=()):
+        self.messages = FakeMessages(response, events)
+        self.options = []
 
     def with_options(self, **kwargs):
+        self.options.append(kwargs)
         return self
 
 
-def _advisor_with_response(response):
+def _advisor_with_response(response, events=()):
     advisor = ExitAdvisor.__new__(ExitAdvisor)
     advisor.settings = SimpleNamespace(anthropic_api_key="k", llm_model="claude-opus-5")
-    advisor._client = FakeClient(response)
+    advisor._client = FakeClient(response, events)
     return advisor
 
 
@@ -362,3 +385,32 @@ def test_note_dedupes_a_repeated_ticker():
 
     assert note == "005930: 고점 반납"
     assert note.count("005930") == 1
+
+
+# ── 스트리밍 전환 (2026-09-19) ──────────────────────────────
+def test_decide_does_not_retry():
+    """재시도를 끈다 — 한 번의 판단에 예산이 배로 늘면 그만큼 시세와 어긋난다.
+
+    SDK 기본값(max_retries=2)이면 최악 120초 × 3 = 6분이 걸리고, 그렇게 낡은
+    판단으로 파는 것은 30분 주기에서 위험하다.
+    """
+    response = FakeResponse(
+        content=[FakeBlock('{"decisions": [{"ticker": "005930", "sell": false, "reason": "유효"}]}')]
+    )
+    advisor = _advisor_with_response(response)
+
+    advisor.decide([holding()], [], 330, False)
+
+    assert advisor._client.options[0]["max_retries"] == 0
+
+
+def test_decide_gives_up_when_budget_exceeded(monkeypatch):
+    """예산을 넘기면 스트림을 끊고 None — 낡은 판단으로 팔지 않는다."""
+    clock = iter([0.0, 10_000.0])
+    monkeypatch.setattr("src.llm.exit_advisor.monotonic", lambda: next(clock))
+    response = FakeResponse(
+        content=[FakeBlock('{"decisions": [{"ticker": "005930", "sell": true, "reason": "반납"}]}')]
+    )
+    advisor = _advisor_with_response(response, events=[object()])
+
+    assert advisor.decide([holding()], [], 330, False) is None
