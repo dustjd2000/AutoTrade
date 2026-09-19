@@ -650,16 +650,23 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
     # 팔지 않고 매도 직전에 보유 종목을 다시 읽는다 (force_close_all_positions와 같은 이유).
     fresh_holdings = engine.exit_candidates(force=True)
     fresh_targets = [p for p in fresh_holdings if p.ticker in set(targets)]
+    # UI 기록(note_ai_exit_result)은 "AI가 무엇을 판단했는가"를 보여주는 자리라 이 시점의
+    # 판정 전체(targets)를 그대로 남긴다 — 그 사이 손절이 먼저 정리했더라도 AI가 그 종목을
+    # 팔기로 봤다는 사실 자체는 남는다.
     note = decision.note(held)
     engine.note_ai_exit_result(now, sell=True, reason=note, sold_tickers=targets)
     if not fresh_targets:
         logger.info("AI 매도 판단: 매도로 판단했지만 그 사이 그 종목이 이미 정리되었습니다.")
         return
 
-    logger.warning("AI 매도 판단: %d종목 매도 (%s)", len(fresh_targets), note)
+    # 알림 메일·청산 로그는 반대로 "무엇이 실제로 팔렸는가"라 fresh_targets로 다시 거른다.
+    # 응답을 기다리는 동안 손절이 먼저 정리한 종목의 사유가 섞여 들어가면, 실제로는 안 팔린
+    # 종목을 "왜 팔았는지"로 오독하게 된다 (2026-09-19 리뷰).
+    executed_note = decision.note(p.ticker for p in fresh_targets)
+    logger.warning("AI 매도 판단: %d종목 매도 (%s)", len(fresh_targets), executed_note)
     # 근거를 함께 넘겨 청산 로그와 알림 메일에 남긴다 — 사유 코드(ai_judgment)만으로는
     # 왜 팔았는지 나중에 되짚을 수 없다.
-    engine._execute_portfolio_exit(fresh_targets, ExitReason.AI_JUDGMENT, note=note)
+    engine._execute_portfolio_exit(fresh_targets, ExitReason.AI_JUDGMENT, note=executed_note)
 
 
 async def maybe_run_ai_exit_cycle(

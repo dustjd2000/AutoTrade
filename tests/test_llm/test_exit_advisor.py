@@ -337,3 +337,28 @@ def test_note_carries_per_ticker_reasons():
     assert "005930" in note
     assert "반납 절반 초과" in note
     assert "000660" not in note
+
+
+def test_sell_tickers_dedupes_a_repeated_ticker():
+    """스키마가 같은 종목코드의 중복 응답을 막지 않는다 — 한 번만 내야 한다."""
+    raw = """{"decisions": [
+        {"ticker": "005930", "sell": true, "reason": "고점 반납"},
+        {"ticker": "005930", "sell": true, "reason": "중복 판정"}
+    ]}"""
+
+    decision = parse_exit_decision(raw)
+
+    assert decision.sell_tickers(["005930"]) == ["005930"]
+
+
+def test_note_dedupes_a_repeated_ticker():
+    """note에도 같은 종목의 사유가 두 번 실리면 안 된다."""
+    raw = """{"decisions": [
+        {"ticker": "005930", "sell": true, "reason": "고점 반납"},
+        {"ticker": "005930", "sell": true, "reason": "중복 판정"}
+    ]}"""
+
+    note = parse_exit_decision(raw).note(["005930"])
+
+    assert note == "005930: 고점 반납"
+    assert note.count("005930") == 1

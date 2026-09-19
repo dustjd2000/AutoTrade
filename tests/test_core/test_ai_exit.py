@@ -419,6 +419,62 @@ def test_cycle_sells_only_the_judged_ticker_among_three():
     assert "035420" not in note
 
 
+def test_executed_note_excludes_reason_for_a_ticker_already_sold_by_stop_loss():
+    """응답을 기다리는 동안 손절이 먼저 판 종목의 사유가 청산 알림에 섞이면 안 된다.
+
+    LLM이 A(005930)·B(000660) 둘 다 팔라고 판정했는데, 재조회(force=True) 시점에는
+    B가 이미 손절로 정리돼(fresh_holdings에 없음) 실제로는 A만 팔린다. `_execute_portfolio_exit`에
+    넘기는 note에는 A의 사유만 실려야 한다 (2026-09-19 리뷰) — 매도 알림 메일이 이 note를
+    그대로 신는다.
+    """
+    a = holding(ticker="005930")
+    b = holding(ticker="000660", name="SK하이닉스")
+    runtime, engine, _ = make_runtime(
+        holdings=[a, b],
+        fresh_holdings=[a],  # 그 사이 손절이 000660을 먼저 정리했다
+        decide_result=ExitDecision(
+            decisions=[
+                PositionExit(ticker="005930", sell=True, reason="고점 반납"),
+                PositionExit(ticker="000660", sell=True, reason="추세 이탈"),
+            ]
+        ),
+    )
+
+    asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
+
+    assert len(engine.executed) == 1
+    sold, _reason, note = engine.executed[0]
+    assert [p.ticker for p in sold] == ["005930"]
+    assert "005930" in note
+    assert "000660" not in note  # 실제로 팔리지 않은 종목의 사유는 알림에 실리면 안 된다
+
+
+def test_ui_record_keeps_the_full_ai_judgment_even_when_stop_loss_beat_it_to_one_ticker():
+    """UI 기록(note_ai_exit_result)은 "AI가 무엇을 판단했는가"를 보여주는 자리라, 그 사이
+    손절이 먼저 정리한 종목이 있어도 AI가 판정한 전체(A·B)를 그대로 담는다 — 실제로 팔린
+    종목만 담는 알림 메일의 note와는 의도적으로 다르다.
+    """
+    a = holding(ticker="005930")
+    b = holding(ticker="000660", name="SK하이닉스")
+    runtime, engine, _ = make_runtime(
+        holdings=[a, b],
+        fresh_holdings=[a],
+        decide_result=ExitDecision(
+            decisions=[
+                PositionExit(ticker="005930", sell=True, reason="고점 반납"),
+                PositionExit(ticker="000660", sell=True, reason="추세 이탈"),
+            ]
+        ),
+    )
+
+    asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
+
+    [(_at, sell, ui_reason, _ok)] = engine.ai_exit_results
+    assert sell is True
+    assert "005930" in ui_reason
+    assert "000660" in ui_reason  # 실제로는 안 팔렸어도 AI 판정 기록에는 남는다
+
+
 def test_cycle_ignores_a_hallucinated_ticker_not_held():
     """모델이 보유하지 않은 종목코드를 sell=True로 냈어도 아무것도 팔리지 않는다.
 

@@ -85,16 +85,30 @@ class ExitDecision:
     decisions: List[PositionExit]
 
     def sell_tickers(self, held: Iterable[str]) -> List[str]:
-        """보유 중이면서 매도로 판정된 종목코드."""
+        """보유 중이면서 매도로 판정된 종목코드 (중복 없이, 첫 등장 순서).
+
+        스키마가 같은 종목코드의 중복 응답을 막지 않는다 — 실행에는 영향이 없지만
+        (집합 연산으로 자연히 걸러진다) 여기서 미리 걸러 둔다.
+        """
         held_set = set(held)
-        return [d.ticker for d in self.decisions if d.sell and d.ticker in held_set]
+        seen = set()
+        result = []
+        for d in self.decisions:
+            if d.sell and d.ticker in held_set and d.ticker not in seen:
+                seen.add(d.ticker)
+                result.append(d.ticker)
+        return result
 
     def note(self, held: Iterable[str]) -> str:
-        """매도한 종목의 사유만 묶는다 — 청산 로그와 알림 메일에 실린다."""
+        """매도한 종목의 사유만 묶는다 (종목당 한 번) — 청산 로그와 알림 메일에 실린다."""
         held_set = set(held)
-        return " / ".join(
-            f"{d.ticker}: {d.reason}" for d in self.decisions if d.sell and d.ticker in held_set
-        )
+        seen = set()
+        parts = []
+        for d in self.decisions:
+            if d.sell and d.ticker in held_set and d.ticker not in seen:
+                seen.add(d.ticker)
+                parts.append(f"{d.ticker}: {d.reason}")
+        return " / ".join(parts)
 
 
 def _pct(ratio: float) -> str:
