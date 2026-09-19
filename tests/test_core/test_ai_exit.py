@@ -323,6 +323,123 @@ def test_sell_true_does_not_execute_if_holdings_were_cleared_meanwhile():
     assert engine.executed == []
 
 
+# ── 종목별 판정 (2026-09-19) ──────────────────────────────
+def test_cycle_sells_only_the_judged_ticker():
+    """팔기로 판정된 종목만 주문이 나가고 나머지는 보유로 남는다.
+
+    전량 판정이던 시절에는 sell=true 하나로 보유 목록 전체가 나갔다.
+    """
+    holdings = [holding(ticker="005930"), holding(ticker="000660", name="SK하이닉스")]
+    runtime, engine, _ = make_runtime(
+        holdings=holdings,
+        decide_result=ExitDecision(
+            decisions=[
+                PositionExit(ticker="005930", sell=True, reason="고점 +2.10%에서 +0.90%로 반납"),
+                PositionExit(ticker="000660", sell=False, reason="아침 시나리오가 아직 유효"),
+            ]
+        ),
+    )
+
+    asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
+
+    assert len(engine.executed) == 1
+    sold, _reason, note = engine.executed[0]
+    assert [p.ticker for p in sold] == ["005930"]
+    assert "005930" in note
+    assert "000660" not in note
+
+
+def test_cycle_sells_nothing_when_every_ticker_holds():
+    """전부 보유 판정이면 매도가 없다 — 사유는 UI 기록에 남는다."""
+    holdings = [holding(ticker="005930"), holding(ticker="000660", name="SK하이닉스")]
+    runtime, engine, _ = make_runtime(
+        holdings=holdings,
+        decide_result=ExitDecision(
+            decisions=[
+                PositionExit(ticker="005930", sell=False, reason="되돌림 미미"),
+                PositionExit(ticker="000660", sell=False, reason="시나리오 유효"),
+            ]
+        ),
+    )
+
+    asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
+
+    assert engine.executed == []
+    assert engine.ai_exit_results[-1][1] is False  # sell=False
+
+
+def test_cycle_skips_a_ticker_already_sold_by_stop_loss():
+    """응답을 기다리는 동안 손절이 먼저 판 종목은 제외된다.
+
+    fresh_holdings가 매도 직전 재조회 결과다 — 그 목록에 없으면 팔 것이 없다.
+    """
+    runtime, engine, _ = make_runtime(
+        holdings=[holding(ticker="005930")],
+        fresh_holdings=[],
+        decide_result=ExitDecision(
+            decisions=[PositionExit(ticker="005930", sell=True, reason="반납")]
+        ),
+    )
+
+    asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
+
+    assert engine.executed == []
+
+
+def test_cycle_sells_only_the_judged_ticker_among_three():
+    """3종목 중 1종목만 매도 판정이면 나머지 2종목은 그대로 남는다.
+
+    2종목 테스트(test_cycle_sells_only_the_judged_ticker)만으로는 "전부 vs 하나"만
+    구분되고, "하나만 팔고 둘 다 남는다"는 증명되지 않는다 — 기존 테스트가 전부 보유
+    1종목이라 이 차이가 드러나지 않았다는 리뷰 지적에 대응한다.
+    """
+    holdings = [
+        holding(ticker="005930"),
+        holding(ticker="000660", name="SK하이닉스"),
+        holding(ticker="035420", name="NAVER"),
+    ]
+    runtime, engine, _ = make_runtime(
+        holdings=holdings,
+        decide_result=ExitDecision(
+            decisions=[
+                PositionExit(ticker="005930", sell=True, reason="고점 반납"),
+                PositionExit(ticker="000660", sell=False, reason="시나리오 유효"),
+                PositionExit(ticker="035420", sell=False, reason="시나리오 유효"),
+            ]
+        ),
+    )
+
+    asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
+
+    assert len(engine.executed) == 1
+    sold, _reason, note = engine.executed[0]
+    assert [p.ticker for p in sold] == ["005930"]
+    assert "000660" not in note
+    assert "035420" not in note
+
+
+def test_cycle_ignores_a_hallucinated_ticker_not_held():
+    """모델이 보유하지 않은 종목코드를 sell=True로 냈어도 아무것도 팔리지 않는다.
+
+    ExitDecision.sell_tickers가 held와의 교집합만 남기므로, 응답에 없는 종목코드가
+    섞여 들어와도(환각) 실행 경로까지 새어 나가지 않아야 한다.
+    """
+    holdings = [holding(ticker="005930")]
+    runtime, engine, _ = make_runtime(
+        holdings=holdings,
+        decide_result=ExitDecision(
+            decisions=[
+                PositionExit(ticker="005930", sell=False, reason="관망"),
+                PositionExit(ticker="999999", sell=True, reason="보유하지 않은 종목"),
+            ]
+        ),
+    )
+
+    asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
+
+    assert engine.executed == []
+
+
 # ── 판단 결과 기록 (UI 보유 종목 표가 읽는 값) ─────────────────
 def test_hold_decision_is_recorded_for_the_ui():
     runtime, engine, advisor = make_runtime(
