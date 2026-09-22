@@ -1304,19 +1304,5 @@ class DailyWorkflow:
         logger.info("프롬프트 수정 메일 발송 (%s, %s → %s)", today, old_version, new_version)
 
     def _why_history(self) -> str:
-        """직전 변경들의 이유. 에이전트가 자기 수정을 되돌리는 것을 막는 입력이다.
-
-        이력 폴더가 없으면 빈 문자열 — 첫 실행이 그 상태다.
-        """
-        history_dir = self.prompt_store.prompt_dir / "history"
-        try:
-            versions = sorted(path for path in history_dir.iterdir() if path.is_dir())
-        except OSError:
-            return ""
-        entries = []
-        for path in versions[-5:]:
-            try:
-                entries.append(f"- {path.name}: {(path / 'why.md').read_text(encoding='utf-8')}")
-            except OSError:
-                continue
-        return "\n".join(entries)
+        """직전 변경들의 이유 — `PromptStore.why_history`로 옮겼다 (매도 프롬프트와 공유)."""
+        return self.prompt_store.why_history()

@@ -3,7 +3,7 @@ import os
 import re
 from datetime import date
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 from src.llm.recommender import (
     DEFAULT_PROMPT_SECTIONS,
@@ -46,23 +46,38 @@ def next_version(current: str, today: Optional[date] = None) -> str:
 
 
 class PromptStore:
-    """추천 프롬프트의 편집 가능한 다섯 절을 파일로 읽고 쓴다 (PRD '프롬프트 자동 수정').
+    """프롬프트의 편집 가능한 절을 파일로 읽고 쓴다 (PRD '프롬프트 자동 수정').
 
-    읽기는 항상 다섯 키를 채워 돌려준다 — 파일이 없거나 비었으면 코드 기본값으로 폴백한다.
+    추천 프롬프트(다섯 절, `data/prompt/`)와 매도 프롬프트(세 절, `data/exit_prompt/`,
+    스펙 2026-09-22)가 함께 쓴다 — 절 목록·기본값·기본 버전을 생성자로 받는다. 인자를
+    주지 않으면 추천 프롬프트다.
+
+    읽기는 항상 모든 키를 채워 돌려준다 — 파일이 없거나 비었으면 코드 기본값으로 폴백한다.
     쓰기는 이력 보관 → 전체 쓰기 → 버전 증가 순서다.
     """
 
-    def __init__(self, prompt_dir: Path = DEFAULT_PROMPT_DIR):
+    def __init__(
+        self,
+        prompt_dir: Path = DEFAULT_PROMPT_DIR,
+        section_order: Sequence[str] = PROMPT_SECTION_ORDER,
+        defaults: Mapping[str, str] = DEFAULT_PROMPT_SECTIONS,
+        default_version: str = PROMPT_TEMPLATE_VERSION,
+        label: str = "추천 프롬프트",
+    ):
         self.prompt_dir = Path(prompt_dir)
+        self.section_order: Tuple[str, ...] = tuple(section_order)
+        self.defaults: Dict[str, str] = dict(defaults)
+        self.default_version = default_version
+        self.label = label
 
     def load_sections(self) -> Dict[str, str]:
         sections = {}
-        for key in PROMPT_SECTION_ORDER:
-            sections[key] = self._read(self.prompt_dir / f"{key}.md") or DEFAULT_PROMPT_SECTIONS[key]
+        for key in self.section_order:
+            sections[key] = self._read(self.prompt_dir / f"{key}.md") or self.defaults[key]
         return sections
 
     def load_version(self) -> str:
-        return self._read(self.prompt_dir / VERSION_FILE) or PROMPT_TEMPLATE_VERSION
+        return self._read(self.prompt_dir / VERSION_FILE) or self.default_version
 
     def save(self, new_sections: Dict[str, str], reason: str, today: Optional[date] = None) -> str:
         """고친 절만 받아 전체를 다시 쓰고, 이전 버전을 이력으로 남긴다. 새 버전을 돌려준다.
@@ -89,20 +104,38 @@ class PromptStore:
         merged = dict(current_sections)
         merged.update(new_sections)
         self.prompt_dir.mkdir(parents=True, exist_ok=True)
-        for key in PROMPT_SECTION_ORDER:
+        for key in self.section_order:
             self._write_atomic(self.prompt_dir / f"{key}.md", merged[key])
 
         new_version = next_version(current_version, today)
         self._write_atomic(self.prompt_dir / VERSION_FILE, new_version)
-        logger.info("추천 프롬프트를 수정했습니다: %s → %s", current_version, new_version)
+        logger.info("%s를 수정했습니다: %s → %s", self.label, current_version, new_version)
         return new_version
 
     def _archive(self, version: str, sections: Dict[str, str], reason: str) -> None:
         target = self.prompt_dir / HISTORY_DIR / version
         target.mkdir(parents=True, exist_ok=True)
-        for key in PROMPT_SECTION_ORDER:
+        for key in self.section_order:
             self._write_atomic(target / f"{key}.md", sections[key])
         self._write_atomic(target / WHY_FILE, reason)
+
+    def why_history(self, limit: int = 5) -> str:
+        """직전 변경들의 이유 (최근 `limit`개). 에이전트가 자기 수정을 되돌리는 것을 막는 입력이다.
+
+        이력 폴더가 없으면 빈 문자열 — 첫 실행이 그 상태다.
+        """
+        history_dir = self.prompt_dir / HISTORY_DIR
+        try:
+            versions = sorted(path for path in history_dir.iterdir() if path.is_dir())
+        except OSError:
+            return ""
+        entries = []
+        for path in versions[-limit:]:
+            try:
+                entries.append(f"- {path.name}: {(path / WHY_FILE).read_text(encoding='utf-8')}")
+            except OSError:
+                continue
+        return "\n".join(entries)
 
     @staticmethod
     def _write_atomic(path: Path, text: str) -> None:

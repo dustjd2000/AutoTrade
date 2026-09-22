@@ -90,3 +90,41 @@ def test_load_sections_always_has_all_five_keys(tmp_path):
     store = PromptStore(tmp_path / "prompt")
     store.save({"outlook": "## 오늘 전망 작성 지침\n새 내용"}, reason="시험")
     assert set(store.load_sections()) == set(PROMPT_SECTION_ORDER)
+
+
+# ── 일반화 (스펙 2026-09-22 4.1 — 매도 프롬프트도 같은 저장소를 쓴다) ──
+ORDER = ("alpha", "beta")
+DEFAULTS = {"alpha": "## A\n기본 A", "beta": "## B\n기본 B"}
+
+
+def custom_store(tmp_path):
+    return PromptStore(tmp_path / "other", ORDER, DEFAULTS, "x1", label="시험 프롬프트")
+
+
+def test_custom_store_falls_back_to_its_own_defaults(tmp_path):
+    store = custom_store(tmp_path)
+    assert store.load_sections() == DEFAULTS
+    assert store.load_version() == "x1"
+
+
+def test_custom_store_saves_only_its_own_sections(tmp_path):
+    store = custom_store(tmp_path)
+    store.save({"beta": "## B\n새 B"}, reason="시험", today=date(2026, 9, 29))
+
+    assert store.load_sections() == {"alpha": "## A\n기본 A", "beta": "## B\n새 B"}
+    assert sorted(p.name for p in (tmp_path / "other").glob("*.md")) == ["alpha.md", "beta.md"]
+    assert (tmp_path / "other" / "history" / "x1" / "alpha.md").exists()
+
+
+def test_why_history_lists_recent_reasons(tmp_path):
+    store = custom_store(tmp_path)
+    store.save({"beta": "## B\n1"}, reason="첫 이유", today=date(2026, 9, 29))
+    store.save({"beta": "## B\n2"}, reason="둘째 이유", today=date(2026, 9, 30))
+
+    text = store.why_history()
+    assert "- x1: 첫 이유" in text
+    assert "- 20260929: 둘째 이유" in text
+
+
+def test_why_history_is_empty_before_any_change(tmp_path):
+    assert custom_store(tmp_path).why_history() == ""
