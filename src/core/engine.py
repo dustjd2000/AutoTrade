@@ -29,6 +29,11 @@ from src.notification.alert import AlertNotifier
 
 logger = logging.getLogger(__name__)
 
+# 당일 고점을 DB에 남기는 최소 간격 (초). 대형주는 틱이 초당 여러 번 와서 매번 쓰면 루프
+# 스레드가 디스크를 기다린다. 사이에 찍힌 더 높은 고점은 다음 쓰기에 실린다 — 그래서
+# 기록되는 고점 시각·가격은 최대 이만큼 늦다 (스펙 2026-09-22 2.2).
+PEAK_FLUSH_SECONDS = 5.0
+
 # 실시간 체결 틱마다 잔고 REST(kt00005)를 호출하면 키움 유량 제한(429)에 걸린다.
 # 그 예외는 콜백 전체를 중단시키므로 손절 판정이 통째로 건너뛰어지는데,
 # _last_market_data_at은 이미 갱신된 뒤라 시세 끊김 감시에도 걸리지 않는다 —
@@ -178,6 +183,8 @@ class TradingEngine:
         # — 고점은 15분 주기 사이를 스쳐 지나가므로 궤적만으로는 잡히지 않는다
         # (PRD 5.5-B "이익 반납 감시"). 이것도 08:40에 비운다.
         self.exit_drawdown = DrawdownTracker(ai_exit_drawdown_ratio)
+        # 고점을 마지막으로 DB에 남긴 시각 (`flush_exit_peaks`)
+        self._peaks_flushed_at: Optional[datetime] = None
         # UI 체크박스가 켜고 끈다 — stop_loss_enabled가 risk_manager에 붙은 것과 같은 자리다.
         # 기본은 켬이고, 마지막으로 켜고 끈 상태는 `.env`(AI_EXIT_ENABLED)에서 여기로 들어온다.
         self.ai_exit_enabled = ai_exit_enabled
@@ -550,6 +557,7 @@ class TradingEngine:
         self._positions = self._screen_positions(snapshot.positions)
         self._positions_fetched_at = datetime.now()
         self._open_tickers = {t for t, p in self._positions.items() if p.quantity > 0}
+        self._restore_exit_peaks()
         if self._open_tickers:
             logger.warning(
                 "시작 시점에 이미 보유 중인 종목이 있습니다 (전일 이월 가능): %s",
@@ -557,6 +565,58 @@ class TradingEngine:
             )
         self._running = True
         logger.info("Trading engine started. Strategy: %s", self.strategy.name)
+
+    def _restore_exit_peaks(self) -> None:
+        """오늘 남긴 당일 고점을 트래커에 되살린다 (스펙 2026-09-22 2.2).
+
+        재시작하면 트래커가 비어, AI 매도 판단이 재시작 뒤 고점만 보게 된다 — 2026-09-22
+        11:00 판단이 실제 -0.73% 대신 -2.91%를 봤다. 엔진이 꺼져 있던 구간의 고점은 여전히 없다.
+        """
+        if self.trade_store is None:
+            return
+        try:
+            peaks = self.trade_store.position_peaks_for(datetime.now().date())
+        except Exception:
+            logger.warning("당일 고점 복원 실패 — 재시작 뒤 고점부터 다시 잽니다.", exc_info=True)
+            return
+        if peaks:
+            self.exit_drawdown.seed(peaks)
+            logger.info(
+                "당일 고점을 복원했습니다: %s",
+                {ticker: f"{peak * 100:+.2f}%" for ticker, peak in peaks.items()},
+            )
+
+    def flush_exit_peaks(
+        self, positions: Optional[Dict[str, Position]] = None, force: bool = False
+    ) -> None:
+        """새로 찍은 당일 고점을 DB에 남긴다. `force`가 아니면 `PEAK_FLUSH_SECONDS`에 한 번.
+
+        실패해도 예외를 올리지 않는다 — 시세 콜백(손절 판정과 같은 경로)에서 불린다.
+        """
+        if self.trade_store is None:
+            return
+        now = datetime.now()
+        if (
+            not force
+            and self._peaks_flushed_at is not None
+            and (now - self._peaks_flushed_at).total_seconds() < PEAK_FLUSH_SECONDS
+        ):
+            return
+        dirty = self.exit_drawdown.take_dirty()
+        self._peaks_flushed_at = now
+        source = positions if positions is not None else self._positions
+        for ticker, peak in dirty.items():
+            position = source.get(ticker)
+            try:
+                self.trade_store.save_position_peak(
+                    now.date(),
+                    ticker,
+                    peak,
+                    now,
+                    position.current_price if position is not None else None,
+                )
+            except Exception:
+                logger.warning("당일 고점 기록 실패: %s", ticker, exc_info=True)
 
     def stop(self) -> None:
         self._running = False
@@ -580,6 +640,8 @@ class TradingEngine:
         스케줄러가 장마감 동시호가 이전(15:15)에 호출하는 것을 전제로 한다
         (`runtime.FORCE_CLOSE_TIME` 참고 — 동시호가에 들어간 시장가는 종가에야 체결된다).
         """
+        # 매도 전에 남은 고점을 비운다 — 15:35 검증의 "순이익 기회"가 여기서 끊기면 안 된다
+        self.flush_exit_peaks(force=True)
         # 무엇을 파는지가 곧 결과이므로 캐시를 쓰지 않고 최신 잔고를 읽는다
         positions = self._get_positions(force=True)
         holdings = [p for p in positions.values() if p.quantity > 0]
@@ -734,23 +796,26 @@ class TradingEngine:
         )
 
     def _track_exit_drawdown(self, positions: Dict[str, Position]) -> None:
-        """당일 순손익 고점을 따라가고, 반납폭이 임계치를 넘으면 AI 판단을 앞당긴다.
+        """당일 순손익 고점을 따라가 DB에 남기고, 반납폭이 임계치를 넘으면 AI 판단을 앞당긴다.
 
         여기서는 팔지 않는다 — `DrawdownTracker`에 표시만 남기고, 실제 호출은
         `runtime.ai_exit_due`가 그 표시를 보고 다음 폴링(최대 30초)에서 앞당긴다.
         판단 자체는 종목마다 이뤄지고(확정 2026-09-19), 앞당기는 것은 호출 시점뿐이다.
 
-        AI 매도 판단이 꺼져 있으면 아무것도 하지 않는다 — 앞당길 호출이 없다.
+        **고점 추적은 AI 매도 판단이 꺼져 있어도 돈다** (스펙 2026-09-22 2.2) — 15:35 매도 판단
+        검증의 "순이익 기회"는 AI를 끈 날에도 의미가 있다. 꺼져 있으면 앞당김 표시만 버린다.
         """
-        if not self.ai_exit_enabled:
-            return
-
         holdings = [p for t, p in positions.items() if t not in self._exiting]
         if not holdings:
             return
 
         per_ticker = {p.ticker: self.position_net_return(p) for p in holdings}
         crossed = self.exit_drawdown.update(per_ticker)
+        self.flush_exit_peaks(positions)
+        if not self.ai_exit_enabled:
+            # 앞당길 호출이 없다 — 남겨 두면 다시 켜는 순간 낡은 표시로 호출이 앞당겨진다
+            self.exit_drawdown.take_urgent()
+            return
         for ticker in crossed:
             retracement = self.exit_drawdown.retracement(ticker, per_ticker[ticker])
             if retracement is None:

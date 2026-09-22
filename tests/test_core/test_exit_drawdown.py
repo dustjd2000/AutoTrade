@@ -173,13 +173,14 @@ def test_tick_triggers_when_the_giveback_crosses():
 
 
 def test_tick_does_not_track_while_ai_exit_is_off():
-    """AI 매도 판단이 꺼져 있으면 앞당길 호출 자체가 없다."""
+    """AI 매도 판단이 꺼져 있어도 고점 추적은 계속된다 (스펙 2026-09-22 2.2) — 앞당길 호출만 없다."""
     engine, _ = engine_with_watch()
     engine.ai_exit_enabled = False
 
     engine.on_market_data(MarketData(ticker="005930", price=1050.0, volume=1))
 
-    assert engine.exit_drawdown.retracement("005930", 0.0) is None
+    assert engine.exit_drawdown.retracement("005930", 0.0).peak == 0.05
+    assert engine.exit_drawdown.urgent_pending is False
 
 
 def test_daily_reset_clears_the_tracker():
@@ -213,3 +214,38 @@ def test_peak_at_threshold_still_triggers():
     crossed = tracker.update({"062040": 0.0117})  # 1.00%p 반납
 
     assert crossed == ["062040"]
+
+
+# ── 영속화·복원 (스펙 2026-09-22 2.2) ────────────────────────
+def test_new_peaks_are_marked_dirty_until_taken():
+    t = tracker()
+    t.update({TICKER: 0.01})
+    t.update({TICKER: 0.02})
+    t.update({TICKER: 0.015})
+
+    assert t.take_dirty() == {TICKER: 0.02}
+    assert t.take_dirty() == {}
+
+
+def test_seed_restores_a_higher_peak_only():
+    t = tracker()
+    t.update({TICKER: 0.01, OTHER: 0.05})
+    t.seed({TICKER: 0.0446, OTHER: 0.02})
+
+    assert t.retracement(TICKER, 0.0).peak == 0.0446
+    assert t.retracement(OTHER, 0.0).peak == 0.05
+
+
+def test_seeded_peak_is_armed_for_the_giveback_trigger():
+    """재시작 전에 발동했어야 할 반납이면 복원 직후 한 번 앞당겨지는 것이 의도된 동작이다."""
+    t = tracker()
+    t.seed({TICKER: 0.0446})
+
+    assert t.update({TICKER: 0.0141}) == [TICKER]
+
+
+def test_clear_drops_dirty_peaks():
+    t = tracker()
+    t.update({TICKER: 0.01})
+    t.clear()
+    assert t.take_dirty() == {}

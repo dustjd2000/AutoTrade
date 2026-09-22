@@ -63,6 +63,8 @@ class DrawdownTracker:
         self._armed: Dict[str, bool] = {}
         self._urgent_pending = False
         self._urgent_triggers = 0
+        # 마지막으로 꺼내 간 뒤 새로 찍은 고점 — 엔진이 DB에 남긴다 (스펙 2026-09-22 2.2)
+        self._dirty: Dict[str, float] = {}
 
     # ── 갱신 ────────────────────────────────────────────────
     def update(self, per_ticker: Dict[str, float]) -> List[str]:
@@ -77,6 +79,7 @@ class DrawdownTracker:
             if peak is None or current > peak:
                 self._peaks[ticker] = current
                 self._armed[ticker] = True
+                self._dirty[ticker] = current
                 continue
             if self.threshold_ratio <= 0 or not self._armed.get(ticker, False):
                 continue
@@ -104,6 +107,25 @@ class DrawdownTracker:
         self._urgent_pending = True
         return crossed
 
+    # ── 영속화·복원 (스펙 2026-09-22 2.2) ────────────────────
+    def seed(self, peaks: Dict[str, float]) -> None:
+        """재시작 전에 남긴 고점을 되살린다 — 지금 들고 있는 값보다 높을 때만 덮는다.
+
+        복원한 고점은 무장(armed)한 채로 둔다. 복원 직후 현재값이 임계값 이상 낮으면 한 번
+        앞당겨지는데, 그것은 재시작 전에 발동했어야 할 반납이다.
+        """
+        for ticker, peak in peaks.items():
+            current = self._peaks.get(ticker)
+            if current is None or peak > current:
+                self._peaks[ticker] = peak
+                self._armed[ticker] = True
+
+    def take_dirty(self) -> Dict[str, float]:
+        """마지막으로 꺼내 간 뒤 새로 찍은 고점을 꺼낸다 (종목당 가장 높은 값 하나)."""
+        dirty = self._dirty
+        self._dirty = {}
+        return dirty
+
     # ── 프롬프트 재료 ────────────────────────────────────────
     def retracement(self, ticker: str, current: float) -> Optional[Retracement]:
         """그 종목의 고점 대비 반납. 아직 고점을 모르면 None이다."""
@@ -129,3 +151,4 @@ class DrawdownTracker:
         self._armed.clear()
         self._urgent_pending = False
         self._urgent_triggers = 0
+        self._dirty.clear()
