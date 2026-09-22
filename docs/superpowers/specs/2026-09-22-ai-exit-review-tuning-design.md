@@ -1,7 +1,7 @@
 # AI 매도 판단 검증 + 매도 프롬프트 자동 수정 — 설계
 
 - 날짜: 2026-09-22
-- 상태: 설계 승인됨 (구현 전)
+- 상태: 구현 완료 (2026-09-22)
 - 관련: PRD 5.5-B "AI 매도 판단", 5.12 "추천 검증", 5.13 "프롬프트 자동 수정", 10절 "AI 매도 판단 기준을 순수익으로 바꾼다"
 
 ## 1. 배경과 목적
@@ -140,7 +140,10 @@ decision_count, review.
 
 - 편집 가능한 세 절만 `data/exit_prompt/<key>.md`로 둔다. 파일이 없거나 깨졌으면 코드의
   `DEFAULT_EXIT_PROMPT_SECTIONS`로 폴백. 잠긴 절은 코드 상수 그대로.
-- `build_exit_system_prompt`가 매 호출마다 파일을 읽는다 — 엔진 재시작 없이 다음 판단에 반영.
+- `build_exit_system_prompt` 자체는 인자로 받은 절만 이어 붙일 뿐 파일을 읽지 않는다 — 매
+  호출마다 파일을 읽는 쪽은 `ExitAdvisor.decide`다: `self.prompt_store.load_sections()`를
+  불러 그 결과를 `build_exit_system_prompt`에 넘긴다. 그래서 엔진 재시작 없이 다음 판단에
+  반영된다.
 - `PromptStore`를 일반화한다: 생성자가 `section_order`, `defaults`, `default_version`을 받는다
   (기본값은 지금의 추천 값 그대로라 기존 호출부는 바뀌지 않는다). 매도용은
   `PromptStore(Path("data")/"exit_prompt", EXIT_PROMPT_SECTION_ORDER, DEFAULT_EXIT_PROMPT_SECTIONS,
@@ -180,8 +183,11 @@ decision_count, review.
   UI에서 **1~10%, 0.5 단위**로 고른다. `_save_settings` 경로라 바꾸면 엔진이 재시작된다(다른 설정과
   같다). `Settings.validate()`가 범위(1~10)를 강제한다.
 - **계산**: 일일 리포트와 같은 식 — 이번 달 1일~오늘 순손익(`monthly_summary(...).net_pnl`) ÷
-  (현재 총자산 − 그 순손익). 총자산은 `account.get_balance_snapshot()`. 계산은 `DailyWorkflow`의
-  헬퍼 하나(`_monthly_net_return()`)로 두고 리포트와 게이트가 함께 쓴다.
+  (현재 총자산 − 그 순손익). 총자산은 `account.get_balance_snapshot()`. 월초 자산 추정치까지
+  채운 `MonthlySummary`는 `DailyWorkflow._monthly_summary_with_base()`가 만들고 일일 리포트
+  (`send_daily_report`)와 게이트가 함께 쓴다. 게이트 판정 자체(잔고 조회 실패·기준자산 0
+  이하면 고치지 않음, 기준값 이상이면 건너뜀)는 `DailyWorkflow._tuning_blocked_by_monthly_return()`이
+  맡고, `tune_prompt`·`tune_exit_prompt` 양쪽이 이 메서드 하나를 부른다.
 - **판정 순서**: 각 튜너 단계의 맨 앞, LLM 호출 전에 코드가 본다. 매도 튜너에서는 표본 게이트(4.3)보다
   먼저 본다. 건너뛰면 로그에 "이번 달 순수익 +x.xx% ≥ 기준 y.y% — 프롬프트를 고치지 않습니다"를 남긴다.
   메일은 보내지 않는다(고치지 않는 날이 정상).
