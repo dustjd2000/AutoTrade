@@ -774,10 +774,6 @@ def adopt_carried_over_positions(runtime: Runtime) -> List[str]:
 
     runtime.ws_client.subscribe(held)
     logger.warning("이월 포지션을 매도 감시 대상으로 편입했습니다: %s", held)
-    runtime.engine.notify(
-        f"[알림] 전일 이월 보유 종목 {len(held)}개를 오늘 매도 대상으로 편입했습니다: {held}. "
-        "손절 감시가 시작되며, 남으면 15:15에 강제청산됩니다."
-    )
     return held
 
 
