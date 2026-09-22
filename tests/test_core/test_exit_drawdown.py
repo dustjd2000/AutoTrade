@@ -249,3 +249,24 @@ def test_clear_drops_dirty_peaks():
     t.update({TICKER: 0.01})
     t.clear()
     assert t.take_dirty() == {}
+
+
+def test_requeue_dirty_is_picked_up_by_the_next_take():
+    """DB 기록이 실패한 고점은 다음 take_dirty에서 다시 나와야 유실되지 않는다."""
+    t = tracker()
+    t.update({TICKER: 0.02})
+    t.take_dirty()
+
+    t.requeue_dirty(TICKER, 0.02)
+
+    assert t.take_dirty() == {TICKER: 0.02}
+
+
+def test_requeue_dirty_keeps_the_higher_value():
+    """되돌리는 사이 더 높은 고점이 이미 dirty에 쌓였으면 그 값을 지킨다."""
+    t = tracker()
+    t.update({TICKER: 0.05})
+
+    t.requeue_dirty(TICKER, 0.02)
+
+    assert t.take_dirty() == {TICKER: 0.05}

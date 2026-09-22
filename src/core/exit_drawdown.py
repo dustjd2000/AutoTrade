@@ -126,6 +126,15 @@ class DrawdownTracker:
         self._dirty = {}
         return dirty
 
+    def requeue_dirty(self, ticker: str, peak: float) -> None:
+        """DB 기록이 실패한 고점을 다시 dirty로 되돌린다 — 다음 flush에서 재시도한다.
+
+        되돌리는 사이 새 고점이 이미 dirty에 쌓였을 수 있어, 더 높은 값을 남긴다.
+        """
+        current = self._dirty.get(ticker)
+        if current is None or peak > current:
+            self._dirty[ticker] = peak
+
     # ── 프롬프트 재료 ────────────────────────────────────────
     def retracement(self, ticker: str, current: float) -> Optional[Retracement]:
         """그 종목의 고점 대비 반납. 아직 고점을 모르면 None이다."""

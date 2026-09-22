@@ -3,7 +3,7 @@
 2026-09-22 09:17·10:59 재시작으로 DrawdownTracker가 초기화돼, 11:00 판단이 실제 고점
 -0.73% 대신 -2.91%를 봤다. 새 고점은 DB에 남기고, 엔진 시작 때 되살린다.
 """
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 from src.api.account import Position
 from src.core.events import MarketData
@@ -110,3 +110,25 @@ def test_store_failure_does_not_break_the_tick(tmp_path):
 
     store.save_position_peak = boom
     engine.on_market_data(MarketData(ticker=TICKER, price=1030.0, volume=1))  # 예외가 새지 않는다
+
+
+def test_a_failed_write_is_retried_on_the_next_flush(tmp_path):
+    """기록이 실패한 고점은 유실되지 않고 다음 flush에서 재시도된다."""
+    store = TradeStore(tmp_path / "t.db")
+    engine, _, _ = make_engine(one_holding(), trade_store=store)
+
+    real_save = store.save_position_peak
+    calls = {"count": 0}
+
+    def flaky(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise OSError("disk full")
+        return real_save(*args, **kwargs)
+
+    store.save_position_peak = flaky
+    engine.on_market_data(MarketData(ticker=TICKER, price=1030.0, volume=1))  # 첫 기록 실패
+
+    engine.flush_exit_peaks(force=True)
+
+    assert abs(store.position_peaks_for(today())[TICKER] - 0.03) < 1e-9

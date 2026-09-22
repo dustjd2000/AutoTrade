@@ -617,6 +617,7 @@ class TradingEngine:
                 )
             except Exception:
                 logger.warning("당일 고점 기록 실패: %s", ticker, exc_info=True)
+                self.exit_drawdown.requeue_dirty(ticker, peak)
 
     def stop(self) -> None:
         self._running = False
