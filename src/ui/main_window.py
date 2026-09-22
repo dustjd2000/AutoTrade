@@ -84,7 +84,7 @@ HOLDINGS_CHECK_COLUMN = 0
 UNSELLABLE_COLUMNS = ("종목", "사유", "시각")
 # AI 매도 판단 블록 높이. 근거는 수치를 인용하도록 시켜서 서너 줄까지 가는데, 표 아래
 # 자리는 그만큼 넓지 않다 — 실행 로그 창처럼 넘치는 만큼 스크롤시킨다.
-AI_EXIT_VIEW_HEIGHT = 64
+AI_EXIT_VIEW_HEIGHT = 128
 # 오늘 매수할 종목과 진행 상태 (DailyWorkflow.buy_plan_snapshot) — 로그만으로는 매수
 # 절차가 어디까지 갔는지 알 수 없어 따로 보여준다 (PRD 5.10 "매수 예정 표")
 # 0번 열은 '선택 삭제' 대상 체크 — 보유 종목 표와 같은 방식이다 (HOLDINGS_CHECK_COLUMN 참고).
