@@ -267,9 +267,18 @@ def test_tune_skip_choices_run_from_1_to_10_by_half():
     assert len(TUNE_SKIP_MONTHLY_RETURN_CHOICES) == 19
 
 
-@pytest.mark.parametrize("value", [0.5, 10.5, 3.3])
-def test_validate_rejects_a_tune_skip_value_off_the_choices(monkeypatch, value):
+@pytest.mark.parametrize("raw", ["0.5", "10.5", "3.3", "abc", " "])
+def test_bad_tune_skip_value_falls_back_to_5(monkeypatch, raw):
+    """튜닝 전용 값 하나 때문에 엔진이 뜨지 않으면 안 된다 — 경고 후 기본값 (2026-09-22)."""
+    monkeypatch.setenv("TUNE_SKIP_MONTHLY_RETURN_PERCENT", raw)
+    assert Settings().tune_skip_monthly_return_percent == 5.0
+
+
+def test_bad_tune_skip_value_does_not_stop_the_engine(monkeypatch):
+    """validate()가 이 값 때문에 실패하지 않는다 — 다른 검사는 그대로 돈다."""
+    monkeypatch.setenv("TUNE_SKIP_MONTHLY_RETURN_PERCENT", "7.3")
     settings = Settings()
-    settings.tune_skip_monthly_return_percent = value
-    with pytest.raises(ValueError, match="TUNE_SKIP_MONTHLY_RETURN_PERCENT"):
-        settings.validate()
+    settings.app_key = settings.app_key or "k"
+    settings.app_secret = settings.app_secret or "s"
+    settings.mode = "paper"
+    settings.validate()

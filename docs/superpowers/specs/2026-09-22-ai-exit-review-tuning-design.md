@@ -181,7 +181,8 @@ decision_count, review.
 - **설정**: `.env`의 `TUNE_SKIP_MONTHLY_RETURN_PERCENT` (기본 5). 퍼센트 설정 패턴 그대로
   `tune_skip_monthly_return_percent` 필드 + `tune_skip_monthly_return_ratio` 프로퍼티.
   UI에서 **1~10%, 0.5 단위**로 고른다. `_save_settings` 경로라 바꾸면 엔진이 재시작된다(다른 설정과
-  같다). `Settings.validate()`가 범위(1~10)를 강제한다.
+  같다). 범위(1~10, 0.5 단위) 밖 값은 `validate()`로 막지 않고 경고 후 기본값 5로 돌린다
+  (구현 후 변경 2026-09-22 — 튜닝 전용 값 하나로 엔진이 뜨지 않으면 그날 매매 전체가 멈춘다).
 - **계산**: 일일 리포트와 같은 식 — 이번 달 1일~오늘 순손익(`monthly_summary(...).net_pnl`) ÷
   (현재 총자산 − 그 순손익). 총자산은 `account.get_balance_snapshot()`. 월초 자산 추정치까지
   채운 `MonthlySummary`는 `DailyWorkflow._monthly_summary_with_base()`가 만들고 일일 리포트

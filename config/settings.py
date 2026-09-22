@@ -26,6 +26,29 @@ AI_EXIT_INTERVAL_CHOICES = (15, 30, 60)
 # 이번 달 순수익률이 이 값(%) 이상이면 15:35 추천·매도 프롬프트 자동 수정을 둘 다 건너뛴다
 # (스펙 2026-09-22 4-A). UI 콤보가 주는 값만 허용한다 — 1~10%, 0.5 단위.
 TUNE_SKIP_MONTHLY_RETURN_CHOICES = tuple(step / 2 for step in range(2, 21))
+DEFAULT_TUNE_SKIP_MONTHLY_RETURN_PERCENT = 5.0
+
+
+def _parse_tune_skip_percent(raw: Optional[str]) -> float:
+    """월 순수익 게이트 값을 읽는다. 비었거나 목록 밖 값이면 경고 후 기본값(5)으로 돌린다.
+
+    validate()로 막지 않는 것은 의도한 것이다 (2026-09-22) — 튜닝에만 쓰이는 값 하나가
+    틀렸다고 엔진이 뜨지 않으면 그날 매매 전체가 멈춘다. `_parse_hhmm`과 같은 이유다.
+    """
+    if raw is None or not raw.strip():
+        return DEFAULT_TUNE_SKIP_MONTHLY_RETURN_PERCENT
+    try:
+        value = float(raw)
+    except ValueError:
+        value = None
+    if value not in TUNE_SKIP_MONTHLY_RETURN_CHOICES:
+        logger.warning(
+            "TUNE_SKIP_MONTHLY_RETURN_PERCENT 값이 올바르지 않아(1~10, 0.5 단위) 기본값 %s를 사용합니다: %r",
+            DEFAULT_TUNE_SKIP_MONTHLY_RETURN_PERCENT,
+            raw,
+        )
+        return DEFAULT_TUNE_SKIP_MONTHLY_RETURN_PERCENT
+    return value
 
 
 def _parse_hhmm(raw: str, default: str, name: str) -> dt_time:
@@ -214,7 +237,7 @@ class Settings:
     # 월 순수익 게이트 (스펙 2026-09-22 4-A) — 잘 되고 있을 때는 프롬프트를 건드리지 않는다.
     # 추천 프롬프트 수정(tune_prompt)과 매도 프롬프트 수정(tune_exit_prompt)에 함께 걸린다.
     tune_skip_monthly_return_percent: float = field(
-        default_factory=lambda: float(os.getenv("TUNE_SKIP_MONTHLY_RETURN_PERCENT", "5"))
+        default_factory=lambda: _parse_tune_skip_percent(os.getenv("TUNE_SKIP_MONTHLY_RETURN_PERCENT"))
     )
 
     @property
@@ -259,11 +282,6 @@ class Settings:
             raise ValueError(
                 f"AI_EXIT_INTERVAL_MINUTES는 {AI_EXIT_INTERVAL_CHOICES} 중 하나여야 합니다: "
                 f"{self.ai_exit_interval_minutes}"
-            )
-        if self.tune_skip_monthly_return_percent not in TUNE_SKIP_MONTHLY_RETURN_CHOICES:
-            raise ValueError(
-                "TUNE_SKIP_MONTHLY_RETURN_PERCENT는 1~10 사이 0.5 단위여야 합니다: "
-                f"{self.tune_skip_monthly_return_percent}"
             )
         if not self.app_key or not self.app_secret:
             raise ValueError("KIWOOM_APP_KEY and KIWOOM_APP_SECRET must be set")
