@@ -40,7 +40,7 @@ from src.llm.exit_advisor import ExitAdvisor, HoldingView
 from src.llm.recommender import LLMRecommender
 from src.llm.reviewer import LLMReviewer
 from src.llm.tuner import PromptTuner
-from src.logger.trade_store import TradeStore
+from src.logger.trade_store import AIExitDecisionRow, TradeStore
 from src.notification.alert import AlertNotifier
 from src.notification.email import EmailNotifier
 from src.risk.manager import RiskManager
@@ -530,6 +530,54 @@ def ai_exit_due(
     return True
 
 
+AI_EXIT_FAILURE_TEXT = "LLM 호출 실패·타임아웃·형식 오류 (이번 주기는 매도하지 않습니다)"
+AI_EXIT_MISSING_TEXT = "(응답 없음 — 보유로 처리)"
+
+
+def _record_ai_exit_decisions(runtime: Runtime, now: datetime, holdings_view, decision) -> None:
+    """이번 주기의 판정을 보유 종목마다 한 줄씩 남긴다 (스펙 2026-09-22 2.1).
+
+    매도 실행 **전에** 부른다 — 무엇을 판단했는지가 기록의 대상이고, 무엇이 팔렸는지는
+    trades가 따로 남긴다. 기록 실패가 매도를 막으면 안 되므로 예외를 삼킨다.
+    """
+    store = runtime.engine.trade_store
+    if store is None:
+        return
+    version = getattr(runtime.exit_advisor, "prompt_version", "") or ""
+    verdicts = {}
+    if decision is not None:
+        for d in decision.decisions:
+            verdicts.setdefault(d.ticker, d)
+    rows = []
+    for h in holdings_view:
+        verdict = verdicts.get(h.ticker)
+        if decision is None:
+            sell, ok, reason = False, False, AI_EXIT_FAILURE_TEXT
+        elif verdict is None:
+            sell, ok, reason = False, True, AI_EXIT_MISSING_TEXT
+        else:
+            sell, ok, reason = verdict.sell, True, verdict.reason
+        rows.append(
+            AIExitDecisionRow(
+                day=now.date(),
+                at=now,
+                ticker=h.ticker,
+                name=h.name,
+                sell=sell,
+                ok=ok,
+                reason=reason,
+                net_return=h.net_return,
+                peak_return=h.peak_return,
+                current_price=h.current_price,
+                exit_prompt_version=version,
+            )
+        )
+    try:
+        store.save_ai_exit_decisions(rows)
+    except Exception:
+        logger.warning("AI 매도 판단 기록 실패 — 매도 흐름은 그대로 진행합니다.", exc_info=True)
+
+
 async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) -> None:
     """AI 매도 판단 한 사이클을 실행한다 — 궤적에 점을 남기고 종목마다 판정해 매도로 정해진
     종목만 판다.
@@ -545,6 +593,8 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
     if runtime.disclosure_watch is not None:
         runtime.disclosure_watch.take_urgent()
     engine.exit_drawdown.take_urgent()
+    # 판단 전에 남은 고점을 비운다 — 15:35 검증이 이 주기의 고점까지 보게 한다
+    engine.flush_exit_peaks(force=True)
 
     holdings = engine.exit_candidates()
     if not holdings:
@@ -626,8 +676,10 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
         logger.exception("AI 매도 판단 사이클 처리 중 오류 — 이번 주기는 매도하지 않습니다.")
         return
 
+    _record_ai_exit_decisions(runtime, now, holdings_view, decision)
+
     if decision is None:
-        reason_text = "LLM 호출 실패·타임아웃·형식 오류 (이번 주기는 매도하지 않습니다)"
+        reason_text = AI_EXIT_FAILURE_TEXT
         logger.info("AI 매도 판단: 보유 유지 (%s)", reason_text)
         engine.note_ai_exit_result(now, sell=False, reason=reason_text, ok=False)
         return

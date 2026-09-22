@@ -83,7 +83,12 @@ class FakeEngine:
             portfolio_return=lambda hs: portfolio_return,
             stop_loss_ratio=0.02,
         )
-        self.trade_store = SimpleNamespace(recommendations_for=lambda day: [])
+        self.saved_decisions = []  # save_ai_exit_decisions로 넘어온 행
+        self.trade_store = SimpleNamespace(
+            recommendations_for=lambda day: [],
+            save_ai_exit_decisions=lambda rows: self.saved_decisions.extend(rows),
+        )
+        self.peak_flushes = []  # flush_exit_peaks(force=...) 기록
         self.exit_candidates_calls = []  # force 인자 기록
         self.executed = []  # [(holdings, reason, note), ...] — _execute_portfolio_exit 호출 기록
         self.ai_exit_results = []  # [(at, sell, reason, ok), ...] — note_ai_exit_result 호출 기록
@@ -109,6 +114,9 @@ class FakeEngine:
         self.ai_exit_results.append((at, sell, reason, ok))
         self.ai_exit_sold_tickers = tuple(sold_tickers)
 
+    def flush_exit_peaks(self, positions=None, force=False):
+        self.peak_flushes.append(force)
+
 
 class SpyAdvisor:
     """decide 호출 여부·인자·호출 스레드를 기록하는 가짜 ExitAdvisor."""
@@ -117,6 +125,7 @@ class SpyAdvisor:
         self.result = result
         self.calls = []
         self.threads = []
+        self.prompt_version = "vtest"
 
     def decide(
         self,
@@ -675,3 +684,72 @@ def test_position_net_return_matches_position_snapshot_ratio():
     assert engine.position_net_return(position) == pytest.approx(0.01)
     [view] = [v for v in engine.position_snapshot() if v.ticker == "005930"]
     assert engine.position_net_return(position) == pytest.approx(view.net_pnl_percent / 100)
+
+
+# ── 판단 기록 (스펙 2026-09-22 2.1) ─────────────────────────
+def test_every_held_ticker_is_recorded_with_its_verdict():
+    a, b = holding("005930", "삼성전자"), holding("000660", "SK하이닉스")
+    runtime, engine, _ = make_runtime(
+        holdings=[a, b],
+        decide_result=ExitDecision(
+            decisions=[
+                PositionExit(ticker="005930", sell=True, reason="목표가 도달"),
+                PositionExit(ticker="000660", sell=False, reason="시나리오 유효"),
+            ]
+        ),
+    )
+
+    asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
+
+    rows = {r.ticker: r for r in engine.saved_decisions}
+    assert rows["005930"].sell is True and rows["005930"].reason == "목표가 도달"
+    assert rows["000660"].sell is False and rows["000660"].ok is True
+    assert rows["005930"].at == IN_WINDOW and rows["005930"].day == IN_WINDOW.date()
+    assert rows["005930"].exit_prompt_version == "vtest"
+
+
+def test_failed_cycle_is_recorded_as_not_ok():
+    runtime, engine, _ = make_runtime(holdings=[holding()], decide_result=None)
+
+    asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
+
+    [row] = engine.saved_decisions
+    assert row.ok is False and row.sell is False
+
+
+def test_ticker_missing_from_the_response_is_recorded_as_hold():
+    a, b = holding("005930"), holding("000660")
+    runtime, engine, _ = make_runtime(
+        holdings=[a, b],
+        decide_result=ExitDecision(decisions=[PositionExit(ticker="005930", sell=False, reason="유효")]),
+    )
+
+    asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
+
+    rows = {r.ticker: r for r in engine.saved_decisions}
+    assert rows["000660"].sell is False
+    assert rows["000660"].reason == "(응답 없음 — 보유로 처리)"
+
+
+def test_record_failure_does_not_block_the_sell():
+    runtime, engine, _ = make_runtime(
+        holdings=[holding()],
+        decide_result=ExitDecision(decisions=[PositionExit(ticker="005930", sell=True, reason="r")]),
+    )
+
+    def boom(rows):
+        raise OSError("disk full")
+
+    engine.trade_store.save_ai_exit_decisions = boom
+
+    asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
+
+    assert len(engine.executed) == 1
+
+
+def test_cycle_flushes_pending_peaks_first():
+    runtime, engine, _ = make_runtime(holdings=[holding()], decide_result=None)
+
+    asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
+
+    assert engine.peak_flushes == [True]
