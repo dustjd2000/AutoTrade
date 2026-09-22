@@ -275,6 +275,30 @@ def test_prompt_has_no_stop_loss_line():
     assert "익절" not in prompt
 
 
+def test_system_prompt_targets_net_profit_not_the_close():
+    """덜 잃은 것을 잘한 것으로 치면 안 된다 — 기준은 순손익이다 (2026-09-22)."""
+    system = build_exit_system_prompt()
+
+    assert "당일 순수익" in system
+    assert "종가보다 나은" in system
+
+
+def test_system_prompt_rejects_stop_loss_as_a_hold_reason():
+    """손절선 -5%에서 AI가 "손실은 손절선이 관리한다"로 -3.91%까지 보유했다 (2026-09-22 삼성생명)."""
+    system = build_exit_system_prompt()
+
+    assert "손절선이 맡고" not in system
+    assert "보유 근거가 되지 못합니다" in system
+
+
+def test_system_prompt_counts_the_morning_downside_price_as_a_break():
+    """구체적 근거를 공시로만 읽었다 — 아침 전망의 하락 경로 가격도 근거로 못 박는다."""
+    system = build_exit_system_prompt()
+
+    assert "구체적 근거는 공시만이 아닙니다" in system
+    assert "하락 경로의 가격" in system
+
+
 def test_system_prompt_has_no_baseline_section():
     prompt = build_exit_system_prompt()
 
