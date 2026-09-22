@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional
 
 from src.api.account import AccountClient
+from src.core import exit_review
 from src.core.engine import TradingEngine
 from src.core.events import (
     BuyExecution,
@@ -19,8 +20,10 @@ from src.core.events import (
     format_stock,
 )
 from src.data.collector import DataCollector
+from src.llm import exit_reviewer as exit_reviewer_module
 from src.llm import reviewer as reviewer_module
 from src.llm import tuner as tuner_module
+from src.llm.exit_advisor import make_exit_prompt_store
 from src.llm.prompt_store import PromptStore
 from src.llm.recommender import LLMRecommender, build_locked_prompt_text, tick_size
 from src.logger.trade_store import TradeStore
@@ -88,6 +91,10 @@ class DailyWorkflow:
         reviewer=None,
         tuner=None,
         prompt_store=None,
+        exit_reviewer=None,
+        exit_tuner=None,
+        exit_prompt_store=None,
+        tune_skip_monthly_return_ratio: float = 0.05,
         ws_client=None,
         report_mark_path: Optional[Path] = None,
         buy_records_path: Optional[Path] = None,
@@ -107,6 +114,15 @@ class DailyWorkflow:
         # 프롬프트 자동 수정 (PRD '프롬프트 자동 수정'). tuner가 None이면 단계 자체를 건너뛴다.
         self.tuner = tuner
         self.prompt_store = prompt_store if prompt_store is not None else PromptStore()
+        # 15:35 매도 판단 검증의 LLM 평가 모듈 (스펙 2026-09-22 3.3). None이면 수치만 남긴다.
+        self.exit_reviewer = exit_reviewer
+        # 매도 프롬프트 자동 수정 (스펙 4절). None이면 단계 자체를 건너뛴다.
+        self.exit_tuner = exit_tuner
+        self.exit_prompt_store = (
+            exit_prompt_store if exit_prompt_store is not None else make_exit_prompt_store()
+        )
+        # 이번 달 순수익률이 이 값 이상이면 두 프롬프트 모두 고치지 않는다 (스펙 4-A)
+        self.tune_skip_monthly_return_ratio = tune_skip_monthly_return_ratio
         self.ws_client = ws_client
         # 최종 리포트를 보낸 날짜 — 전량 매도 완료와 15:35 스케줄이 중복 발송하지 않도록
         # 공유하는 표시다 (send_final_report). 매수로 보유가 다시 생기면 초기화된다.
@@ -1246,6 +1262,66 @@ class DailyWorkflow:
                 self.trade_store.save_recommendation_review(today, row.ticker, review)
             except Exception:
                 logger.exception("추천 평가문 저장 실패: %s %s", row.ticker, row.name)
+
+    def review_exits(self, today: Optional[date] = None) -> None:
+        """15:35 — 오늘 매도한 종목의 순손익을 AI 매도 판단 이력과 대조해 남기고 메일로 보낸다.
+
+        잣대는 순수익이다 (스펙 2026-09-22 1절). 분류는 코드가(`exit_review`), 평가문은 LLM이
+        쓴다. 매도가 없던 날은 아무것도 하지 않는다. 어떤 실패도 매매에 영향이 없다.
+        """
+        today = today or date.today()
+        self._sync_fills(today)
+        decisions = self.trade_store.ai_exit_decisions_for(today)
+        rows = exit_review.build_exit_review_rows(
+            today,
+            self.trade_store.daily_summary(today).trades,
+            self.trade_store.position_peaks_for(today),
+            decisions,
+            self.trade_store.last_exit_reasons(today),
+        )
+        if not rows:
+            logger.info("오늘 매도한 종목이 없습니다 — 매도 판단 검증을 건너뜁니다 (%s).", today)
+            return
+
+        self._fill_exit_reviews(today, rows, decisions)
+        for row in rows:
+            try:
+                self.trade_store.save_exit_review(row)
+            except Exception:
+                logger.exception("매도 판단 검증 저장 실패: %s", row.label)
+
+        subject, body = templates.exit_review_email(rows, decisions, today)
+        self.email.send(subject, body)
+        logger.info("매도 판단 검증 메일 발송 (%s, %d종목)", today, len(rows))
+
+    def _fill_exit_reviews(self, today: date, rows, decisions) -> None:
+        """LLM 평가문을 받아 rows에 채운다. 판정 불가(unknown) 종목은 보내지 않는다."""
+        if self.exit_reviewer is None:
+            return
+        recommendations = {r.ticker: r for r in self.trade_store.recommendations_for(today)}
+        items = [
+            exit_reviewer_module.ExitReviewInput(
+                row=row,
+                decisions=[d for d in decisions if d.ticker == row.ticker],
+                outlook=recommendations[row.ticker].outlook if row.ticker in recommendations else "",
+                target_sell_price=(
+                    recommendations[row.ticker].target_sell_price
+                    if row.ticker in recommendations
+                    else 0
+                ),
+            )
+            for row in rows
+            if row.outcome != exit_review.UNKNOWN
+        ]
+        if not items:
+            return
+        try:
+            reviews = self.exit_reviewer.review(items)
+        except Exception:
+            logger.exception("매도 판단 평가 호출이 실패했습니다 — 수치만으로 메일을 보냅니다.")
+            return
+        for row in rows:
+            row.review = (reviews or {}).get(row.ticker, "")
 
     def tune_prompt(self, today: Optional[date] = None) -> None:
         """15:35 — 최근 추천 성과를 보고 추천 프롬프트의 다섯 절을 자동으로 고친다.

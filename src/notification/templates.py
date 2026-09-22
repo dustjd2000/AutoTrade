@@ -10,8 +10,17 @@ from src.core.events import (
     UnsellableView,
     format_stock,
 )
+from src.core.exit_review import OUTCOME_LABELS
+from src.llm.exit_reviewer import EXIT_REASON_LABELS
 from src.llm.recommender import StockRecommendation
-from src.logger.trade_store import DailySummary, MonthlySummary, RecommendationRow, TradeRow
+from src.logger.trade_store import (
+    AIExitDecisionRow,
+    DailySummary,
+    ExitReviewRow,
+    MonthlySummary,
+    RecommendationRow,
+    TradeRow,
+)
 from src.notification import chart
 from src.risk.manager import exit_trigger_price
 
@@ -181,6 +190,54 @@ def prompt_tuning_email(
         f"※ 되돌리려면 data/prompt/history/{old_version}/ 의 파일들을 data/prompt/ 로 복사하십시오.",
         "※ 수정된 프롬프트는 다음 거래일 추천부터 적용됩니다 (엔진 재시작 불필요).",
     ])
+    return subject, "\n".join(lines)
+
+
+def _ratio_text(ratio: Optional[float]) -> str:
+    return "모름" if ratio is None else f"{ratio * 100:+.2f}%"
+
+
+def exit_review_email(
+    rows: List[ExitReviewRow], decisions: List[AIExitDecisionRow], today: date
+) -> tuple[str, str]:
+    """15:35 매도 판단 검증 이메일 (스펙 2026-09-22 3.4).
+
+    잣대는 순수익이다 — 분류(순이익 확정/놓침/기회 없음)가 맨 앞에 온다. 표가 없어
+    HTML을 함께 만들지 않는다. (제목, 평문)만 돌려준다.
+    """
+    known = [r.net_pnl for r in rows if r.net_pnl is not None]
+    total = sum(known)
+    subject = f"[AutoTrade] {today:%Y-%m-%d} 매도 판단 검증 {len(rows)}종목 (순손익 {total:+,.0f}원)"
+
+    counts = {key: sum(1 for r in rows if r.outcome == key) for key in OUTCOME_LABELS}
+    lines = [
+        f"{today:%Y-%m-%d} 매도한 종목의 순손익과 AI 매도 판단 이력입니다.",
+        f"합계 순손익 {total:+,.0f}원 — "
+        + " / ".join(f"{OUTCOME_LABELS[key]} {counts[key]}" for key in OUTCOME_LABELS),
+        "",
+    ]
+    for i, row in enumerate(rows, start=1):
+        pnl = "모름" if row.net_pnl is None else f"{row.net_pnl:+,.0f}원"
+        lines.append(f"{i}. {row.label} — {OUTCOME_LABELS.get(row.outcome, row.outcome)}")
+        lines.append(f"   순손익 {pnl} ({_ratio_text(row.net_return)}), 보유 중 고점 {_ratio_text(row.peak_return)}")
+        lines.append(
+            f"   청산: {EXIT_REASON_LABELS.get(row.exit_reason, row.exit_reason or '모름')}"
+            f" · 매도 프롬프트 {row.exit_prompt_version or '-'}"
+        )
+        mine = [d for d in decisions if d.ticker == row.ticker]
+        if not mine:
+            lines.append("   AI 판단 이력: 없음")
+        for d in mine:
+            verdict = "매도" if d.sell else ("보유(판단 실패)" if not d.ok else "보유")
+            lines.append(
+                f"   - {d.at:%H:%M} {_ratio_text(d.net_return)} (고점 {_ratio_text(d.peak_return)}) "
+                f"{verdict}: {d.reason}"
+            )
+        if row.review:
+            lines.append(f"   평가: {row.review}")
+        lines.append("")
+
+    lines.append("※ 순손익은 수수료·세금을 뺀 값입니다. 고점은 엔진이 켜져 있던 동안만 잽니다.")
     return subject, "\n".join(lines)
 
 
