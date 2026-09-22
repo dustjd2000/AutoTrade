@@ -74,6 +74,57 @@ CREATE TABLE IF NOT EXISTS recommendations (
 # 갖춰 둬야 다음 컬럼 추가 때 CREATE TABLE IF NOT EXISTS가 조용히 no-op되는 함정을 피한다.
 RECOMMENDATION_MIGRATIONS: Tuple[Tuple[str, str], ...] = ()
 
+# AI 매도 판단 한 건(종목 하나)마다 한 줄 (스펙 2026-09-22 2.1). 판단은 메모리와 로그 텍스트에만
+# 남았어서 엔진이 재시작되면 사라졌다 — 15:35 매도 판단 검증의 원천이다.
+AI_EXIT_DECISION_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS ai_exit_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day TEXT NOT NULL,
+    at TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    name TEXT,
+    sell INTEGER NOT NULL,
+    ok INTEGER NOT NULL,
+    reason TEXT,
+    net_return REAL,
+    peak_return REAL,
+    current_price REAL,
+    exit_prompt_version TEXT
+);
+"""
+
+# 종목별 당일 순손익 고점 (스펙 2.2). DrawdownTracker가 메모리에만 들고 있어 재시작하면
+# 초기화됐다(2026-09-22 11:00 판단이 실제 -0.73% 대신 -2.91%를 봤다). 엔진 시작 때 복원한다.
+POSITION_PEAK_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS position_peaks (
+    day TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    peak_return REAL NOT NULL,
+    peak_at TEXT,
+    peak_price REAL,
+    UNIQUE (day, ticker)
+);
+"""
+
+# 15:35 매도 판단 검증 결과 — 종목당 한 줄 (스펙 3.4). 매도 프롬프트 튜너의 입력이다.
+EXIT_REVIEW_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS exit_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    name TEXT,
+    exit_prompt_version TEXT,
+    net_pnl REAL,
+    net_return REAL,
+    peak_return REAL,
+    outcome TEXT NOT NULL,
+    exit_reason TEXT,
+    decision_count INTEGER NOT NULL DEFAULT 0,
+    review TEXT,
+    UNIQUE (day, ticker)
+);
+"""
+
 # 부분체결도 실제 매매이므로 집계에 포함한다
 FILLED_STATUSES = (OrderStatus.FILLED.value, OrderStatus.PARTIALLY_FILLED.value)
 
@@ -215,6 +266,51 @@ class RecommendationRow:
         return format_stock(self.ticker, self.name)
 
 
+@dataclass
+class AIExitDecisionRow:
+    """AI 매도 판단 한 건 — 종목 하나에 대한 판정과 그 시점의 수치 (스펙 2026-09-22 2.1).
+
+    ok=False는 LLM 호출 실패·타임아웃·형식 오류로 판정을 받지 못한 주기다 (sell은 언제나 False).
+    """
+
+    day: date
+    at: datetime
+    ticker: str
+    name: str
+    sell: bool
+    ok: bool
+    reason: str
+    net_return: float
+    peak_return: Optional[float]
+    current_price: float
+    exit_prompt_version: str
+
+
+@dataclass
+class ExitReviewRow:
+    """매도 판단 검증 한 줄 — 그날 매도한 종목 하나의 순손익과 분류 (스펙 2026-09-22 3.2).
+
+    outcome은 `captured`/`missed`/`no_chance`/`unknown` 중 하나다 (`src.core.exit_review`).
+    net_*가 None이면 평단을 몰라 순손익을 계산하지 못한 종목이다.
+    """
+
+    day: date
+    ticker: str
+    name: str
+    exit_prompt_version: str
+    net_pnl: Optional[float]
+    net_return: Optional[float]
+    peak_return: Optional[float]
+    outcome: str
+    exit_reason: str
+    decision_count: int
+    review: str = ""
+
+    @property
+    def label(self) -> str:
+        return format_stock(self.ticker, self.name)
+
+
 class TradeStore:
     """매수/매도 체결 내역을 SQLite에 영속 저장한다.
 
@@ -231,6 +327,9 @@ class TradeStore:
         with closing(self._connect()) as conn:
             conn.execute(SCHEMA)
             conn.execute(RECOMMENDATION_SCHEMA_SQL)
+            conn.execute(AI_EXIT_DECISION_SCHEMA_SQL)
+            conn.execute(POSITION_PEAK_SCHEMA_SQL)
+            conn.execute(EXIT_REVIEW_SCHEMA_SQL)
             self._migrate(conn, "trades", MIGRATIONS)
             self._migrate(conn, "recommendations", RECOMMENDATION_MIGRATIONS)
             conn.commit()
@@ -518,6 +617,177 @@ class TradeStore:
             ).fetchone()
         return row is not None
 
+    # ── AI 매도 판단 검증 (스펙 2026-09-22) ─────────────────
+    def save_ai_exit_decisions(self, rows: Iterable[AIExitDecisionRow]) -> None:
+        """한 주기의 판정을 남긴다. 빈 목록이면 아무것도 하지 않는다."""
+        rows = list(rows)
+        if not rows:
+            return
+        with closing(self._connect()) as conn:
+            conn.executemany(
+                """INSERT INTO ai_exit_decisions
+                   (day, at, ticker, name, sell, ok, reason, net_return, peak_return,
+                    current_price, exit_prompt_version)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        r.day.isoformat(),
+                        r.at.isoformat(),
+                        r.ticker,
+                        r.name,
+                        int(r.sell),
+                        int(r.ok),
+                        r.reason,
+                        r.net_return,
+                        r.peak_return,
+                        r.current_price,
+                        r.exit_prompt_version,
+                    )
+                    for r in rows
+                ],
+            )
+            conn.commit()
+
+    def ai_exit_decisions_for(self, day: date) -> List[AIExitDecisionRow]:
+        """그날 판정 전부 (시각순)."""
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT * FROM ai_exit_decisions WHERE day = ? ORDER BY at, id",
+                (day.isoformat(),),
+            ).fetchall()
+        return [
+            AIExitDecisionRow(
+                day=date.fromisoformat(row["day"]),
+                at=datetime.fromisoformat(row["at"]),
+                ticker=row["ticker"],
+                name=row["name"] or "",
+                sell=bool(row["sell"]),
+                ok=bool(row["ok"]),
+                reason=row["reason"] or "",
+                net_return=row["net_return"] or 0.0,
+                peak_return=row["peak_return"],
+                current_price=row["current_price"] or 0.0,
+                exit_prompt_version=row["exit_prompt_version"] or "",
+            )
+            for row in rows
+        ]
+
+    def save_position_peak(
+        self,
+        day: date,
+        ticker: str,
+        peak_return: float,
+        peak_at: datetime,
+        peak_price: Optional[float],
+    ) -> None:
+        """당일 고점을 남긴다 — 기존 값보다 **높을 때만** 갱신한다.
+
+        재시작 직후에는 트래커가 복원 전 값이나 낮은 현재값으로 시작할 수 있어, 덮어쓰기로
+        두면 기록된 고점이 내려간다.
+        """
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """INSERT INTO position_peaks (day, ticker, peak_return, peak_at, peak_price)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(day, ticker) DO UPDATE SET
+                       peak_return = excluded.peak_return,
+                       peak_at = excluded.peak_at,
+                       peak_price = excluded.peak_price
+                   WHERE excluded.peak_return > position_peaks.peak_return""",
+                (day.isoformat(), ticker, peak_return, peak_at.isoformat(), peak_price),
+            )
+            conn.commit()
+
+    def position_peaks_for(self, day: date) -> Dict[str, float]:
+        """그날 종목별 고점 순손익률 (비율)."""
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT ticker, peak_return FROM position_peaks WHERE day = ?",
+                (day.isoformat(),),
+            ).fetchall()
+        return {row["ticker"]: row["peak_return"] for row in rows}
+
+    def last_exit_reasons(self, day: date) -> Dict[str, str]:
+        """그날 종목별 **마지막** 체결 매도의 청산 사유 (없으면 빈 문자열)."""
+        start, end = _day_range(day)
+        placeholders = ", ".join("?" for _ in FILLED_STATUSES)
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""SELECT ticker, exit_reason FROM trades
+                    WHERE side = ? AND status IN ({placeholders})
+                          AND timestamp BETWEEN ? AND ?
+                    ORDER BY timestamp, id""",
+                (OrderSide.SELL.value, *FILLED_STATUSES, start, end),
+            ).fetchall()
+        reasons: Dict[str, str] = {}
+        for row in rows:
+            reasons[row["ticker"]] = row["exit_reason"] or ""
+        return reasons
+
+    def save_exit_review(self, row: ExitReviewRow) -> None:
+        """검증 한 줄을 남긴다. 같은 날 같은 종목은 덮어쓴다 (검증을 다시 돌려도 한 줄)."""
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """INSERT INTO exit_reviews
+                   (day, ticker, name, exit_prompt_version, net_pnl, net_return, peak_return,
+                    outcome, exit_reason, decision_count, review)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(day, ticker) DO UPDATE SET
+                       name = excluded.name,
+                       exit_prompt_version = excluded.exit_prompt_version,
+                       net_pnl = excluded.net_pnl,
+                       net_return = excluded.net_return,
+                       peak_return = excluded.peak_return,
+                       outcome = excluded.outcome,
+                       exit_reason = excluded.exit_reason,
+                       decision_count = excluded.decision_count,
+                       review = excluded.review""",
+                (
+                    row.day.isoformat(),
+                    row.ticker,
+                    row.name,
+                    row.exit_prompt_version,
+                    row.net_pnl,
+                    row.net_return,
+                    row.peak_return,
+                    row.outcome,
+                    row.exit_reason,
+                    row.decision_count,
+                    row.review,
+                ),
+            )
+            conn.commit()
+
+    def exit_reviews_for(self, day: date) -> List[ExitReviewRow]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT * FROM exit_reviews WHERE day = ? ORDER BY id", (day.isoformat(),)
+            ).fetchall()
+        return [_exit_review_row(row) for row in rows]
+
+    def recent_exit_reviews(self, day_count: int = 10) -> List[ExitReviewRow]:
+        """최근 `day_count` 거래일의 검증 (오래된 날부터) — 매도 프롬프트 튜너의 입력이다."""
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """SELECT * FROM exit_reviews
+                   WHERE day IN (
+                       SELECT DISTINCT day FROM exit_reviews ORDER BY day DESC LIMIT ?
+                   )
+                   ORDER BY day, id""",
+                (day_count,),
+            ).fetchall()
+        return [_exit_review_row(row) for row in rows]
+
+    def count_exit_reviews(self, exit_prompt_version: str) -> int:
+        """그 버전으로 검증이 끝난 종목 수 — 판정 불가(unknown)는 세지 않는다 (표본 게이트)."""
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) FROM exit_reviews
+                   WHERE exit_prompt_version = ? AND outcome != 'unknown'""",
+                (exit_prompt_version,),
+            ).fetchone()
+        return int(row[0])
+
     def daily_summary(self, day: date) -> DailySummary:
         start, end = _day_range(day)
         with closing(self._connect()) as conn:
@@ -788,5 +1058,22 @@ def _recommendation_row(row) -> RecommendationRow:
         actual_change_rate=row["actual_change_rate"],
         buy_target_hit=_optional_bool(row["buy_target_hit"]),
         sell_target_hit=_optional_bool(row["sell_target_hit"]),
+        review=row["review"] or "",
+    )
+
+
+def _exit_review_row(row) -> ExitReviewRow:
+    """`exit_reviews` 한 행을 dataclass로."""
+    return ExitReviewRow(
+        day=date.fromisoformat(row["day"]),
+        ticker=row["ticker"],
+        name=row["name"] or "",
+        exit_prompt_version=row["exit_prompt_version"] or "",
+        net_pnl=row["net_pnl"],
+        net_return=row["net_return"],
+        peak_return=row["peak_return"],
+        outcome=row["outcome"],
+        exit_reason=row["exit_reason"] or "",
+        decision_count=row["decision_count"] or 0,
         review=row["review"] or "",
     )
