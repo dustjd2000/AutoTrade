@@ -21,12 +21,13 @@ from src.core.events import (
 )
 from src.data.collector import DataCollector
 from src.llm import exit_reviewer as exit_reviewer_module
+from src.llm import exit_tuner as exit_tuner_module
 from src.llm import reviewer as reviewer_module
 from src.llm import tuner as tuner_module
-from src.llm.exit_advisor import make_exit_prompt_store
+from src.llm.exit_advisor import EXIT_PROMPT_SECTION_ORDER, build_exit_locked_text, make_exit_prompt_store
 from src.llm.prompt_store import PromptStore
 from src.llm.recommender import LLMRecommender, build_locked_prompt_text, tick_size
-from src.logger.trade_store import TradeStore
+from src.logger.trade_store import MonthlySummary, TradeStore
 from src.notification.email import EmailNotifier
 from src.notification import chart, templates
 from src.strategy.llm_momentum import LLMMomentumStrategy
@@ -1094,14 +1095,12 @@ class DailyWorkflow:
         sync_failed = not self._sync_fills(today)
 
         summary = self.trade_store.daily_summary(today)
-        monthly = self.trade_store.monthly_summary(today.year, today.month, up_to=today)
         yearly = self.trade_store.yearly_summary(today.year, up_to=today)
 
         snapshot = self.account.get_balance_snapshot()
-        # 기간초 자산 추정치 = 현재 총자산 - 그 기간의 순손익. 수수료·세금도 계좌에서 빠져나간
-        # 금액이므로 실현손익이 아니라 순손익을 되돌려야 기간 시작 시점 자산에 맞는다.
-        # **연 단위는 그만큼 더 거칠다** — 연중 입출금이 있으면 그 금액만큼 어긋난다 (PRD 5.11).
-        monthly.base_asset = snapshot.total_asset - monthly.net_pnl
+        monthly = self._monthly_summary_with_base(today, snapshot)
+        # 연 단위 기간초 자산 추정치 — 월과 같은 식이다. **연 단위는 그만큼 더 거칠다** —
+        # 연중 입출금이 있으면 그 금액만큼 어긋난다 (PRD 5.11).
         yearly.base_asset = snapshot.total_asset - yearly.net_pnl
 
         # 그래프는 못 그려도(그 기간 매매가 없는 등) 리포트는 그대로 나간다
@@ -1263,6 +1262,40 @@ class DailyWorkflow:
             except Exception:
                 logger.exception("추천 평가문 저장 실패: %s %s", row.ticker, row.name)
 
+    def _monthly_summary_with_base(self, today: date, snapshot) -> MonthlySummary:
+        """이번 달 누적 실적 + 월초 자산 추정치 — 일일 리포트와 월 순수익 게이트가 함께 쓴다.
+
+        월초 자산 추정치 = 현재 총자산 - 이번 달 순손익. 수수료·세금도 계좌에서 빠져나간
+        금액이므로 실현손익이 아니라 순손익을 되돌려야 월초 자산에 맞는다 (PRD 5.11).
+        """
+        monthly = self.trade_store.monthly_summary(today.year, today.month, up_to=today)
+        monthly.base_asset = snapshot.total_asset - monthly.net_pnl
+        return monthly
+
+    def _tuning_blocked_by_monthly_return(self, today: date) -> bool:
+        """이번 달 순수익률이 기준 이상이면 True — 두 프롬프트 모두 고치지 않는다 (스펙 4-A).
+
+        수익률을 알 수 없으면(잔고 조회 실패·기준자산 0 이하) 역시 True — 아무것도 바꾸지
+        않는 것이 기본 상태다.
+        """
+        try:
+            snapshot = self.account.get_balance_snapshot()
+        except Exception:
+            logger.warning("잔고 조회 실패 — 월 순수익을 알 수 없어 프롬프트를 고치지 않습니다.", exc_info=True)
+            return True
+        monthly = self._monthly_summary_with_base(today, snapshot)
+        if monthly.base_asset <= 0:
+            logger.warning("월초 자산 추정치가 0 이하라 월 순수익을 알 수 없어 프롬프트를 고치지 않습니다.")
+            return True
+        ratio = monthly.net_pnl / monthly.base_asset
+        if ratio >= self.tune_skip_monthly_return_ratio:
+            logger.info(
+                "이번 달 순수익 %+.2f%% ≥ 기준 %.1f%% — 프롬프트를 고치지 않습니다 (%s).",
+                ratio * 100, self.tune_skip_monthly_return_ratio * 100, today,
+            )
+            return True
+        return False
+
     def review_exits(self, today: Optional[date] = None) -> None:
         """15:35 — 오늘 매도한 종목의 순손익을 AI 매도 판단 이력과 대조해 남기고 메일로 보낸다.
 
@@ -1335,6 +1368,8 @@ class DailyWorkflow:
         today = today or date.today()
         if self.tuner is None:
             return
+        if self._tuning_blocked_by_monthly_return(today):
+            return
 
         rows = self.trade_store.recent_recommendations()
         if not rows:
@@ -1378,6 +1413,65 @@ class DailyWorkflow:
         )
         self.email.send(subject, body)
         logger.info("프롬프트 수정 메일 발송 (%s, %s → %s)", today, old_version, new_version)
+
+    def tune_exit_prompt(self, today: Optional[date] = None) -> None:
+        """15:35 — 매도 판단 검증 결과를 보고 매도 프롬프트의 편집 가능한 절을 고친다 (스펙 4절).
+
+        매도 판단 검증 **다음**에 돈다. 게이트는 순서대로 월 순수익(4-A) → 표본 10건(4.3)이고,
+        둘 다 LLM 호출 전에 코드가 본다. 고친 날만 메일이 나가고, 고치지 않는 날이 정상이다.
+        """
+        today = today or date.today()
+        if self.exit_tuner is None:
+            return
+        if self._tuning_blocked_by_monthly_return(today):
+            return
+
+        old_version = self.exit_prompt_store.load_version()
+        verified = self.trade_store.count_exit_reviews(old_version)
+        if verified < exit_tuner_module.MIN_REVIEWS_FOR_TUNING:
+            logger.info(
+                "매도 프롬프트 %s로 검증된 종목이 %d건이라(기준 %d건) 고치지 않습니다 (%s).",
+                old_version, verified, exit_tuner_module.MIN_REVIEWS_FOR_TUNING, today,
+            )
+            return
+
+        rows = self.trade_store.recent_exit_reviews()
+        stats = exit_tuner_module.group_by_version(rows)
+        before = self.exit_prompt_store.load_sections()
+        result = self.exit_tuner.tune(
+            stats, rows, before, build_exit_locked_text(), self.exit_prompt_store.why_history()
+        )
+        if result is None or not result.change:
+            logger.info(
+                "매도 프롬프트를 고치지 않습니다 (%s): %s", today, getattr(result, "reason", "판단 실패")
+            )
+            return
+
+        sections = tuner_module.sanitize_sections(
+            result.sections, EXIT_PROMPT_SECTION_ORDER, exit_tuner_module.MAX_SECTIONS_PER_CHANGE
+        )
+        if not sections:
+            logger.warning("매도 프롬프트 수정안이 안전장치에 전부 걸렸습니다 — 그대로 둡니다 (%s).", today)
+            return
+
+        try:
+            new_version = self.exit_prompt_store.save(sections, result.reason, today)
+        except OSError:
+            logger.exception("매도 프롬프트 파일 쓰기에 실패했습니다 — 그대로 둡니다.")
+            return
+
+        after = self.exit_prompt_store.load_sections()
+        subject, body = templates.exit_prompt_tuning_email(
+            today,
+            old_version,
+            new_version,
+            result.reason,
+            stats,
+            {key: before[key] for key in sections},
+            {key: after[key] for key in sections},
+        )
+        self.email.send(subject, body)
+        logger.info("매도 프롬프트 수정 메일 발송 (%s, %s → %s)", today, old_version, new_version)
 
     def _why_history(self) -> str:
         """직전 변경들의 이유 — `PromptStore.why_history`로 옮겼다 (매도 프롬프트와 공유)."""

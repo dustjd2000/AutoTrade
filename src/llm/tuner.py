@@ -1,7 +1,7 @@
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import anthropic
 
@@ -82,8 +82,14 @@ def group_by_version(rows: List[RecommendationRow]) -> List[VersionStats]:
     return sorted(stats, key=lambda s: s.version)
 
 
-def sanitize_sections(raw: Dict[str, str]) -> Dict[str, str]:
+def sanitize_sections(
+    raw: Dict[str, str],
+    allowed: Sequence[str] = PROMPT_SECTION_ORDER,
+    max_sections: int = MAX_SECTIONS_PER_CHANGE,
+) -> Dict[str, str]:
     """적용 전 안전장치 (PRD '프롬프트 자동 수정').
+
+    매도 프롬프트 튜너(스펙 2026-09-22)도 허용 키·최대 절 수만 바꿔 같은 규약을 쓴다.
 
     개수 검사가 **가장 먼저**이고 걸러내기 전 원본 개수를 센다 — 걸러낸 뒤에 세면
     잘못된 절을 섞어 보내는 것으로 제한을 우회할 수 있다.
@@ -94,16 +100,16 @@ def sanitize_sections(raw: Dict[str, str]) -> Dict[str, str]:
     """
     if not isinstance(raw, dict):
         return {}
-    if len(raw) > MAX_SECTIONS_PER_CHANGE:
+    if len(raw) > max_sections:
         logger.warning(
             "한 번에 고칠 수 있는 절은 %d개입니다 — %d개가 와서 전체를 버립니다: %s",
-            MAX_SECTIONS_PER_CHANGE, len(raw), list(raw),
+            max_sections, len(raw), list(raw),
         )
         return {}
 
     kept = {}
     for key, text in raw.items():
-        if key not in PROMPT_SECTION_ORDER:
+        if key not in allowed:
             logger.warning("고칠 수 없는 절이라 무시합니다: %s", key)
             continue
         if not isinstance(text, str):

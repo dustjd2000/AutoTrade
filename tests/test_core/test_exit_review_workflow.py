@@ -122,3 +122,119 @@ def test_review_works_without_a_reviewer(tmp_path):
     workflow.review_exits(DAY)
 
     assert workflow.trade_store.exit_reviews_for(DAY)[0].outcome == "no_chance"
+
+
+# ── 매도 프롬프트 자동 수정 (스펙 4절) · 월 순수익 게이트 (4-A) ──
+from types import SimpleNamespace
+
+from src.llm.exit_advisor import EXIT_PROMPT_TEMPLATE_VERSION
+from src.logger.trade_store import ExitReviewRow, MonthlySummary
+
+LONG_TIME = "## 시간\n" + ("새 시간 지침 " * 10).strip()
+
+
+class FakeExitTuner:
+    def __init__(self):
+        self.result = None
+        self.calls = []
+
+    def tune(self, stats, rows, sections, locked_text, why_history="", timeout_seconds=120.0):
+        self.calls.append(rows)
+        return self.result
+
+
+def seed_reviews(workflow, count, version=EXIT_PROMPT_TEMPLATE_VERSION, outcome="missed"):
+    for i in range(count):
+        workflow.trade_store.save_exit_review(
+            ExitReviewRow(
+                day=date(2026, 9, 1 + i), ticker="005930", name="삼성전자", exit_prompt_version=version,
+                net_pnl=-500.0, net_return=-0.005, peak_return=0.015, outcome=outcome,
+                exit_reason="day_end", decision_count=5,
+            )
+        )
+
+
+def tuning_workflow(tmp_path, reviews=10):
+    workflow = build_exit_workflow(tmp_path)
+    workflow.exit_tuner = FakeExitTuner()
+    seed_reviews(workflow, reviews)
+    return workflow
+
+
+def monthly(workflow, net_pnl):
+    workflow.trade_store.monthly_summary = lambda year, month, up_to: MonthlySummary(
+        realized_pnl=net_pnl, fees=0.0
+    )
+
+
+def test_exit_tuning_applies_one_section_and_mails(tmp_path):
+    workflow = tuning_workflow(tmp_path)
+    workflow.exit_tuner.result = SimpleNamespace(change=True, reason="놓침 10건", sections={"time": LONG_TIME})
+
+    workflow.tune_exit_prompt(date(2026, 9, 29))
+
+    assert workflow.exit_prompt_store.load_sections()["time"] == LONG_TIME
+    assert workflow.exit_prompt_store.load_version() == "20260929"
+    assert "매도 프롬프트 수정" in workflow.email.sent[-1][0]
+
+
+def test_exit_tuning_waits_for_ten_reviews(tmp_path):
+    workflow = tuning_workflow(tmp_path, reviews=9)
+    workflow.tune_exit_prompt(date(2026, 9, 29))
+    assert workflow.exit_tuner.calls == []
+
+
+def test_unknown_reviews_do_not_count_toward_the_gate(tmp_path):
+    workflow = tuning_workflow(tmp_path, reviews=9)
+    workflow.trade_store.save_exit_review(
+        ExitReviewRow(
+            day=date(2026, 9, 20), ticker="000660", name="", exit_prompt_version=EXIT_PROMPT_TEMPLATE_VERSION,
+            net_pnl=None, net_return=None, peak_return=None, outcome="unknown", exit_reason="", decision_count=0,
+        )
+    )
+    workflow.tune_exit_prompt(date(2026, 9, 29))
+    assert workflow.exit_tuner.calls == []
+
+
+def test_exit_tuning_rejects_two_sections(tmp_path):
+    workflow = tuning_workflow(tmp_path)
+    workflow.exit_tuner.result = SimpleNamespace(
+        change=True, reason="r", sections={"time": LONG_TIME, "criteria": "## 판단 기준\n" + "x" * 60}
+    )
+    workflow.tune_exit_prompt(date(2026, 9, 29))
+    assert workflow.exit_prompt_store.load_version() == EXIT_PROMPT_TEMPLATE_VERSION
+    assert workflow.email.sent == []
+
+
+def test_exit_tuning_is_skipped_when_the_month_is_good(tmp_path):
+    """총자산 12,000,000원에 이번 달 순손익 600,000원 → 기준자산 11,400,000원 대비 +5.26%."""
+    workflow = tuning_workflow(tmp_path)
+    monthly(workflow, 600_000.0)
+    workflow.tune_exit_prompt(date(2026, 9, 29))
+    assert workflow.exit_tuner.calls == []
+
+
+def test_exit_tuning_runs_below_the_monthly_bar(tmp_path):
+    workflow = tuning_workflow(tmp_path)
+    monthly(workflow, 500_000.0)  # +4.35%
+    workflow.exit_tuner.result = SimpleNamespace(change=False, reason="표본 부족", sections={})
+    workflow.tune_exit_prompt(date(2026, 9, 29))
+    assert len(workflow.exit_tuner.calls) == 1
+
+
+def test_exit_tuning_is_skipped_when_the_balance_is_unknown(tmp_path):
+    workflow = tuning_workflow(tmp_path)
+
+    def boom():
+        raise RuntimeError("token")
+
+    workflow.account.get_balance_snapshot = boom
+    workflow.tune_exit_prompt(date(2026, 9, 29))
+    assert workflow.exit_tuner.calls == []
+
+
+def test_exit_tuning_skips_without_a_tuner(tmp_path):
+    workflow = tuning_workflow(tmp_path)
+    workflow.exit_tuner = None
+    workflow.tune_exit_prompt(date(2026, 9, 29))
+    assert workflow.email.sent == []

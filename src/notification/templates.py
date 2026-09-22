@@ -241,6 +241,42 @@ def exit_review_email(
     return subject, "\n".join(lines)
 
 
+def exit_prompt_tuning_email(
+    today: date,
+    old_version: str,
+    new_version: str,
+    reason: str,
+    stats: List["ExitVersionStats"],
+    before: Dict[str, str],
+    after: Dict[str, str],
+) -> tuple[str, str]:
+    """매도 프롬프트를 자동 수정한 날 나가는 이메일 (스펙 2026-09-22 4.3). 고친 날만 발송한다."""
+    subject = f"[AutoTrade] {today:%Y-%m-%d} 매도 프롬프트 수정 ({old_version} → {new_version})"
+    lines = [
+        f"{today:%Y-%m-%d} 매도 프롬프트를 자동으로 수정했습니다 ({old_version} → {new_version}).",
+        "",
+        "## 수정 이유",
+        reason or "(없음)",
+        "",
+        "## 근거 — 버전별 성과 (순손익 기준)",
+    ]
+    for s in stats:
+        lines.append(
+            f" - {s.version}: {s.count}건 | 확정 {s.captured} / 놓침 {s.missed} / 기회 없음 {s.no_chance} | "
+            f"순손익 합계 {s.net_pnl_total:+,.0f}원"
+        )
+    if not stats:
+        lines.append(" - (비교할 성과 데이터 없음)")
+    for key in sorted(after):
+        lines.extend(["", f"## 바뀐 절: {key}", "", "[이전]", before.get(key, "(없음)"), "", "[이후]", after[key]])
+    lines.extend([
+        "",
+        f"※ 되돌리려면 data/exit_prompt/history/{old_version}/ 의 파일들을 data/exit_prompt/ 로 복사하십시오.",
+        "※ 수정된 프롬프트는 다음 AI 매도 판단부터 적용됩니다 (엔진 재시작 불필요).",
+    ])
+    return subject, "\n".join(lines)
+
+
 def buy_result_email(execution: BuyExecution) -> tuple[str, str, str]:
     """09:08 매수 실행 직후 결과 이메일 (PRD 5.5-B 5·6단계).
 

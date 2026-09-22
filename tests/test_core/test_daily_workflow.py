@@ -1928,3 +1928,17 @@ def test_tune_prompt_skips_without_a_tuner(tmp_path):
 
     assert workflow.email.sent == []
     assert workflow.prompt_store.load_version() == PROMPT_TEMPLATE_VERSION
+
+
+def test_tune_prompt_is_skipped_when_the_month_is_good(tmp_path):
+    """월 순수익 게이트는 추천 프롬프트 수정에도 걸린다 (스펙 2026-09-22 4-A)."""
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 8)
+    _verified_recommendation(workflow, day)
+    workflow.trade_store.monthly_summary = lambda year, month, up_to: MonthlySummary(
+        realized_pnl=600_000.0, fees=0.0
+    )
+
+    workflow.tune_prompt(day)
+
+    assert workflow.tuner.calls == []
