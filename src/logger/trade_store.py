@@ -4,7 +4,7 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from src.core.events import FillRecord, OrderResult, OrderSide, OrderStatus, format_stock
 # 순환 참조 없음 — recommender는 config.settings와 src.data.collector만 본다.
@@ -706,6 +706,26 @@ class TradeStore:
                 (day.isoformat(),),
             ).fetchall()
         return {row["ticker"]: row["peak_return"] for row in rows}
+
+    def tickers_with_unknown_pnl(self, day: date) -> Set[str]:
+        """그날 체결된 매도 중 `realized_pnl`을 모르는(NULL) 종목코드 (F2, 2026-09-22 최종 리뷰).
+
+        `_pair_by_ticker`는 종목의 매도가 여러 건일 때 **알려진** `realized_pnl`만 합산한다 —
+        일부만 모르는 종목도 나머지 합계가 그대로 나와 '알고 있다'로 보인다. 15:35 매도 판단
+        검증은 순손익이 부분적으로라도 불명이면 그 종목 전체를 "순손익 모름"으로 다뤄야
+        하므로(스펙 3.2), 그 판정에 쓸 종목 목록을 따로 조회한다.
+        """
+        start, end = _day_range(day)
+        placeholders = ", ".join("?" for _ in FILLED_STATUSES)
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""SELECT DISTINCT ticker FROM trades
+                    WHERE side = ? AND status IN ({placeholders})
+                          AND realized_pnl IS NULL
+                          AND timestamp BETWEEN ? AND ?""",
+                (OrderSide.SELL.value, *FILLED_STATUSES, start, end),
+            ).fetchall()
+        return {row["ticker"] for row in rows}
 
     def last_exit_reasons(self, day: date) -> Dict[str, str]:
         """그날 종목별 **마지막** 체결 매도의 청산 사유 (없으면 빈 문자열)."""

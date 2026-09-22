@@ -747,6 +747,36 @@ def test_record_failure_does_not_block_the_sell():
     assert len(engine.executed) == 1
 
 
+class BoomVersionAdvisor:
+    """`decide`는 정상이지만 `prompt_version` 조회가 예외를 던지는 가짜 advisor.
+
+    F4 회귀 테스트용 — 판정 기록의 행 조립 단계(`store.save_ai_exit_decisions` 호출 전)에서
+    터지는 상황을 재현한다.
+    """
+
+    def __init__(self, result):
+        self.result = result
+
+    def decide(self, holdings, trace, minutes_to_close, partial, timeout_seconds=120.0):
+        return self.result
+
+    @property
+    def prompt_version(self):
+        raise RuntimeError("prompt store broken")
+
+
+def test_record_failure_while_building_rows_does_not_block_the_sell():
+    """F4 (2026-09-22 최종 리뷰) — DB 호출 이전(행 조립)에서 터져도 매도는 그대로 나가야 한다."""
+    decide_result = ExitDecision(decisions=[PositionExit(ticker="005930", sell=True, reason="r")])
+    runtime, engine, _ = make_runtime(holdings=[holding()], decide_result=decide_result)
+    runtime.exit_advisor = BoomVersionAdvisor(decide_result)
+
+    asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
+
+    assert len(engine.executed) == 1
+    assert engine.saved_decisions == []  # 행을 만들다 터졌으니 저장 자체가 안 됐다
+
+
 def test_cycle_flushes_pending_peaks_first():
     runtime, engine, _ = make_runtime(holdings=[holding()], decide_result=None)
 

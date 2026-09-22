@@ -72,6 +72,25 @@ def test_unknown_pnl_is_unknown():
     assert row.net_pnl is None and row.outcome == UNKNOWN
 
 
+def test_partial_unknown_pnl_forces_outcome_unknown():
+    """F2 (2026-09-22 최종 리뷰) — `TradeRow.pnl`이 known 합계라 값이 있어도, 그 종목이
+    `unknown_pnl_tickers`에 있으면(매도 중 일부가 realized_pnl 불명) 순손익을 모른다로 떨어진다.
+    """
+    [row] = build_exit_review_rows(
+        DAY,
+        [samsung_life()],
+        {"032830": -0.0073},
+        [],
+        {"032830": "day_end"},
+        unknown_pnl_tickers={"032830"},
+    )
+    assert row.net_pnl is None
+    assert row.net_return is None
+    assert row.outcome == UNKNOWN
+    # 고점 등 나머지 수치는 그대로 채워진다 — 모르는 것은 순손익뿐이다
+    assert row.peak_return == -0.0073
+
+
 def test_version_and_count_come_from_that_tickers_decisions():
     decisions = [decision("032830", 10, "v2"), decision("035420", 11, "v1"), decision("032830", 14, "20260929")]
     [row] = build_exit_review_rows(DAY, [samsung_life()], {}, decisions, {})

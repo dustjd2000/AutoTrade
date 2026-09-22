@@ -1311,6 +1311,7 @@ class DailyWorkflow:
             self.trade_store.position_peaks_for(today),
             decisions,
             self.trade_store.last_exit_reasons(today),
+            self.trade_store.tickers_with_unknown_pnl(today),
         )
         if not rows:
             logger.info("오늘 매도한 종목이 없습니다 — 매도 판단 검증을 건너뜁니다 (%s).", today)

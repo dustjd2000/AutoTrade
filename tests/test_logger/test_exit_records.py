@@ -106,6 +106,40 @@ def test_last_exit_reason_wins_per_ticker(tmp_path):
     assert store.last_exit_reasons(DAY) == {"032830": "day_end", "035420": "ai_judgment"}
 
 
+def test_tickers_with_unknown_pnl_only_includes_null_realized_sells(tmp_path):
+    """F2 (2026-09-22 최종 리뷰) — realized_pnl이 NULL인 체결 매도가 있는 종목만 걸린다."""
+    store = TradeStore(tmp_path / "t.db")
+    insert_trade(store, "032830", "sell", "2026-09-22T10:00:00")  # realized_pnl = -16000 (앎)
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            """INSERT INTO trades (order_id, ticker, side, status, quantity, filled_quantity,
+                   filled_price, avg_price, realized_pnl, timestamp)
+               VALUES ('2', '035420', 'sell', 'filled', 1, 1, 100000, NULL, NULL, '2026-09-22T11:00:00')"""
+        )
+        # 매수는 realized_pnl이 원래 NULL이라 여기 걸리면 안 된다 (side=SELL만 본다)
+        conn.execute(
+            """INSERT INTO trades (order_id, ticker, side, status, quantity, filled_quantity,
+                   filled_price, avg_price, realized_pnl, timestamp)
+               VALUES ('3', '005930', 'buy', 'filled', 1, 1, 70000, 70000, NULL, '2026-09-22T09:05:00')"""
+        )
+
+    assert store.tickers_with_unknown_pnl(DAY) == {"035420"}
+
+
+def test_partial_unknown_pnl_still_flags_the_ticker(tmp_path):
+    """같은 종목의 매도 두 건 중 한 건만 realized_pnl을 몰라도 그 종목 전체가 걸린다."""
+    store = TradeStore(tmp_path / "t.db")
+    insert_trade(store, "032830", "sell", "2026-09-22T10:00:00")  # 앎 (-16000)
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(
+            """INSERT INTO trades (order_id, ticker, side, status, quantity, filled_quantity,
+                   filled_price, avg_price, realized_pnl, timestamp)
+               VALUES ('2', '032830', 'sell', 'filled', 1, 1, 290000, NULL, NULL, '2026-09-22T14:00:00')"""
+        )
+
+    assert store.tickers_with_unknown_pnl(DAY) == {"032830"}
+
+
 def test_exit_review_upserts_per_day_and_ticker(tmp_path):
     store = TradeStore(tmp_path / "t.db")
     store.save_exit_review(review())

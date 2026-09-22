@@ -552,41 +552,45 @@ def _record_ai_exit_decisions(runtime: Runtime, now: datetime, holdings_view, de
     """이번 주기의 판정을 보유 종목마다 한 줄씩 남긴다 (스펙 2026-09-22 2.1).
 
     매도 실행 **전에** 부른다 — 무엇을 판단했는지가 기록의 대상이고, 무엇이 팔렸는지는
-    trades가 따로 남긴다. 기록 실패가 매도를 막으면 안 되므로 예외를 삼킨다.
+    trades가 따로 남긴다. 기록 실패가 매도를 막으면 안 되므로 예외를 삼킨다 — 행을
+    만드는 과정(예: `exit_advisor.prompt_version`이 프롬프트 저장소 파일을 읽다 던지는 경우)도
+    `store.save_ai_exit_decisions` 호출과 함께 통째로 try 안에 둔다. 종전에는 DB 저장
+    호출만 감싸, 그 앞의 행 조립 단계에서 터지면 예외가 그대로 새 나가 매도를 막을 수
+    있었다 (F4, 2026-09-22 최종 리뷰).
     """
     store = runtime.engine.trade_store
     if store is None:
         return
-    version = getattr(runtime.exit_advisor, "prompt_version", "") or ""
-    verdicts = {}
-    if decision is not None:
-        for d in decision.decisions:
-            verdicts.setdefault(d.ticker, d)
-    rows = []
-    for h in holdings_view:
-        verdict = verdicts.get(h.ticker)
-        if decision is None:
-            sell, ok, reason = False, False, AI_EXIT_FAILURE_TEXT
-        elif verdict is None:
-            sell, ok, reason = False, True, AI_EXIT_MISSING_TEXT
-        else:
-            sell, ok, reason = verdict.sell, True, verdict.reason
-        rows.append(
-            AIExitDecisionRow(
-                day=now.date(),
-                at=now,
-                ticker=h.ticker,
-                name=h.name,
-                sell=sell,
-                ok=ok,
-                reason=reason,
-                net_return=h.net_return,
-                peak_return=h.peak_return,
-                current_price=h.current_price,
-                exit_prompt_version=version,
-            )
-        )
     try:
+        version = getattr(runtime.exit_advisor, "prompt_version", "") or ""
+        verdicts = {}
+        if decision is not None:
+            for d in decision.decisions:
+                verdicts.setdefault(d.ticker, d)
+        rows = []
+        for h in holdings_view:
+            verdict = verdicts.get(h.ticker)
+            if decision is None:
+                sell, ok, reason = False, False, AI_EXIT_FAILURE_TEXT
+            elif verdict is None:
+                sell, ok, reason = False, True, AI_EXIT_MISSING_TEXT
+            else:
+                sell, ok, reason = verdict.sell, True, verdict.reason
+            rows.append(
+                AIExitDecisionRow(
+                    day=now.date(),
+                    at=now,
+                    ticker=h.ticker,
+                    name=h.name,
+                    sell=sell,
+                    ok=ok,
+                    reason=reason,
+                    net_return=h.net_return,
+                    peak_return=h.peak_return,
+                    current_price=h.current_price,
+                    exit_prompt_version=version,
+                )
+            )
         store.save_ai_exit_decisions(rows)
     except Exception:
         logger.warning("AI 매도 판단 기록 실패 — 매도 흐름은 그대로 진행합니다.", exc_info=True)

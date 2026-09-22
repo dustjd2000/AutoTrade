@@ -620,6 +620,10 @@ class TradingEngine:
                 self.exit_drawdown.requeue_dirty(ticker, peak)
 
     def stop(self) -> None:
+        # 종료 직전까지 찍힌 고점 중 아직 DB에 남기지 못한 것을 비운다 — 그러지 않으면
+        # 마지막 flush 이후의 고점이 유실된 채로 다음 실행/15:35 검증을 맞는다
+        # (실패는 종목별로 삼킨다, 2026-09-22 최종 리뷰 F3).
+        self.flush_exit_peaks(force=True)
         self._running = False
         logger.info("Trading engine stopped.")
 
@@ -737,15 +741,21 @@ class TradingEngine:
         position = positions.get(data.ticker)
         if position is not None and data.ticker not in self._exiting:
             position.current_price = data.price
-        # 손절 판정보다 **앞에서** 고점을 갱신한다 — 손절이 걸려 아래에서 return하면
-        # 그 틱의 고점이 통째로 빠진다.
+        # 손절 판정보다 **앞에서** 고점을 메모리에 갱신한다 — 손절이 걸려 아래에서 return하면
+        # 그 틱의 고점이 통째로 빠진다. **DB 기록(flush_exit_peaks)은 손절 판정 뒤로 미룬다** —
+        # 동기 SQLite 쓰기(잠금 시 최대 5초 대기)가 이 틱의 손절 결정을 지연시키면 안 된다
+        # (2026-09-22 최종 리뷰 F1).
         self._track_exit_drawdown(positions)
         # 손절이 걸려 종목을 팔았으면(True) 이 틱의 나머지(신호 생성 이하)를 건너뛴다 —
         # 손절 대상이 아닌 다른 보유 종목이 남아 있어도 그렇다. 1호 전략은 generate_signal이
         # 항상 HOLD라 지금은 이 스킵이 영향을 주지 않지만, 실시간 신호로 매수/매도하는 전략을
         # 붙이면 그 전략의 이번 틱 판단이 손절과 무관한 종목의 시세여도 통째로 밀린다는 뜻이 된다.
         if self._check_portfolio_exit(positions):
+            # 매도했어도 이번 틱에 새로 찍힌 고점은 남긴다 — 15:35 검증의 "순이익 기회"가
+            # 여기서 끊기면 안 된다 (force_close_all_positions와 같은 이유).
+            self.flush_exit_peaks(positions)
             return
+        self.flush_exit_peaks(positions)
 
         signal = self.strategy.generate_signal(data)
 
@@ -797,11 +807,16 @@ class TradingEngine:
         )
 
     def _track_exit_drawdown(self, positions: Dict[str, Position]) -> None:
-        """당일 순손익 고점을 따라가 DB에 남기고, 반납폭이 임계치를 넘으면 AI 판단을 앞당긴다.
+        """당일 순손익 고점을 메모리에서 갱신하고, 반납폭이 임계치를 넘으면 AI 판단을 앞당긴다.
 
         여기서는 팔지 않는다 — `DrawdownTracker`에 표시만 남기고, 실제 호출은
         `runtime.ai_exit_due`가 그 표시를 보고 다음 폴링(최대 30초)에서 앞당긴다.
         판단 자체는 종목마다 이뤄지고(확정 2026-09-19), 앞당기는 것은 호출 시점뿐이다.
+
+        **DB 기록은 여기서 하지 않는다** — 종전에는 이 함수가 곧바로 `flush_exit_peaks`를
+        불러, 손절 판정보다 앞선 동기 SQLite 쓰기(잠금 시 최대 5초 대기)가 그 틱의 손절
+        결정을 지연시킬 수 있었다. 이제 호출측(`on_market_data`)이 손절 판정 **뒤에** 직접
+        `flush_exit_peaks`를 부른다 (2026-09-22 최종 리뷰 F1).
 
         **고점 추적은 AI 매도 판단이 꺼져 있어도 돈다** (스펙 2026-09-22 2.2) — 15:35 매도 판단
         검증의 "순이익 기회"는 AI를 끈 날에도 의미가 있다. 꺼져 있으면 앞당김 표시만 버린다.
@@ -812,7 +827,6 @@ class TradingEngine:
 
         per_ticker = {p.ticker: self.position_net_return(p) for p in holdings}
         crossed = self.exit_drawdown.update(per_ticker)
-        self.flush_exit_peaks(positions)
         if not self.ai_exit_enabled:
             # 앞당길 호출이 없다 — 남겨 두면 다시 켜는 순간 낡은 표시로 호출이 앞당겨진다
             self.exit_drawdown.take_urgent()

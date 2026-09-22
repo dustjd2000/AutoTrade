@@ -104,6 +104,29 @@ def test_reviewer_failure_still_sends_numbers(tmp_path):
     assert "매도 판단 검증" in workflow.email.sent[-1][0]
 
 
+def test_partial_unknown_pnl_saves_outcome_unknown(tmp_path):
+    """F2 (2026-09-22 최종 리뷰) — 같은 종목의 매도 두 건 중 한 건만 realized_pnl을 몰라도
+    그 종목 전체를 '순손익 모름'으로 저장해야 한다 (스펙 3.2).
+    """
+    workflow = build_exit_workflow(tmp_path)
+    insert_trade(workflow, "032830", "buy", "09:05", 298_000.0, fee=80.0)
+    insert_trade(
+        workflow, "032830", "sell", "13:00", 295_000.0, avg=298_000.0, pnl=-6_000.0, fee=600.0,
+        reason="ai_judgment",
+    )
+    # 이 매도는 realized_pnl을 모른다 (평단 불명 등) — 부분체결/수동매도 대용 시나리오
+    insert_trade(
+        workflow, "032830", "sell", "15:15", 290_000.0, avg=298_000.0, pnl=None, fee=640.0,
+        reason="day_end",
+    )
+
+    workflow.review_exits(DAY)
+
+    [row] = workflow.trade_store.exit_reviews_for(DAY)
+    assert row.outcome == "unknown"
+    assert row.net_pnl is None
+
+
 def test_unknown_rows_are_not_sent_to_the_llm(tmp_path):
     workflow = build_exit_workflow(tmp_path)
     insert_trade(workflow, "005930", "sell", "11:00", 70_000.0, avg=None, pnl=None, reason="manual", name="삼성전자")

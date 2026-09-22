@@ -8,7 +8,7 @@
 슬리피지만큼 기준이 다르다. 분류 경계(0)에는 영향이 거의 없어 그대로 쓴다.
 """
 from datetime import date
-from typing import Dict, List, Optional
+from typing import Dict, FrozenSet, List, Optional
 
 from src.logger.trade_store import AIExitDecisionRow, ExitReviewRow, TradeRow
 
@@ -44,11 +44,18 @@ def build_exit_review_rows(
     peaks: Dict[str, float],
     decisions: List[AIExitDecisionRow],
     exit_reasons: Dict[str, str],
+    unknown_pnl_tickers: FrozenSet[str] = frozenset(),
 ) -> List[ExitReviewRow]:
     """그날 매도한 종목마다 검증 한 줄. 팔지 않은 종목(sell_price None)은 뺀다.
 
     순손익 = 실현손익 − 그 종목의 당일 수수료·세금(매수분 포함, `TradeRow.fees`).
     버전은 그 종목의 **마지막** 판단에 쓰인 매도 프롬프트 버전이다.
+
+    `unknown_pnl_tickers`에 든 종목은 순손익을 **일부만** 모르는 경우다 (F2, 2026-09-22
+    최종 리뷰). `TradeRow.pnl`(`trade_store._pair_by_ticker`)은 그 종목의 매도 중 **알려진**
+    `realized_pnl`만 합산하므로, 한 건이라도 불명이면 나머지 합계가 그대로 나와 "안다"로
+    잘못 보인다 (스펙 3.2 "일부라도 모르면 순손익 모름"). 이 집합에 든 종목은 net_pnl/
+    net_return을 강제로 None(=UNKNOWN)으로 떨어뜨린다.
     """
     by_ticker: Dict[str, List[AIExitDecisionRow]] = {}
     for d in decisions:
@@ -58,8 +65,12 @@ def build_exit_review_rows(
     for trade in trades:
         if trade.sell_price is None:
             continue
-        net_pnl = trade.pnl - trade.fees if trade.pnl is not None else None
-        net_return = net_pnl / trade.cost if net_pnl is not None and trade.cost > 0 else None
+        if trade.ticker in unknown_pnl_tickers:
+            net_pnl = None
+            net_return = None
+        else:
+            net_pnl = trade.pnl - trade.fees if trade.pnl is not None else None
+            net_return = net_pnl / trade.cost if net_pnl is not None and trade.cost > 0 else None
         mine = by_ticker.get(trade.ticker, [])
         peak = peaks.get(trade.ticker)
         rows.append(
