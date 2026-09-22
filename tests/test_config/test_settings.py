@@ -6,6 +6,7 @@ from config.settings import (
     AI_EXIT_INTERVAL_CHOICES,
     DEFAULT_RECOMMEND_TIME_HHMM,
     Settings,
+    TUNE_SKIP_MONTHLY_RETURN_CHOICES,
     parse_flag,
 )
 
@@ -245,3 +246,30 @@ def test_parse_flag_keeps_the_given_default_when_value_is_missing():
     assert parse_flag(None, False) is False
     assert parse_flag("1", False) is True
     assert parse_flag("0", True) is False
+
+
+# ── 프롬프트 수정 중지 기준 (스펙 2026-09-22 4-A) ──────────────
+def test_tune_skip_defaults_to_5_percent(monkeypatch):
+    monkeypatch.delenv("TUNE_SKIP_MONTHLY_RETURN_PERCENT", raising=False)
+    settings = Settings()
+    assert settings.tune_skip_monthly_return_percent == 5.0
+    assert settings.tune_skip_monthly_return_ratio == 0.05
+
+
+def test_tune_skip_reads_env(monkeypatch):
+    monkeypatch.setenv("TUNE_SKIP_MONTHLY_RETURN_PERCENT", "7.5")
+    assert Settings().tune_skip_monthly_return_ratio == 0.075
+
+
+def test_tune_skip_choices_run_from_1_to_10_by_half():
+    assert TUNE_SKIP_MONTHLY_RETURN_CHOICES[0] == 1.0
+    assert TUNE_SKIP_MONTHLY_RETURN_CHOICES[-1] == 10.0
+    assert len(TUNE_SKIP_MONTHLY_RETURN_CHOICES) == 19
+
+
+@pytest.mark.parametrize("value", [0.5, 10.5, 3.3])
+def test_validate_rejects_a_tune_skip_value_off_the_choices(monkeypatch, value):
+    settings = Settings()
+    settings.tune_skip_monthly_return_percent = value
+    with pytest.raises(ValueError, match="TUNE_SKIP_MONTHLY_RETURN_PERCENT"):
+        settings.validate()

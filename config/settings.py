@@ -23,6 +23,10 @@ MARKET_OPEN_HHMM = "09:00"
 # AI 매도 판단 호출 주기로 고를 수 있는 값 (분) — UI 콤보와 validate()가 함께 쓴다.
 AI_EXIT_INTERVAL_CHOICES = (15, 30, 60)
 
+# 이번 달 순수익률이 이 값(%) 이상이면 15:35 추천·매도 프롬프트 자동 수정을 둘 다 건너뛴다
+# (스펙 2026-09-22 4-A). UI 콤보가 주는 값만 허용한다 — 1~10%, 0.5 단위.
+TUNE_SKIP_MONTHLY_RETURN_CHOICES = tuple(step / 2 for step in range(2, 21))
+
 
 def _parse_hhmm(raw: str, default: str, name: str) -> dt_time:
     """"HH:MM" 문자열을 `datetime.time`으로 바꾼다. 깨져 있으면 기본값으로 돌린다.
@@ -207,6 +211,16 @@ class Settings:
     def gap_down_tolerance_ratio(self) -> float:
         return self.gap_down_tolerance_percent / 100
 
+    # 월 순수익 게이트 (스펙 2026-09-22 4-A) — 잘 되고 있을 때는 프롬프트를 건드리지 않는다.
+    # 추천 프롬프트 수정(tune_prompt)과 매도 프롬프트 수정(tune_exit_prompt)에 함께 걸린다.
+    tune_skip_monthly_return_percent: float = field(
+        default_factory=lambda: float(os.getenv("TUNE_SKIP_MONTHLY_RETURN_PERCENT", "5"))
+    )
+
+    @property
+    def tune_skip_monthly_return_ratio(self) -> float:
+        return self.tune_skip_monthly_return_percent / 100
+
     # 손절 판정(및 AI 매도 판단 프롬프트·UI의 합산 순손익 표시)에 반영할 비용 —
     # 매매수수료(매수·매도 동일), 세금(매도 시만), 슬리피지(추정)
     commission_percent: float = field(default_factory=lambda: float(os.getenv("COMMISSION_PERCENT", "0.015")))
@@ -245,6 +259,11 @@ class Settings:
             raise ValueError(
                 f"AI_EXIT_INTERVAL_MINUTES는 {AI_EXIT_INTERVAL_CHOICES} 중 하나여야 합니다: "
                 f"{self.ai_exit_interval_minutes}"
+            )
+        if self.tune_skip_monthly_return_percent not in TUNE_SKIP_MONTHLY_RETURN_CHOICES:
+            raise ValueError(
+                "TUNE_SKIP_MONTHLY_RETURN_PERCENT는 1~10 사이 0.5 단위여야 합니다: "
+                f"{self.tune_skip_monthly_return_percent}"
             )
         if not self.app_key or not self.app_secret:
             raise ValueError("KIWOOM_APP_KEY and KIWOOM_APP_SECRET must be set")

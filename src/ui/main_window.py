@@ -42,6 +42,7 @@ from config.settings import (
     DEFAULT_BUY_TIME_HHMM,
     DEFAULT_RECOMMEND_TIME_HHMM,
     Settings,
+    TUNE_SKIP_MONTHLY_RETURN_CHOICES,
     parse_flag,
 )
 from src.core.daily_workflow import (
@@ -541,6 +542,17 @@ class MainWindow(QMainWindow):
         fund_form.addRow("매매 시각", self._schedule_times)
         fund_form.addRow("추천 프롬프트", self._prompt_version)
         self._refresh_prompt_version()
+
+        # 이번 달 순수익이 이 값 이상이면 15:35 프롬프트 자동 수정(추천·매도)을 건너뛴다
+        # (스펙 2026-09-22 4-A). `.env`에 저장하는 값이라 바뀌면 엔진이 재시작된다.
+        self._tune_skip_return = _NoScrollComboBox()
+        for percent in TUNE_SKIP_MONTHLY_RETURN_CHOICES:
+            self._tune_skip_return.addItem(f"월 순수익 {percent:.1f}% 이상이면 중지", percent)
+        self._tune_skip_return.setToolTip(
+            "이번 달 순수익률이 이 값 이상이면 장 마감 뒤 추천·매도 프롬프트를 자동으로 고치지 않습니다. "
+            "검증 메일은 그대로 나갑니다."
+        )
+        fund_form.addRow("프롬프트 자동 수정", self._tune_skip_return)
         fund_form.addRow("예수금 투입 비율 (%)", self._investable_ratio)
         fund_form.addRow("추천 종목 수 (개)", self._target_stock_count)
 
@@ -1390,6 +1402,15 @@ class MainWindow(QMainWindow):
         self._select_combo_value(
             self._ai_exit_interval, env.get("AI_EXIT_INTERVAL_MINUTES"), default=15
         )
+        # 콤보 값이 실수라 _select_combo_value(정수 전용)를 쓰지 않는다
+        try:
+            skip = float(env.get("TUNE_SKIP_MONTHLY_RETURN_PERCENT") or 5)
+        except ValueError:
+            skip = 5.0
+        index = self._tune_skip_return.findData(skip)
+        self._tune_skip_return.setCurrentIndex(
+            index if index >= 0 else self._tune_skip_return.findData(5.0)
+        )
         # 청산 체크박스는 마지막으로 켜고 끈 상태를 그대로 되살린다. 복원하는 동안에는
         # toggled 처리를 막는다 — 방금 읽은 값을 다시 저장할 이유가 없고, 이 시점에는
         # 엔진도 아직 없다. 값이 없거나 깨져 있으면 `parse_flag`가 켬으로 떨어뜨린다.
@@ -1448,6 +1469,8 @@ class MainWindow(QMainWindow):
             "GAP_DOWN_TOLERANCE_PERCENT": self._gap_down_tolerance.text().strip() or "1",
             # AI 매도 판단 호출 주기 — 체크박스와 달리 이 저장 경로를 타므로 바뀌면 재시작한다
             "AI_EXIT_INTERVAL_MINUTES": str(self._ai_exit_interval.currentData()),
+            # 프롬프트 자동 수정 중지 기준 — 이 저장 경로를 타므로 바뀌면 재시작한다
+            "TUNE_SKIP_MONTHLY_RETURN_PERCENT": f"{self._tune_skip_return.currentData():g}",
             "INVESTABLE_RATIO_PERCENT": str(self._investable_ratio.currentData()),
             "TARGET_STOCK_COUNT": str(self._target_stock_count.currentData()),
         }
