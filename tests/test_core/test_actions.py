@@ -22,6 +22,8 @@ def make_runtime(calls):
         drop_buy_plans=lambda tickers: calls.append(f"drop_plan:{','.join(tickers)}"),
         review_recommendations=lambda: calls.append("review_recommendations"),
         tune_prompt=lambda: calls.append("tune_prompt"),
+        review_exits=lambda: calls.append("review_exits"),
+        tune_exit_prompt=lambda: calls.append("tune_exit_prompt"),
     )
     engine = SimpleNamespace(
         force_close_all_positions=lambda reason="day_end": calls.append(f"sell_all:{reason}"),
@@ -103,6 +105,20 @@ def test_tune_prompt_step_runs_off_the_loop_thread():
     steps = manual_steps(runtime, "tune_prompt")
     assert len(steps) == 1
     assert steps[0].touches_orders is False
+
+
+@pytest.mark.parametrize("action", ["review_exits", "tune_exit_prompt"])
+def test_exit_review_steps_are_scheduled_only_and_off_the_loop(action):
+    """LLM 호출이 걸리므로 루프 스레드를 쓰지 않는다. 주문을 내지 않는다 (스펙 2026-09-22 3.1)."""
+    assert action in SCHEDULED_ACTIONS
+    assert action not in MANUAL_ACTIONS
+    assert action not in ORDER_ACTIONS
+    calls = []
+    steps = manual_steps(make_runtime(calls), action)
+    assert [s.touches_orders for s in steps] == [False]
+    for step in steps:
+        step.run()
+    assert calls == [action]
 
 
 def test_every_action_has_a_label_and_steps():

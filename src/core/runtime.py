@@ -36,7 +36,9 @@ from src.core.events import ExitReason
 from src.data.collector import DataCollector, LargeCapUniverse
 from src.core.disclosure_watch import DisclosureWatch
 from src.data.disclosure import DisclosureClient
-from src.llm.exit_advisor import ExitAdvisor, HoldingView
+from src.llm.exit_advisor import ExitAdvisor, HoldingView, make_exit_prompt_store
+from src.llm.exit_reviewer import ExitReviewer
+from src.llm.exit_tuner import ExitPromptTuner
 from src.llm.recommender import LLMRecommender
 from src.llm.reviewer import LLMReviewer
 from src.llm.tuner import PromptTuner
@@ -195,6 +197,10 @@ def build_runtime(settings: Settings) -> Runtime:
     )
     ws_client.on_data(engine.on_market_data)
 
+    # 매도 프롬프트 저장소 하나를 AI 매도 판단과 15:35 튜너가 함께 본다 — 튜너가 고친 절이
+    # 재시작 없이 다음 판단에 반영된다 (스펙 2026-09-22 4.1)
+    exit_prompt_store = make_exit_prompt_store()
+
     workflow = DailyWorkflow(
         collector=DataCollector(
             market_data,
@@ -211,11 +217,15 @@ def build_runtime(settings: Settings) -> Runtime:
         email=email,
         reviewer=LLMReviewer(settings),
         tuner=PromptTuner(settings),
+        exit_reviewer=ExitReviewer(settings),
+        exit_tuner=ExitPromptTuner(settings),
+        exit_prompt_store=exit_prompt_store,
+        tune_skip_monthly_return_ratio=settings.tune_skip_monthly_return_ratio,
         buy_price_tolerance_ratio=settings.buy_price_tolerance_ratio,
         gap_down_tolerance_ratio=settings.gap_down_tolerance_ratio,
         ws_client=ws_client,
     )
-    exit_advisor = ExitAdvisor(settings)
+    exit_advisor = ExitAdvisor(settings, prompt_store=exit_prompt_store)
 
     # 매수/강제청산은 실시간 손절 감시와 직렬화되도록 루프 스레드에서 그대로 실행하고,
     # 오래 걸리는 수집·LLM·리포트는 루프를 막지 않도록 별도 스레드로 넘긴다 — 이 배분은
@@ -245,6 +255,10 @@ def build_runtime(settings: Settings) -> Runtime:
         (REPORT_TIME, "review_recommendations"),
         # 검증 다음에 등록한다 — 그날 검증 결과가 이 단계의 판단 재료다
         (REPORT_TIME, "tune_prompt"),
+        # 추천 쪽 다음에 등록한다 — 같은 시각의 잡은 등록 순서대로 큐에 들어간다.
+        # 검증이 먼저 끝나야 튜너가 오늘 결과까지 본다 (스펙 2026-09-22 3.1)
+        (REPORT_TIME, "review_exits"),
+        (REPORT_TIME, "tune_exit_prompt"),
     ):
         scheduler.add_job(
             trigger_time,

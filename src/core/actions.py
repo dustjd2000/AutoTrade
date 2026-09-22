@@ -67,6 +67,8 @@ SCHEDULED_ACTIONS: Dict[str, str] = {
     "daily_report": "최종 리포트 메일 (스케줄)",
     "review_recommendations": "추천 검증 메일 (스케줄)",
     "tune_prompt": "추천 프롬프트 자동 수정 (스케줄)",
+    "review_exits": "매도 판단 검증 메일 (스케줄)",
+    "tune_exit_prompt": "매도 프롬프트 자동 수정 (스케줄)",
 }
 
 ACTION_LABELS: Dict[str, str] = {**MANUAL_ACTIONS, **SCHEDULED_ACTIONS}
@@ -170,6 +172,14 @@ def manual_steps(runtime, action: str, tickers: Iterable[str] = ()) -> List[Manu
         # LLM 호출과 파일 쓰기가 걸리므로 루프 스레드를 쓰지 않는다. 주문을 내지 않는다.
         "tune_prompt": lambda: [
             ManualStep(SCHEDULED_ACTIONS["tune_prompt"], runtime.workflow.tune_prompt)
+        ],
+        # 체결 동기화·LLM 호출이 걸리므로 루프 스레드를 쓰지 않는다. 주문을 내지 않는다.
+        "review_exits": lambda: [
+            ManualStep(SCHEDULED_ACTIONS["review_exits"], runtime.workflow.review_exits)
+        ],
+        # LLM 호출과 파일 쓰기가 걸리므로 루프 스레드를 쓰지 않는다. 주문을 내지 않는다.
+        "tune_exit_prompt": lambda: [
+            ManualStep(SCHEDULED_ACTIONS["tune_exit_prompt"], runtime.workflow.tune_exit_prompt)
         ],
     }
     # 일괄 실행은 '진입'까지만 — 청산과 리포트는 스케줄에 맡긴다.
