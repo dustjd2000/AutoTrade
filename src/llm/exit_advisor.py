@@ -1,13 +1,15 @@
 import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from time import monotonic
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import anthropic
 
 from config.settings import Settings
 from src.core.exit_trace import TracePoint
+from src.llm.prompt_store import PromptStore
 from src.llm.recommender import MAX_TOKENS, _extract_json
 
 logger = logging.getLogger(__name__)
@@ -163,24 +165,39 @@ def _headline_text(holding: HoldingView) -> str:
     )
 
 
-def build_exit_system_prompt() -> str:
-    return """당신은 한국 주식시장(코스피) 단기 매매의 장중 청산 여부를 판단하는 트레이더입니다.
+# 매도 프롬프트 편집 가능 절이 사는 곳 (스펙 2026-09-22 4.1). /data/는 gitignore 대상이라
+# 코드의 DEFAULT_EXIT_PROMPT_SECTIONS가 정본이고, 여기 파일은 15:35 튜너가 덧쓰는 런타임 상태다.
+EXIT_PROMPT_DIR = Path("data") / "exit_prompt"
 
-## 역할
+_EXIT_PROMPT_HEADER = "당신은 한국 주식시장(코스피) 단기 매매의 장중 청산 여부를 판단하는 트레이더입니다."
+
+# ── 잠긴 절 — 튜너가 고칠 수 없다 ─────────────────────────────
+# 역할: 순수익 목적은 사용자가 정한 것이다 (2026-09-22).
+EXIT_ROLE_SECTION = """## 역할
 보유 종목을 **하나씩** 보고, 그 종목을 지금 매도할지 종목마다 판단합니다.
 판단의 기준은 **당일 순수익(수수료·세금을 뺀 순손익)의 최대화**입니다. 종가보다 나은
 값에 팔았는지는 기준이 아닙니다 — 순손익이 마이너스로 끝나면 덜 잃었어도 실패입니다.
 이를 위해 두 가지를 합니다. 첫째, **순손익이 플러스인 종목의 이익을 제때 확정합니다** —
 이 시스템에는 고정 익절선이 없어, 이익을 실현할지 정하는 것은 이 판단뿐입니다.
-둘째, **시나리오가 깨진 손실 종목은 손실이 더 커지기 전에 끊습니다.**
+둘째, **시나리오가 깨진 손실 종목은 손실이 더 커지기 전에 끊습니다.**"""
 
-## 기본은 보유입니다
+# 기본은 보유: 주기마다 물으면 매도 쪽으로 기우는 것을 막는 안전장치다.
+EXIT_DEFAULT_HOLD_SECTION = """## 기본은 보유입니다
 확실한 근거가 없으면 팔지 않습니다. 이 판단은 30분 남짓한 주기로 반복해서 묻는
 구조이고 종목마다 따로 묻기까지 하므로, 매번 무언가 이유를 찾아 매도 쪽으로 기울기
 쉽습니다. 그렇게 되면 이 판단 자체가 무의미해집니다. "이 정도면 팔아도 되지 않을까"
-수준의 애매한 근거로는 그 종목의 `sell`을 `false`로 남기십시오.
+수준의 애매한 근거로는 그 종목의 `sell`을 `false`로 남기십시오."""
 
-## 손실 중인 종목
+# reason 작성 지침: 출력 형식 계약이다.
+EXIT_REASON_FORMAT_SECTION = """## reason 작성 지침
+`reason`에는 **그 종목** 궤적의 구체적 수치를 인용하십시오. ("고점 +2.10%에서
++0.90%로 1.20%p 반납했다"처럼.) "모멘텀이 약화되었다", "분위기가 좋지 않다" 같은
+모호한 표현은 금지합니다."""
+
+# ── 편집 가능한 절 — 15:35 튜너가 한 번에 하나씩 고친다 ─────────
+EXIT_PROMPT_SECTION_ORDER = ("loss_positions", "time", "criteria")
+DEFAULT_EXIT_PROMPT_SECTIONS: Dict[str, str] = {
+    "loss_positions": """## 손실 중인 종목
 순손익률이 마이너스인 종목은 **아침 시나리오가 무너졌다는 구체적 근거가 있을 때**
 매도하십시오. 마이너스라는 사실 자체는 근거가 아닙니다.
 다만 손절선은 드물게만 닿는 최후의 안전장치일 뿐, 손실을 관리해 주지 않습니다.
@@ -193,14 +210,12 @@ def build_exit_system_prompt() -> str:
   현실이 된 것입니다.
 - 아침 전망이 "오전 중 돌파" 같은 시한을 걸었는데, 그 시한이 지나도록 전제가 이뤄지지
   않았고 현재가가 평단 아래에 있다.
-- 아침 시나리오를 무너뜨리는 악재 공시가 떴다 (아래 판단 기준 3).
-
-## 시간
+- 아침 시나리오를 무너뜨리는 악재 공시가 떴다 (아래 판단 기준 3).""",
+    "time": """## 시간
 15:15가 되면 보유 종목 전체가 강제로 청산됩니다. 남은 시간이 짧을수록 지금 팔지
 않아도 되는 이유(반등을 기다릴 시간)가 줄어든다는 뜻이므로, 남은 시간을 판단에
-반영하십시오.
-
-## 판단 기준
+반영하십시오.""",
+    "criteria": """## 판단 기준
 아래 기준을 **종목마다 따로** 적용하십시오.
 
 1. **되돌림** — 종목마다 `당일 고점 → 현재`와 반납폭(%p·비율)을 함께 드립니다.
@@ -217,12 +232,40 @@ def build_exit_system_prompt() -> str:
    횡령·배임, 실적 악화 등) 아니면 무관하거나 오히려 뒷받침하는지를 판단하십시오.
    **공시가 떴다는 사실만으로 팔지 마십시오** — 대형주에는 정기보고서처럼 주가와
    무관한 공시가 일상적으로 뜹니다. 다만 매도로 판단할 만한 악재 공시가 있다면 그것은
-   궤적보다 우선하는 근거입니다. 되돌림이 아직 오지 않았어도 팔 수 있습니다.
+   궤적보다 우선하는 근거입니다. 되돌림이 아직 오지 않았어도 팔 수 있습니다.""",
+}
 
-## reason 작성 지침
-`reason`에는 **그 종목** 궤적의 구체적 수치를 인용하십시오. ("고점 +2.10%에서
-+0.90%로 1.20%p 반납했다"처럼.) "모멘텀이 약화되었다", "분위기가 좋지 않다" 같은
-모호한 표현은 금지합니다."""
+
+def build_exit_system_prompt(sections: Optional[Dict[str, str]] = None) -> str:
+    """잠긴 절과 편집 가능한 절을 이어 붙인다. `sections`에서는 편집 가능한 키만 쓴다.
+
+    잠긴 절 키(`role` 등)가 섞여 와도 무시한다 — 튜너의 안전장치(`sanitize_sections`)를
+    지나온 값만 들어오지만, 파일을 손으로 고친 경우까지 코드가 한 번 더 막는다.
+    """
+    merged = dict(DEFAULT_EXIT_PROMPT_SECTIONS)
+    for key, text in (sections or {}).items():
+        if key in EXIT_PROMPT_SECTION_ORDER and text:
+            merged[key] = text
+    parts = [_EXIT_PROMPT_HEADER, EXIT_ROLE_SECTION, EXIT_DEFAULT_HOLD_SECTION]
+    parts.extend(merged[key] for key in EXIT_PROMPT_SECTION_ORDER)
+    parts.append(EXIT_REASON_FORMAT_SECTION)
+    return "\n\n".join(parts)
+
+
+def build_exit_locked_text() -> str:
+    """튜너에게 참고용으로 보여줄 잠긴 절 전문."""
+    return "\n\n".join([EXIT_ROLE_SECTION, EXIT_DEFAULT_HOLD_SECTION, EXIT_REASON_FORMAT_SECTION])
+
+
+def make_exit_prompt_store(prompt_dir: Path = EXIT_PROMPT_DIR) -> PromptStore:
+    """매도 프롬프트용 저장소 — 파일이 없으면 코드 기본값과 `EXIT_PROMPT_TEMPLATE_VERSION`."""
+    return PromptStore(
+        prompt_dir,
+        EXIT_PROMPT_SECTION_ORDER,
+        DEFAULT_EXIT_PROMPT_SECTIONS,
+        EXIT_PROMPT_TEMPLATE_VERSION,
+        label="매도 프롬프트",
+    )
 
 
 def build_exit_user_prompt(
@@ -295,9 +338,16 @@ class ExitAdvisor:
     만큼 되돌림이 왔는가"만 종목마다 주기적으로 LLM에 묻는다.
     """
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, prompt_store: Optional[PromptStore] = None):
         self.settings = settings
         self._client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        # 편집 가능한 세 절을 매 호출마다 여기서 읽는다 — 15:35 튜너가 고치면 재시작 없이 반영된다
+        self.prompt_store = prompt_store if prompt_store is not None else make_exit_prompt_store()
+
+    @property
+    def prompt_version(self) -> str:
+        """지금 쓰는 매도 프롬프트 버전 — 판단 기록(`ai_exit_decisions`)에 함께 남는다."""
+        return self.prompt_store.load_version()
 
     def decide(
         self,
@@ -316,7 +366,7 @@ class ExitAdvisor:
         )
         logger.info(
             "AI 매도 판단 요청 (exit_prompt_version=%s, 보유 %d종목):\n%s",
-            EXIT_PROMPT_TEMPLATE_VERSION,
+            self.prompt_version,
             len(holdings),
             user_prompt,
         )
@@ -334,7 +384,7 @@ class ExitAdvisor:
             ).messages.stream(
                 model=self.settings.llm_model,
                 max_tokens=MAX_TOKENS,
-                system=build_exit_system_prompt(),
+                system=build_exit_system_prompt(self.prompt_store.load_sections()),
                 messages=[{"role": "user", "content": user_prompt}],
                 # "지금 팔까"는 깊은 추론이 필요한 질문이 아니고, 비용의 60~70%가 사고
                 # 토큰이다 (스펙 10절) — effort를 낮춰 매 주기 호출 비용을 줄인다.

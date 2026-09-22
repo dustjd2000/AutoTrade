@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from types import SimpleNamespace
 
 from src.core.exit_trace import TracePoint
@@ -10,6 +10,7 @@ from src.llm.exit_advisor import (
     PositionExit,
     build_exit_system_prompt,
     build_exit_user_prompt,
+    make_exit_prompt_store,
     parse_exit_decision,
 )
 
@@ -83,8 +84,9 @@ def test_system_prompt_makes_holding_the_default():
     assert "기본은 보유" in prompt
 
 
-def test_decide_returns_none_when_api_raises():
+def test_decide_returns_none_when_api_raises(tmp_path):
     advisor = ExitAdvisor.__new__(ExitAdvisor)
+    advisor.prompt_store = make_exit_prompt_store(tmp_path / "exit_prompt")
     advisor.settings = SimpleNamespace(anthropic_api_key="k", llm_model="claude-opus-5")
 
     class Boom:
@@ -152,42 +154,48 @@ class FakeClient:
         return self
 
 
-def _advisor_with_response(response, events=()):
+def _advisor_with_response(response, tmp_path, events=()):
     advisor = ExitAdvisor.__new__(ExitAdvisor)
+    advisor.prompt_store = make_exit_prompt_store(tmp_path / "exit_prompt")
     advisor.settings = SimpleNamespace(anthropic_api_key="k", llm_model="claude-opus-5")
     advisor._client = FakeClient(response, events)
     return advisor
 
 
-def test_decide_returns_none_when_stop_reason_is_max_tokens():
+def test_decide_returns_none_when_stop_reason_is_max_tokens(tmp_path):
     """사고 토큰에 예산을 다 쓰고 잘린 응답은 예외 없이 None으로 끝나야 한다."""
     advisor = _advisor_with_response(
-        FakeResponse(stop_reason="max_tokens", content=[FakeBlock("아무 텍스트")])
+        FakeResponse(stop_reason="max_tokens", content=[FakeBlock("아무 텍스트")]),
+        tmp_path=tmp_path,
     )
     assert advisor.decide([holding()], [], 330, False) is None
 
 
-def test_decide_returns_none_when_stop_reason_is_refusal():
+def test_decide_returns_none_when_stop_reason_is_refusal(tmp_path):
     """모델이 응답을 거부한 경우도 예외 없이 None으로 끝나야 한다."""
-    advisor = _advisor_with_response(FakeResponse(stop_reason="refusal", content=[]))
+    advisor = _advisor_with_response(
+        FakeResponse(stop_reason="refusal", content=[]), tmp_path=tmp_path
+    )
     assert advisor.decide([holding()], [], 330, False) is None
 
 
-def test_decide_returns_none_when_response_text_is_empty():
+def test_decide_returns_none_when_response_text_is_empty(tmp_path):
     """텍스트 블록이 공백뿐이면(또는 없으면) 예외 없이 None으로 끝나야 한다."""
     advisor = _advisor_with_response(
-        FakeResponse(stop_reason="end_turn", content=[FakeBlock("   ")])
+        FakeResponse(stop_reason="end_turn", content=[FakeBlock("   ")]),
+        tmp_path=tmp_path,
     )
     assert advisor.decide([holding()], [], 330, False) is None
 
 
-def test_decide_returns_none_when_response_text_is_malformed_json():
+def test_decide_returns_none_when_response_text_is_malformed_json(tmp_path):
     """parse_exit_decision이 던지는 예외가 decide() 밖으로 새어나가지 않고 None으로 끝나야 한다."""
     advisor = _advisor_with_response(
         FakeResponse(
             stop_reason="end_turn",
             content=[FakeBlock("이 자리에 답을 드릴 수 없습니다.")],
-        )
+        ),
+        tmp_path=tmp_path,
     )
     assert advisor.decide([holding()], [], 330, False) is None
 
@@ -412,7 +420,7 @@ def test_note_dedupes_a_repeated_ticker():
 
 
 # ── 스트리밍 전환 (2026-09-19) ──────────────────────────────
-def test_decide_does_not_retry():
+def test_decide_does_not_retry(tmp_path):
     """재시도를 끈다 — 한 번의 판단에 예산이 배로 늘면 그만큼 시세와 어긋난다.
 
     SDK 기본값(max_retries=2)이면 최악 120초 × 3 = 6분이 걸리고, 그렇게 낡은
@@ -421,20 +429,80 @@ def test_decide_does_not_retry():
     response = FakeResponse(
         content=[FakeBlock('{"decisions": [{"ticker": "005930", "sell": false, "reason": "유효"}]}')]
     )
-    advisor = _advisor_with_response(response)
+    advisor = _advisor_with_response(response, tmp_path=tmp_path)
 
     advisor.decide([holding()], [], 330, False)
 
     assert advisor._client.options[0]["max_retries"] == 0
 
 
-def test_decide_gives_up_when_budget_exceeded(monkeypatch):
+def test_decide_gives_up_when_budget_exceeded(monkeypatch, tmp_path):
     """예산을 넘기면 스트림을 끊고 None — 낡은 판단으로 팔지 않는다."""
     clock = iter([0.0, 10_000.0])
     monkeypatch.setattr("src.llm.exit_advisor.monotonic", lambda: next(clock))
     response = FakeResponse(
         content=[FakeBlock('{"decisions": [{"ticker": "005930", "sell": true, "reason": "반납"}]}')]
     )
-    advisor = _advisor_with_response(response, events=[object()])
+    advisor = _advisor_with_response(response, events=[object()], tmp_path=tmp_path)
 
     assert advisor.decide([holding()], [], 330, False) is None
+
+
+# ── 절 파일화 (스펙 2026-09-22 4.1) ─────────────────────────
+from src.llm.exit_advisor import (
+    DEFAULT_EXIT_PROMPT_SECTIONS,
+    EXIT_PROMPT_SECTION_ORDER,
+    EXIT_PROMPT_TEMPLATE_VERSION,
+    build_exit_locked_text,
+    make_exit_prompt_store,
+)
+
+
+def test_only_three_sections_are_editable():
+    assert EXIT_PROMPT_SECTION_ORDER == ("loss_positions", "time", "criteria")
+    assert set(DEFAULT_EXIT_PROMPT_SECTIONS) == set(EXIT_PROMPT_SECTION_ORDER)
+
+
+def test_system_prompt_keeps_section_order():
+    prompt = build_exit_system_prompt()
+    headers = ["## 역할", "## 기본은 보유입니다", "## 손실 중인 종목", "## 시간", "## 판단 기준", "## reason 작성 지침"]
+    positions = [prompt.index(h) for h in headers]
+    assert positions == sorted(positions)
+
+
+def test_edited_section_replaces_only_that_section():
+    edited = "## 손실 중인 종목\n" + "바뀐 지침 " * 10
+    prompt = build_exit_system_prompt({"loss_positions": edited})
+
+    assert edited in prompt
+    assert DEFAULT_EXIT_PROMPT_SECTIONS["loss_positions"] not in prompt
+    assert DEFAULT_EXIT_PROMPT_SECTIONS["criteria"] in prompt
+
+
+def test_locked_sections_cannot_be_overridden():
+    """잠긴 절 키가 섞여 와도 무시한다 — 순수익 목적과 '기본은 보유'는 코드가 지킨다."""
+    prompt = build_exit_system_prompt({"role": "## 역할\n아무거나"})
+    assert "당일 순수익" in prompt
+
+
+def test_locked_text_has_the_three_locked_sections():
+    text = build_exit_locked_text()
+    assert "## 역할" in text and "## 기본은 보유입니다" in text and "## reason 작성 지침" in text
+    assert "## 손실 중인 종목" not in text
+
+
+def test_exit_store_defaults(tmp_path):
+    store = make_exit_prompt_store(tmp_path / "exit_prompt")
+    assert store.load_sections() == DEFAULT_EXIT_PROMPT_SECTIONS
+    assert store.load_version() == EXIT_PROMPT_TEMPLATE_VERSION
+
+
+def test_advisor_reads_the_store_on_every_call(tmp_path):
+    """파일을 고치면 엔진 재시작 없이 다음 판단에 반영된다."""
+    store = make_exit_prompt_store(tmp_path / "exit_prompt")
+    advisor = ExitAdvisor.__new__(ExitAdvisor)
+    advisor.prompt_store = store
+    store.save({"time": "## 시간\n" + "새 시간 지침 " * 10}, reason="시험", today=date(2026, 9, 29))
+
+    assert advisor.prompt_version == "20260929"
+    assert "새 시간 지침" in build_exit_system_prompt(advisor.prompt_store.load_sections())
