@@ -583,9 +583,18 @@ class TradeStore:
 
             # 외부 체결은 매칭 건을 모두 반영한 뒤에 넣는다 — 수동 매도의 평단 대용으로 같은 날
             # 매수 체결가를 쓰는데, 그 매수 행은 위 UPDATE를 거쳐야 체결가가 채워지기 때문이다
+            stale = [fill for fill in external if _is_known_earlier_fill(conn, fill, start)]
+            external = [fill for fill in external if fill not in stale]
             for fill in external:
                 _insert_external_fill(conn, fill, day, start, end)
             conn.commit()
+
+        if stale:
+            logger.warning(
+                "이전 거래일 체결 %d건이 다시 조회돼 기록하지 않습니다 (휴장일 추정): %s",
+                len(stale),
+                [f.label for f in stale],
+            )
 
         if external:
             logger.warning(
@@ -934,6 +943,33 @@ def _same_day_buy_price(
         (ticker, OrderSide.BUY.value, *FILLED_STATUSES, start, end),
     ).fetchall()
     return _weighted_average([(r["filled_price"], r["filled_quantity"]) for r in rows]) or None
+
+
+def _is_known_earlier_fill(conn: sqlite3.Connection, fill: FillRecord, start: str) -> bool:
+    """같은 체결이 **이전 날짜**에 이미 기록돼 있는지 (확정 2026-09-24).
+
+    휴장일에 체결내역 조회(`ka10076`)가 직전 거래일 체결을 그대로 돌려준다 — 2026-09-24에
+    9월 23일 체결 4건이 오늘 것으로 다시 들어왔다. 주문번호가 그날 주문 기록과 맞지 않아
+    '외부 체결'(수동 매매)로 새 행이 생기고, 수수료·세금이 이중 계상됐다.
+
+    주문번호만 보지 않고 종목·방향·수량·체결가까지 함께 본다 — 키움 주문번호는 날마다 다시
+    매겨져 언젠가 겹칠 수 있는데, 다섯 값이 모두 같은 별개의 체결은 사실상 없다.
+    """
+    row = conn.execute(
+        """SELECT 1 FROM trades
+           WHERE order_id = ? AND ticker = ? AND side = ?
+                 AND filled_quantity = ? AND filled_price = ? AND timestamp < ?
+           LIMIT 1""",
+        (
+            fill.order_id,
+            fill.ticker,
+            fill.side.value,
+            fill.filled_quantity,
+            fill.filled_price,
+            start,
+        ),
+    ).fetchone()
+    return row is not None
 
 
 def _insert_external_fill(

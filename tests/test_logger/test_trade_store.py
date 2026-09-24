@@ -784,3 +784,49 @@ def test_recent_recommendations_empty_when_nothing_verified(tmp_path):
     store = make_store(tmp_path)
     store.save_recommendations(date(2026, 9, 4), [_rec("005930")], "v11")
     assert store.recent_recommendations(10) == []
+
+
+# ── 휴장일 중복 체결 (확정 2026-09-24) ─────────────────────
+def test_previous_day_fills_are_not_recorded_again(tmp_path):
+    """휴장일에 체결내역 조회가 직전 거래일 체결을 그대로 돌려준다 (2026-09-24 실측).
+
+    주문번호가 그날 주문 기록과 맞지 않아 '외부 체결'로 새 행이 생기면, 같은 매매가 이틀에
+    걸쳐 두 번 집계되고 수수료·세금이 이중으로 빠진다.
+    """
+    store = make_store(tmp_path)
+    fills = seed_today(store)
+    store.apply_fills(fills, date(2026, 7, 29))
+    before = store.daily_summary(date(2026, 7, 29))
+
+    applied = store.apply_fills(fills, date(2026, 7, 30))
+
+    assert applied == 0, "같은 체결이 다음 날 다시 와도 기록하지 않는다"
+    next_day = store.daily_summary(date(2026, 7, 30))
+    assert next_day.trades == []
+    assert next_day.fees == 0.0
+    # 원래 날짜의 집계는 그대로다
+    assert store.daily_summary(date(2026, 7, 29)).fees == before.fees
+
+
+def test_a_genuine_manual_fill_is_still_recorded(tmp_path):
+    """수동 매매까지 막으면 안 된다 — 다섯 값이 모두 같을 때만 중복으로 본다."""
+    store = make_store(tmp_path)
+    store.apply_fills(seed_today(store), date(2026, 7, 29))
+
+    manual = make_fill("0999999", "035720", OrderSide.SELL, 3, 37500.0, tax=200.0)
+    applied = store.apply_fills([manual], date(2026, 7, 30))
+
+    assert applied == 1
+    summary = store.daily_summary(date(2026, 7, 30))
+    assert [t.ticker for t in summary.trades] == ["035720"]
+
+
+def test_same_order_id_with_different_fill_is_recorded(tmp_path):
+    """주문번호는 날마다 다시 매겨진다 — 번호만 같고 내용이 다르면 새 체결이다."""
+    store = make_store(tmp_path)
+    store.apply_fills(seed_today(store), date(2026, 7, 29))
+
+    reused = make_fill("0079364", "035720", OrderSide.BUY, 7, 36900.0)
+    applied = store.apply_fills([reused], date(2026, 7, 30))
+
+    assert applied == 1
