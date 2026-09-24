@@ -19,7 +19,7 @@ from src.core.events import (
     OrderType,
     format_stock,
 )
-from src.data.collector import DataCollector
+from src.data.collector import DataCollector, market_looks_closed
 from src.llm import exit_reviewer as exit_reviewer_module
 from src.llm import exit_tuner as exit_tuner_module
 from src.llm import reviewer as reviewer_module
@@ -53,6 +53,16 @@ BUY_PENDING_STATUS = "매수 대기"
 # 접수 행은 미체결 주문을 취소한다 — 상태 문구는 표·메일과 같은 것을 써야 대조가 된다.
 BUY_ORDERED_STATUS = templates.BUY_OUTCOME_LABELS[BuyOutcome.ORDERED]
 BUY_DROPPABLE_STATUSES = (BUY_PENDING_STATUS, BUY_ORDERED_STATUS)
+
+# 키움이 휴장일 주문을 거부할 때 돌려주는 문구 (2026-09-24 실측:
+# "[2000](571489:장이 열리지않는 날입니다.)"). 띄어쓰기가 흔들려도 걸리도록 두 표기를 본다.
+MARKET_CLOSED_REJECT_TEXTS = ("장이 열리지않는 날", "장이 열리지 않는 날")
+
+
+def _is_market_closed_rejection(message: Optional[str]) -> bool:
+    """주문 거부 사유가 '휴장'인지 (PRD 10절 '휴장일 자동 판정')."""
+    text = message or ""
+    return any(marker in text for marker in MARKET_CLOSED_REJECT_TEXTS)
 
 # 잔고 대조로 접수 행을 옮길 때 쓰는 상태 (`_settled_row`) — 부분체결은 표에 남지만
 # 체크 열은 비운다. 남은 미체결분만 골라 취소하면 이미 체결된 몫까지 덮어쓰기 때문이다.
@@ -364,6 +374,14 @@ class DailyWorkflow:
             self.engine.notify("[경고] 당일 데이터 수집 실패 — 오늘 매수를 스킵합니다.")
             return
 
+        # LLM을 부르기 **전에** 휴장을 가려낸다 — 호출 비용과 추천 메일이 여기서 갈린다
+        # (확정 2026-09-24, PRD 10절 '휴장일 자동 판정').
+        if market_looks_closed(daily_data):
+            self.engine.note_market_closed(
+                "후보 전 종목의 당일 지표가 전일 그대로입니다 (등락률 0%, 현재가 = 전일 종가)"
+            )
+            return
+
         recommendations = self.recommender.recommend(daily_data)
         if not recommendations:
             logger.error("LLM recommendation unavailable. Skipping today's buys.")
@@ -551,6 +569,10 @@ class DailyWorkflow:
                     logger.error(
                         "매수 주문 거부됨: %s x%d주 — %s", label, quantity, result.error_message
                     )
+                    # 거래소가 휴장이라고 답한 것은 확정적인 신호다 — 수집 지표 판정이
+                    # 빗나간 날에도 여기서 그날 남은 스케줄이 멈춘다 (확정 2026-09-24)
+                    if _is_market_closed_rejection(result.error_message):
+                        self.engine.note_market_closed("주문이 '장이 열리지않는 날'로 거부됐습니다")
                     self.engine.notify(f"[실패] 매수 거부: {label} x{quantity}주 — {result.error_message}")
                     failed.append(plan.ticker)
                     records.append(

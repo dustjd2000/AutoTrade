@@ -101,10 +101,26 @@ AI_EXIT_POLL_SECONDS = 30.0
 DISCLOSURE_POLL_SECONDS = 300.0
 
 
+# 휴장으로 판정돼도 그대로 도는 스케줄 (PRD 10절 '휴장일 자동 판정').
+# 상태 초기화는 다음 거래일을 위해 필요하고, 마감 정리는 판정이 틀렸을 때 보유분을 그대로
+# 넘기지 않기 위해 남긴다 — 팔 것이 없으면 조용히 끝난다.
+HOLIDAY_ALWAYS_ACTIONS = ("daily_reset", "close_out")
+
+
 def _submit(runtime: "Runtime", action: str) -> Callable[[], None]:
-    """스케줄 잡을 실행 통로 접수로 바꾼다 — 버튼과 같은 큐를 탄다."""
+    """스케줄 잡을 실행 통로 접수로 바꾼다 — 버튼과 같은 큐를 탄다.
+
+    오늘이 휴장으로 판정됐으면(`engine.market_closed_today`) 대부분의 스케줄을 건너뛴다.
+    **UI 버튼은 막지 않는다** — 사용자가 직접 누른 실행이고, 판정이 틀렸을 때 손으로
+    돌릴 길을 남겨야 한다 (버튼은 `ActionRunner.submit`을 직접 부른다).
+    """
 
     def job() -> None:
+        if runtime.engine.market_closed_today and action not in HOLIDAY_ALWAYS_ACTIONS:
+            logger.info(
+                "휴장으로 판정해 '%s' 작업을 건너뜁니다.", ACTION_LABELS.get(action, action)
+            )
+            return
         runtime.runner.submit(action)
 
     return job
@@ -115,7 +131,9 @@ def _trading_days_only(job, name: str):
 
     앱을 며칠 연속 켜두면 스케줄러가 요일과 무관하게 매일 발동한다. 주말에 그대로 두면
     쓸모없는 LLM 호출(비용)과 추천·리포트 메일이 나가고, 매수는 거래소에서 거부된다.
-    공휴일은 걸러내지 못한다 — 별도 휴장일 캘린더가 필요하다.
+    **공휴일은 여기서 걸러내지 못한다** — 요일만 보기 때문이다. 대신 수집한 당일 지표로
+    판정해(`collector.market_looks_closed`) 그날 남은 스케줄을 `_submit`이 건너뛴다
+    (확정 2026-09-24, PRD 10절 '휴장일 자동 판정').
     """
 
     def skipped() -> bool:
@@ -270,7 +288,8 @@ def build_runtime(settings: Settings) -> Runtime:
 
 
 def is_trading_day(now: Optional[datetime] = None) -> bool:
-    """거래일(월~금)인지. 공휴일은 판별하지 않는다 — 휴장일 캘린더가 없다."""
+    """거래일(월~금)인지. 공휴일은 여기서 판별하지 않는다 — 당일 지표 판정이 맡는다
+    (`collector.market_looks_closed` → `engine.market_closed_today` → `_submit`)."""
     now = now or datetime.now()
     return now.weekday() < 5  # 5·6 = 토·일
 

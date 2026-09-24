@@ -44,6 +44,10 @@ MIN_CANDIDATES_AFTER_FILTER = 5
 # 프롬프트가 길어지고, 정작 중요한 재료가 묻힌다.
 MAX_HEADLINES_PER_TICKER = 3
 
+# 휴장일 판정에 필요한 최소 표본 수. 당일 지표를 받은 종목이 이보다 적으면 판정하지 않는다 —
+# 몇 종목이 나란히 보합인 것은 흔하다.
+MIN_HOLIDAY_SAMPLES = 5
+
 
 @dataclass
 class DailyStockData:
@@ -78,6 +82,29 @@ class DailyStockData:
     today_volume: int = 0           # 추천 시각까지의 당일 누적 거래량
     # DART 공시 제목 (최신순, 최대 MAX_HEADLINES_PER_TICKER건) — 수집은 DisclosureClient가 한다
     headlines: List[str] = field(default_factory=list)
+
+
+def market_looks_closed(
+    candidates: List[DailyStockData], min_samples: int = MIN_HOLIDAY_SAMPLES
+) -> bool:
+    """당일 지표가 후보 전 종목에서 '전일 그대로'면 휴장으로 본다 (확정 2026-09-24).
+
+    `is_trading_day`는 요일만 보므로 공휴일에도 그날 흐름이 그대로 돌았다 — 2026-09-24에
+    추천 LLM 호출과 추천 메일이 나가고 매수 주문까지 접수됐다(주문은 거래소가 거부).
+    키움은 휴장일에도 현재가를 돌려주는데, 그 값이 전일 종가와 같고 등락률이 0이다.
+    그 흔적을 판정에 쓴다 — 별도 휴장일 캘린더나 API 키가 필요 없다.
+
+    당일 지표를 받지 못한 종목(`today_price`가 0 — 조회 실패)은 판정에서 뺀다. 남은 표본이
+    `min_samples` 미만이면 판정하지 않는다. **모르면 평소대로 도는 쪽**이 기본이다 —
+    잘못 휴장으로 판정해 거래일 하루를 통째로 건너뛰는 것이 더 나쁘다.
+    """
+    graded = [data for data in candidates if data.today_price > 0 and data.prev_close > 0]
+    if len(graded) < min_samples:
+        return False
+    return all(
+        data.today_price == data.prev_close and data.today_change_rate == 0.0
+        for data in graded
+    )
 
 
 class LargeCapUniverse:

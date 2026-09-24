@@ -49,6 +49,13 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   (`settings.recommend_time`/`buy_time`, `.env`의 `RECOMMEND_TIME`·`BUY_TIME`, 기본 09:05·09:08)
   나머지는 코드 상수다. 두 값은 UI에서 고를 수 없고 라벨로 보여주기만 하며, "추천은 개장 후,
   매수는 추천 +3분 이상"을 `Settings.validate()`가 엔진 시작 단계에서 강제한다.
+- **공휴일에는 스케줄이 스스로 멈춘다** (확정 2026-09-24, PRD 10절 "휴장일 자동 판정").
+  `is_trading_day`는 요일만 보므로, 추천 직전 수집한 당일 지표가 후보 전 종목에서 전일
+  그대로면(`collector.market_looks_closed`) LLM을 부르기 전에 그날을 휴장으로 표시하고
+  (`engine.market_closed_today`), 스케줄 접수(`runtime._submit`)가 나머지를 건너뛴다 —
+  예외는 08:40 초기화와 15:15 마감 정리뿐이고, **UI 버튼은 막지 않는다.** 주문이 "장이
+  열리지않는 날"로 거부돼도 같은 표시가 선다. 2026-09-24 공휴일에 추천·LLM 호출·매수 주문이
+  그대로 나간 것이 계기다.
 - 데이터 수집·LLM 호출·메일 발송처럼 오래 걸리는 동기 작업은 별도 스레드에 넘긴다 — 안
   그러면 그 시간 동안 WebSocket PING에 응답하지 못해 서버가 연결을 끊는다.
 - 반대로 매수/청산 주문은 **루프 스레드에서 그대로** 실행해, 실시간 손절 감시와

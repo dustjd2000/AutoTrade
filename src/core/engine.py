@@ -176,6 +176,8 @@ class TradingEngine:
         # 보유 목록이 매도로 비워진 시각. 15:35를 기다리지 않고 결과 리포트를 보내는
         # 근거가 된다 (runtime.closeout_report_due).
         self._closed_out_at: Optional[datetime] = None
+        # 오늘을 휴장으로 판정했는지 (PRD 10절 '휴장일 자동 판정', 2026-09-24). 08:40에 지운다.
+        self._market_closed_today = False
         # AI 매도 판단 (PRD 5.5-B) — 익절 자동 청산이 빠진 자리를 대신한다.
         # 순손익 궤적. 메모리에만 두고 08:40 reset_for_new_day에서 비운다 (runtime.watch_ai_exit).
         self.exit_trace = ExitTrace()
@@ -211,6 +213,23 @@ class TradingEngine:
     def closed_out_at(self) -> Optional[datetime]:
         """보유 목록이 매도로 비워진 시각. 아직 비지 않았거나 다시 매수했으면 None."""
         return self._closed_out_at
+
+    @property
+    def market_closed_today(self) -> bool:
+        """오늘을 휴장으로 판정했는지 (PRD 10절 '휴장일 자동 판정'). 08:40에 지운다."""
+        return self._market_closed_today
+
+    def note_market_closed(self, reason: str) -> None:
+        """오늘을 휴장으로 표시한다 — 스케줄러가 이 표시를 보고 남은 작업을 건너뛴다.
+
+        알림은 처음 한 번만 보낸다. 판정 경로가 둘이라(수집 지표 / 주문 거부) 같은 날
+        두 번 서면 같은 메일이 두 통 나간다.
+        """
+        if self._market_closed_today:
+            return
+        self._market_closed_today = True
+        logger.warning("휴장으로 판정했습니다 — 오늘 남은 스케줄을 건너뜁니다: %s", reason)
+        self.notify(f"[알림] 휴장으로 판정해 오늘 매매를 건너뜁니다 — {reason}")
 
     @property
     def ai_exit_calls(self) -> int:
@@ -540,6 +559,8 @@ class TradingEngine:
         self._unsellable = {}
         self._zero_sellable.clear()
         self._closed_out_at = None
+        # 어제 휴장 판정을 오늘로 끌고 가면 연휴 다음 거래일이 통째로 빈다
+        self._market_closed_today = False
         # 순손익 궤적은 하루치라 다음 날로 넘기지 않는다 — 어제 궤적으로 오늘을 판단하면 안 된다.
         self.exit_trace.clear()
         self.exit_drawdown.clear()
