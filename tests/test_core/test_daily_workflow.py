@@ -1493,8 +1493,12 @@ class FakeRecommender:
 
     `results`는 호출될 때마다 하나씩 꺼내 쓰는 큐다 — 1차 추천과 재추천이 서로 다른
     목록을 돌려줘야 재추천 로직(탈락분 제외 → 한 번 더 추천)을 검증할 수 있다.
-    `calls`에는 매 호출이 받은 키워드 인자를 쌓는다 — `exclude_tickers`가 실제로
-    넘어갔는지 보는 용도다. 큐가 바닥나면 추천 실패(None)와 같은 동작을 흉내낸다.
+    `calls`에는 매 호출이 받은 키워드 인자를 쌓는다 — `exclude_tickers`·`already_picked`가
+    실제로 넘어갔는지 보는 용도다.
+
+    큐가 바닥났는데 `recommend`가 또 불리면 **테스트를 실패시킨다** — 재추천은 최대
+    1회이므로(세 번째 호출은 설계 위반), 조용히 None을 돌려주면 버그가 "LLM 추천 실패"로
+    위장돼 테스트가 거짓 통과한다.
     """
 
     def __init__(self):
@@ -1505,7 +1509,10 @@ class FakeRecommender:
     def recommend(self, daily_data, **kwargs):
         self.calls.append(kwargs)
         if not self.results:
-            return None
+            pytest.fail(
+                "FakeRecommender.results 큐가 바닥난 뒤 recommend()가 또 호출됐습니다 "
+                "— 재추천은 최대 1회여야 합니다."
+            )
         return self.results.pop(0)
 
 
@@ -2061,7 +2068,59 @@ def test_a_blocking_verdict_drops_the_stock_and_recommends_once_more(tmp_path):
 
     assert len(workflow.recommender.calls) == 2
     assert workflow.recommender.calls[1]["exclude_tickers"] == ("005930",)
+    # 생존 종목(000660)도 재추천 프롬프트에 알려야 한다 — 안 그러면 LLM이 그 종목을
+    # 다시 고르는 것이 "정상 동작"이 돼 같은 종목에 배정액이 두 번 들어간다 (Critical 1).
+    assert workflow.recommender.calls[1]["already_picked"] == ("000660",)
     assert sorted(r.ticker for r in workflow.strategy._recommendations) == ["000660", "035420"]
+
+
+def test_replacement_duplicating_a_kept_ticker_is_not_bought_twice(tmp_path):
+    """재추천이 '중복 추천 금지' 지시를 어기고 생존 종목을 다시 고르면 코드가 한 번 더 거른다.
+
+    `already_picked`는 LLM에게 거는 소프트 제약일 뿐이라 — 이 코드베이스가
+    drop_unknown_tickers·drop_other_setups로 프롬프트 제약을 코드로 한 번 더 자르는 것과
+    같은 이유로, 안 거르면 같은 종목(000660)에 배정액이 두 번 들어가 분산이 깨진다.
+    """
+    workflow = build_workflow(tmp_path)
+    verifier = FakeVerifier()
+    verifier.verdicts = {
+        "005930": NewsVerdict("005930", checked=True, blocking=True, reason="유상증자")
+    }
+    workflow.news_verifier = verifier
+    # 1차: 005930(탈락) + 000660(생존). 재추천이 지시를 어기고 000660을 또 고르면서
+    # 035420도 새로 고른다 — 실제로 관측 가능한 LLM의 "정상" 동작이다 (Critical 1).
+    workflow.recommender.results = [
+        [_recommendation("005930"), _recommendation("000660")],
+        [_recommendation("000660"), _recommendation("035420")],
+    ]
+
+    workflow.recommend_and_notify(date(2026, 10, 1))
+
+    tickers = [r.ticker for r in workflow.strategy._recommendations]
+    assert tickers == ["000660", "035420"]
+    assert len(tickers) == len(set(tickers)), "같은 종목이 두 번 들어가면 배정액이 2배가 된다"
+
+
+def test_merged_recommendations_are_capped_at_the_target_count(tmp_path):
+    """병합 결과가 목표 종목 수를 넘지 않고, 1차 생존분이 앞에 온다 (Important 2)."""
+    workflow = build_workflow(tmp_path)
+    workflow.strategy.target_stock_count = 2
+    verifier = FakeVerifier()
+    verifier.verdicts = {
+        "005930": NewsVerdict("005930", checked=True, blocking=True, reason="유상증자")
+    }
+    workflow.news_verifier = verifier
+    # 1차: 005930(탈락) + 000660(생존) → kept=[000660]. 재추천이 target_count(3)개를
+    # 꽉 채워 돌아오면 병합 결과(1 + 2 = 3)가 target_stock_count(2)를 넘는다.
+    workflow.recommender.results = [
+        [_recommendation("005930"), _recommendation("000660")],
+        [_recommendation("035420"), _recommendation("051910"), _recommendation("373220")],
+    ]
+
+    workflow.recommend_and_notify(date(2026, 10, 1))
+
+    tickers = [r.ticker for r in workflow.strategy._recommendations]
+    assert tickers == ["000660", "035420"]  # 생존분이 앞, 목표 수(2)로 잘림
 
 
 def test_the_second_round_is_the_last_one(tmp_path):
@@ -2128,6 +2187,14 @@ def test_all_blocked_skips_the_day(tmp_path):
     workflow.recommend_and_notify(date(2026, 10, 1))
 
     assert workflow.strategy._recommendations == []
+    # 전원 탈락이어도 1차·2차 탈락 종목의 판정 자체는 남아야 "그날 왜 안 샀나"를
+    # 되짚을 수 있다 (Important 3) — 빈 리스트를 저장하면 TradeStore가 아무것도 쓰지 않는다.
+    rows = workflow.trade_store.recommendations_for(date(2026, 10, 1))
+    assert sorted(row.ticker for row in rows) == ["005930", "035420"]
+    # engine.notify=notifications.append로 연결돼 있다 — 바운드 메서드의 __self__로 그
+    # 리스트 자체를 되찾는다 (build_workflow가 notifications를 따로 반환하지 않으므로).
+    notified = workflow.engine.notify.__self__
+    assert any("탈락" in message for message in notified)
 
 
 def test_verification_is_skipped_when_the_buy_time_is_too_close(tmp_path, monkeypatch):

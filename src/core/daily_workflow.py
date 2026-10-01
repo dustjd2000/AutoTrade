@@ -40,6 +40,17 @@ logger = logging.getLogger(__name__)
 # 2종목 병렬 실측이 30초이고 꼬리가 120초다 (스펙 2절).
 MIN_NEWS_VERIFY_SECONDS = 60
 
+# 검증 한 번에 쓸 수 있는 최대 시간. 실측은 2종목 병렬 30초이고 꼬리가 120초다 — 상한을
+# 두지 않으면 느린 날 `_verify_news`가 남은 시간을 전부 먹어, 1차 검증 자체가 매수 시각
+# 직전까지 이어지고 재추천은 `budget_seconds`의 바닥(120초)만 들고 매수 시각을 넘긴다
+# (2026-09-16 추천 지연 사고와 같은 모양).
+NEWS_VERIFY_MAX_SECONDS = 120.0
+
+# 1차 뉴스 검증이 남겨 둬야 하는 재추천+재검증 몫. 1차 추천 자체가 19~338초로 요동치므로
+# (`recommender.budget_seconds` 참고) 검증 진입 시점에 남은 시간이 넉넉해 보여도, 예약분을
+# 떼어두지 않으면 탈락이 하나만 나와도 재추천이 매수 시각을 거의 확실히 넘긴다.
+RERECOMMEND_RESERVE_SECONDS = 180.0
+
 # 최종 리포트를 보낸 날짜를 남기는 마커 파일. 인메모리 필드로 두면 엔진 재시작
 # (설정 저장·앱 재실행)마다 DailyWorkflow가 새로 만들어지면서 표시가 사라져,
 # 오전에 이미 보낸 리포트를 15:35가 다시 보낸다.
@@ -404,27 +415,57 @@ class DailyWorkflow:
             self.engine.notify("[경고] LLM 추천 실패/타임아웃 — 오늘 매수를 스킵합니다.")
             return
 
-        verdicts = self._verify_news(recommendations)
+        # 1차 검증에는 재추천+재검증 몫을 미리 떼 둔다 (RERECOMMEND_RESERVE_SECONDS) — 안
+        # 그러면 느린 날 검증이 남은 시간을 전부 먹어, 뒤이은 재추천이 매수 시각을 넘긴다.
+        verdicts = self._verify_news(recommendations, reserve_seconds=RERECOMMEND_RESERVE_SECONDS)
         blocked = [r for r in recommendations if self._is_blocked(r.ticker, verdicts)]
         if blocked:
             # 탈락분을 빼고 **한 번만** 다시 추천받는다. 두 번째 재추천은 시간이 폭발하고,
             # 세 번째 추천은 이미 두 번 걸러낸 뒤라 후보 질도 떨어진다 (스펙 4.1).
-            kept = [r for r in recommendations if r not in blocked]
             excluded = tuple(r.ticker for r in blocked)
+            kept = [r for r in recommendations if r.ticker not in excluded]
             logger.info(
                 "뉴스 검증에서 %d종목이 탈락했습니다: %s — 제외하고 한 번 더 추천받습니다.",
                 len(blocked), ", ".join(excluded),
             )
-            replacements = self.recommender.recommend(daily_data, exclude_tickers=excluded) or []
+            # 생존 종목(kept)도 프롬프트에 알려야 한다 — 재추천도 여전히 target_count개를
+            # 요구하므로, 알리지 않으면 LLM이 생존 종목을 다시 고르는 것이 "정상 동작"이
+            # 되어버려 같은 종목에 배정액이 두 번 들어간다 (리뷰에서 지적된 치명적 결함).
+            already_picked = tuple(r.ticker for r in kept)
+            replacements = self.recommender.recommend(
+                daily_data, exclude_tickers=excluded, already_picked=already_picked
+            ) or []
+            # 재추천 뒤에는 더 미룰 라운드가 없으므로 예약분 없이 남은 시간을 그대로 쓴다
             replacement_verdicts = self._verify_news(replacements)
             verdicts.update(replacement_verdicts)
-            kept += [r for r in replacements if not self._is_blocked(r.ticker, replacement_verdicts)]
-            recommendations = kept
+
+            # 위에서 프롬프트로 건 제약은 소프트 제약이다 — 이 코드베이스가
+            # drop_unknown_tickers·drop_other_setups로 프롬프트 제약을 코드로 한 번 더
+            # 자르는 것과 같은 이유로, LLM이 지시를 어기고 생존 종목을 다시 고르거나 탈락
+            # 종목을 또 고르면 여기서 한 번 더 걸러낸다. recommender.py의 중복 제거(seen)는
+            # 응답 **하나** 안의 중복만 잡아, 1차·2차 응답을 가로지르는 중복은 못 막는다.
+            kept_tickers = set(already_picked)
+            replacement_blocked = [
+                r for r in replacements if self._is_blocked(r.ticker, replacement_verdicts)
+            ]
+            replacement_blocked_tickers = {r.ticker for r in replacement_blocked}
+            new_picks = [
+                r for r in replacements
+                if r.ticker not in kept_tickers and r.ticker not in replacement_blocked_tickers
+            ]
+            # 1차 생존분을 앞에 두고, 목표 종목 수를 넘기지 않는다 — 넘기면 추천 메일·DB
+            # 기록이 실제 매수 종목 수(build_buy_plans의 [:target_stock_count])와 어긋나,
+            # 사지도 않은 종목까지 15:35 검증과 프롬프트 자동 수정의 입력이 되어버린다.
+            recommendations = (kept + new_picks)[: self.strategy.target_stock_count]
+            blocked = blocked + replacement_blocked
 
         if not recommendations:
             logger.error("뉴스 검증에서 추천 종목이 전부 탈락했습니다 — 오늘 매수를 스킵합니다.")
             self.engine.notify("[경고] 추천 종목이 모두 악재로 탈락 — 오늘 매수를 스킵합니다.")
-            self._save_recommendations(today, [], verdicts)
+            # 탈락 판정 자체는 남긴다 — 빈 리스트를 넘기면 아무것도 저장되지 않아
+            # "그날 왜 안 샀나"를 되짚을 근거가 사라진다 (TradeStore.save_recommendations는
+            # 빈 리스트를 '아무 일도 하지 않음'으로 취급한다).
+            self._save_recommendations(today, blocked, verdicts)
             return
 
         self.strategy.set_recommendations(recommendations)
@@ -438,11 +479,19 @@ class DailyWorkflow:
         self.email.send(subject, body)
         logger.info("Recommendation email sent for %s", today)
 
-    def _verify_news(self, recommendations) -> Dict[str, NewsVerdict]:
+    def _verify_news(
+        self, recommendations, reserve_seconds: float = 0.0
+    ) -> Dict[str, NewsVerdict]:
         """추천 종목의 악재를 확인한다. 어떤 실패도 빈 dict로 떨어진다 (= 전원 통과).
 
         검증은 추가 안전장치지 관문이 아니다 — 막으면 그날 매매가 통째로 빠지고,
         통과시키면 2026-10-01 이전과 같은 상태일 뿐이다.
+
+        `reserve_seconds`는 이 호출 **뒤에** 올 재추천·재검증 몫으로 남겨 둘 시간이다.
+        1차 검증에만 `RERECOMMEND_RESERVE_SECONDS`를 넘기고, 2차(재검증) 호출은 그 뒤에
+        더 미룰 라운드가 없으므로 0을 쓴다. 예약분을 뺀 뒤에도 `NEWS_VERIFY_MAX_SECONDS`
+        상한을 한 번 더 씌운다 — 남은 시간이 아무리 넉넉해도 검증 한 번에 그 이상 쓰지
+        않는다(상한이 없으면 느린 날 남은 시간을 전부 먹는다).
         """
         if not self.news_verify_enabled or self.news_verifier is None or not recommendations:
             return {}
@@ -452,18 +501,21 @@ class DailyWorkflow:
         # 매수 시각이 이미 지났어도 120을 돌려준다. 추천 호출에는 그 바닥이 맞지만
         # (늦더라도 추천은 나와야 한다), 검증은 늦으면 **안 하는 것이 맞다.**
         buy_at = datetime.combine(date.today(), self.buy_time)
-        remaining = (buy_at - datetime.now()).total_seconds()
+        remaining = (buy_at - datetime.now()).total_seconds() - reserve_seconds
         if remaining < MIN_NEWS_VERIFY_SECONDS:
             logger.warning(
-                "매수까지 %.0f초뿐이라 뉴스 검증을 건너뜁니다 (최소 %d초).",
-                remaining, MIN_NEWS_VERIFY_SECONDS,
+                "매수까지 %.0f초뿐이라(재추천 예약분 %.0f초 제외) 뉴스 검증을 건너뜁니다 "
+                "(최소 %d초).",
+                remaining, reserve_seconds, MIN_NEWS_VERIFY_SECONDS,
             )
             return {}
-        budget = remaining
+        budget = min(remaining, NEWS_VERIFY_MAX_SECONDS)
         try:
+            # `verify`가 어떤 이유로든 None을 돌려주면(실제로는 {}만 내지만 가짜 검증기가
+            # 더 느슨할 수 있다) 바로 아래 `_is_blocked`의 `.get`이 AttributeError로 샌다.
             return self.news_verifier.verify(
                 [(r.ticker, r.name) for r in recommendations], timeout_seconds=budget
-            )
+            ) or {}
         except Exception:
             logger.exception("뉴스 검증이 실패했습니다 — 추천을 그대로 씁니다.")
             return {}

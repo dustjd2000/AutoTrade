@@ -696,6 +696,26 @@ def test_user_prompt_without_excluded_tickers_has_no_exclusion_notice():
     assert "다시 추천하지 마십시오" not in prompt
 
 
+def test_user_prompt_lists_already_picked_tickers_with_a_different_notice():
+    """생존 종목은 악재 목록과 **다른 문구**로 실어야 한다 — 섞으면 악재로 오인된다."""
+    prompt = build_user_prompt(
+        [stock(ticker="005930")],
+        target_count=3,
+        exclude_tickers=("259960",),
+        already_picked=("000660",),
+    )
+    assert "000660" in prompt
+    assert "이미 오늘 추천에 선정됐습니다" in prompt
+    picked_line = next(line for line in prompt.splitlines() if "000660" in line)
+    assert "악재" not in picked_line
+
+
+def test_user_prompt_without_already_picked_has_no_duplicate_notice():
+    """생존 종목이 없으면(1차 추천) 중복 금지 문구 자체가 없다."""
+    prompt = build_user_prompt([stock(ticker="005930")])
+    assert "이미 오늘 추천에 선정됐습니다" not in prompt
+
+
 def test_default_prompt_keeps_locked_and_editable_sections_in_order():
     prompt = build_system_prompt(3)
     headers = [

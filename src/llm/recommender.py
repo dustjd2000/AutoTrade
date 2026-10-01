@@ -296,6 +296,7 @@ def build_user_prompt(
     daily_data: List[DailyStockData],
     target_count: int = 3,
     exclude_tickers: Iterable[str] = (),
+    already_picked: Iterable[str] = (),
 ) -> str:
     lines = [
         "코스피 대형주 데이터입니다. **전일(직전 거래일) 마감 지표**와 **오늘 장중 현재 지표**를",
@@ -353,6 +354,16 @@ def build_user_prompt(
         lines.append(
             f"\n**아래 종목은 장중 확인 결과 악재가 있어 제외됐습니다. 다시 추천하지 마십시오: "
             f"{', '.join(excluded)}**"
+        )
+
+    picked = tuple(already_picked)
+    if picked:
+        # 탈락분(exclude_tickers)과 **다른 문구**를 쓴다 — 같은 문구로 섞으면 생존
+        # 종목이 악재 종목으로 읽혀 LLM이 근거 없이 그 종목을 깎아내릴 수 있다. 이 종목은
+        # target_count를 채우려는 재추천이 중복으로 다시 고르는 것을 막기 위한 것뿐이다.
+        lines.append(
+            f"\n**아래 종목은 이미 오늘 추천에 선정됐습니다. 중복 추천하지 마십시오: "
+            f"{', '.join(picked)}**"
         )
     return "\n".join(lines)
 
@@ -557,15 +568,19 @@ class LLMRecommender:
         daily_data: List[DailyStockData],
         timeout_seconds: Optional[float] = None,
         exclude_tickers: Iterable[str] = (),
+        already_picked: Iterable[str] = (),
     ) -> Optional[List[StockRecommendation]]:
         """LLM 호출 및 응답 파싱. 실패/타임아웃/형식 오류 시 None을 반환하고 해당일 매수는 스킵된다.
 
         `exclude_tickers`는 뉴스 검증에서 탈락한 종목을 뺀 재추천에 쓴다 (PRD 5.5-B '뉴스 검증').
+        `already_picked`는 그 재추천에서 이미 살아남은 종목이다 — 재추천도 여전히
+        `target_count`개를 요구하므로, 이걸 알려주지 않으면 LLM이 생존 종목을 다시 골라
+        같은 종목에 배정액이 두 번 들어간다.
         """
         if timeout_seconds is None:
             timeout_seconds = budget_seconds(self.settings.buy_time, datetime.now())
         target_count = self.settings.target_stock_count
-        user_prompt = build_user_prompt(daily_data, target_count, exclude_tickers)
+        user_prompt = build_user_prompt(daily_data, target_count, exclude_tickers, already_picked)
         # 어떤 입력으로 그 추천이 나왔는지 남긴다 — 추천이 타당했는지 되짚을 유일한 근거다
         logger.info(
             "LLM 요청 (prompt_version=%s, 후보 %d종목, 예산 %.0f초):\n%s",
