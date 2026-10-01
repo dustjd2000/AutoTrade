@@ -54,6 +54,13 @@ MANUAL_ACTIONS: Dict[str, str] = {
     # 같은 이유로 '매수 예정' 표 아래에 둔다. 접수된 행을 고르면 미체결 주문 취소가
     # 나가므로 ORDER_ACTIONS에 넣는다 (확대 2026-08-26, PRD 5.10 '선택 삭제').
     "drop_plan": "선택 삭제",
+    # ①~⑤ 그리드가 아니라 설정 탭의 프롬프트 설정 옆에 둔다 — 하루 흐름의 단계가 아니라
+    # 프롬프트를 손보는 일이라, 매매 버튼들과 섞이면 성격이 흐려진다.
+    # 스케줄용 'tune_prompt'/'tune_exit_prompt'와 **다른 액션**인 것은 의도된 설계다:
+    # 이쪽만 월 순수익 게이트를 건너뛰고(force=True), 이름이 달라야 15:35 스케줄과
+    # 겹쳐 눌러도 ActionRunner의 중복 방지에 막히지 않고 순서대로 돈다.
+    "tune_prompt_force": "추천 프롬프트 강제 갱신",
+    "tune_exit_prompt_force": "매도 프롬프트 강제 갱신",
 }
 
 # 버튼에는 없고 스케줄러만 부르는 액션. 사용자에게 노출하지 않으므로 MANUAL_ACTIONS와
@@ -80,7 +87,9 @@ ORDER_ACTIONS = frozenset(
 
 # 확인 팝업이 필요한 액션. '선택 삭제'는 되돌릴 수 없다는 이유로 주문 액션이 되기 전부터
 # 여기 있었다 — 되돌리려면 LLM 추천을 다시 돌려야 하고, 그러면 추천 종목 자체가 달라진다.
-CONFIRM_ACTIONS = ORDER_ACTIONS
+# 프롬프트 강제 갱신은 주문을 내지 않지만(그래서 ORDER_ACTIONS가 아니다 — 실전 계좌 경고를
+# 붙이지 않는다) 사람 승인 없이 다음 거래일의 추천·매도 판단을 바꾸므로 한 번 확인한다.
+CONFIRM_ACTIONS = ORDER_ACTIONS | {"tune_prompt_force", "tune_exit_prompt_force"}
 
 
 @dataclass(frozen=True)
@@ -139,6 +148,22 @@ def manual_steps(runtime, action: str, tickers: Iterable[str] = ()) -> List[Manu
                 MANUAL_ACTIONS["drop_plan"],
                 lambda: runtime.workflow.drop_buy_plans(selected),
                 touches_orders=True,
+            )
+        ],
+        # 아래 스케줄 전용 'tune_prompt'/'tune_exit_prompt'와 같은 함수를 부르되 force=True다
+        # — 이번 달 순수익이 기준 이상이어도 건너뛰지 않는다. 표본이 모자랄 때 멈추는 것은
+        # 그대로다 (재료가 없으면 LLM이 고칠 근거 자체가 없다).
+        # LLM 호출과 파일 쓰기가 걸리므로 루프 스레드를 쓰지 않는다. 주문을 내지 않는다.
+        "tune_prompt_force": lambda: [
+            ManualStep(
+                MANUAL_ACTIONS["tune_prompt_force"],
+                lambda: runtime.workflow.tune_prompt(force=True),
+            )
+        ],
+        "tune_exit_prompt_force": lambda: [
+            ManualStep(
+                MANUAL_ACTIONS["tune_exit_prompt_force"],
+                lambda: runtime.workflow.tune_exit_prompt(force=True),
             )
         ],
         # ── 스케줄 전용 ──

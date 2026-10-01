@@ -1942,3 +1942,31 @@ def test_tune_prompt_is_skipped_when_the_month_is_good(tmp_path):
     workflow.tune_prompt(day)
 
     assert workflow.tuner.calls == []
+
+
+def test_force_runs_the_tuner_even_when_the_month_is_good(tmp_path):
+    """'강제 갱신' 버튼은 월 순수익 게이트를 건너뛴다."""
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 8)
+    _verified_recommendation(workflow, day)
+    workflow.trade_store.monthly_summary = lambda year, month, up_to: MonthlySummary(
+        realized_pnl=600_000.0, fees=0.0
+    )
+    workflow.tuner.result = SimpleNamespace(
+        change=True, reason="근거", sections={"outlook": LONG_OUTLOOK}
+    )
+
+    workflow.tune_prompt(day, force=True)
+
+    assert len(workflow.tuner.calls) == 1
+    assert workflow.prompt_store.load_version() == "20260908"
+
+
+def test_force_still_needs_a_verified_recommendation(tmp_path):
+    """표본 게이트는 강제로도 열리지 않는다 — 재료가 없으면 고칠 근거 자체가 없다."""
+    workflow = build_workflow(tmp_path)
+
+    workflow.tune_prompt(date(2026, 9, 8), force=True)
+
+    assert workflow.tuner.calls == []
+    assert workflow.email.sent == []

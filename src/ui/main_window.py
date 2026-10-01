@@ -229,6 +229,10 @@ class MainWindow(QMainWindow):
         self._checked_plans: set[str] = set()
         # 즉시 실행 버튼이 마지막으로 지시받은 활성 상태 (_set_actions_enabled 참고)
         self._actions_enabled = False
+        # 즉시 실행 버튼 레지스트리. 운영 탭에서 만들기 전에 설정 탭의 '프롬프트 강제 갱신'이
+        # 먼저 등록하므로(설정 탭을 먼저 짓는다 — _build_ui 주석 참고) 여기서 비워 둔다.
+        self._action_buttons: dict[str, QPushButton] = {}
+        self._action_accent: dict[str, bool] = {}
         self._setup_style()
         self._build_ui()
         self._setup_logging()
@@ -553,6 +557,28 @@ class MainWindow(QMainWindow):
             "검증 메일은 그대로 나갑니다."
         )
         fund_form.addRow("프롬프트 자동 수정", self._tune_skip_return)
+
+        # 15:35를 기다리지 않고 지금 고치게 한다. 위 설정(월 순수익 게이트)만 건너뛰므로
+        # 바로 아래 줄에 둔다 — 그 설정을 끄는 버튼이라는 관계가 보여야 한다.
+        tune_force_row = QHBoxLayout()
+        tune_force_row.setSpacing(8)
+        tune_force_row.addWidget(self._make_action_button("tune_prompt_force"))
+        tune_force_row.addWidget(self._make_action_button("tune_exit_prompt_force"))
+        fund_form.addRow("", tune_force_row)
+
+        # 고치지 않는 날이 정상이라(PRD 5.13) "눌렀는데 아무 일도 없다"를 고장으로 읽기 쉽다
+        tune_force_hint = QLabel(
+            "15:35를 기다리지 않고 지금 프롬프트 자동 수정을 돌립니다. 위의 월 순수익 기준은 "
+            "무시하지만, 검증 표본이 모자라면(추천 검증 0건 / 매도 검증 10건 미만) 그대로 "
+            "건너뜁니다.\n"
+            "AI가 고칠 것이 없다고 판단하면 아무 일도 일어나지 않습니다 — 정상입니다. "
+            "실제로 고친 경우에만 메일이 나가며, 진행 상황은 운영 탭의 실행 로그에서 봅니다. "
+            "엔진이 실행 중일 때만 누를 수 있습니다."
+        )
+        tune_force_hint.setWordWrap(True)
+        tune_force_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
+        fund_form.addRow(tune_force_hint)
+
         fund_form.addRow("예수금 투입 비율 (%)", self._investable_ratio)
         fund_form.addRow("추천 종목 수 (개)", self._target_stock_count)
 
@@ -722,8 +748,6 @@ class MainWindow(QMainWindow):
 
         grid = QGridLayout()
         grid.setSpacing(8)
-        self._action_buttons: dict[str, QPushButton] = {}
-        self._action_accent: dict[str, bool] = {}
         for index, action in enumerate(
             ("recommend", "buy", "cancel_unfilled", "sell_all", "report")
         ):
@@ -1706,6 +1730,16 @@ class MainWindow(QMainWindow):
                 "LLM 추천 + 메일 → 목표가 지정가 매수를 순서대로 실행합니다.\n"
                 f"{self._exit_watch_text()}\n"
                 "청산(15:15)과 최종 리포트(15:35)는 지금 실행하지 않고 예정 시각에 맡깁니다."
+            ),
+            "tune_prompt_force": (
+                "최근 추천 검증 결과를 AI에 넘겨 추천 프롬프트의 판단·서술 지침을 고칩니다.\n"
+                "이번 달 순수익이 기준 이상이어도 건너뛰지 않습니다.\n"
+                "사람 승인 절차가 없어 고쳐진 내용이 다음 추천부터 바로 쓰입니다."
+            ),
+            "tune_exit_prompt_force": (
+                "최근 매도 판단 검증 결과를 AI에 넘겨 매도 프롬프트의 편집 가능한 절을 고칩니다.\n"
+                "이번 달 순수익이 기준 이상이어도 건너뛰지 않습니다.\n"
+                "사람 승인 절차가 없어 고쳐진 내용이 다음 AI 매도 판단부터 바로 쓰입니다."
             ),
         }[action]
         # 주문이 나가지 않는 액션(선택 삭제)에는 실전 계좌 경고를 붙이지 않는다 — 매번 같은

@@ -1379,11 +1379,14 @@ class DailyWorkflow:
         for row in rows:
             row.review = (reviews or {}).get(row.ticker, "")
 
-    def tune_prompt(self, today: Optional[date] = None) -> None:
+    def tune_prompt(self, today: Optional[date] = None, force: bool = False) -> None:
         """15:35 — 최근 추천 성과를 보고 추천 프롬프트의 다섯 절을 자동으로 고친다.
 
         추천 검증 **다음**에 돈다 — 그날 검증이 끝나야 판단 재료가 완성된다. 고친 날만
         메일이 나가고, 고치지 않는 날이 정상 동작이다 (PRD '프롬프트 자동 수정').
+
+        `force`는 UI '강제 갱신' 버튼이 쓴다 — 월 순수익 게이트만 건너뛴다. 검증된 추천이
+        없을 때 멈추는 것은 그대로다: 재료가 없으면 고칠 근거 자체가 없다.
 
         어떤 실패도 매매 흐름을 막지 않는다. 고치지 못하면 다음 거래일 추천은 이전
         프롬프트로 그대로 돈다.
@@ -1391,7 +1394,7 @@ class DailyWorkflow:
         today = today or date.today()
         if self.tuner is None:
             return
-        if self._tuning_blocked_by_monthly_return(today):
+        if not force and self._tuning_blocked_by_monthly_return(today):
             return
 
         rows = self.trade_store.recent_recommendations()
@@ -1437,16 +1440,19 @@ class DailyWorkflow:
         self.email.send(subject, body)
         logger.info("프롬프트 수정 메일 발송 (%s, %s → %s)", today, old_version, new_version)
 
-    def tune_exit_prompt(self, today: Optional[date] = None) -> None:
+    def tune_exit_prompt(self, today: Optional[date] = None, force: bool = False) -> None:
         """15:35 — 매도 판단 검증 결과를 보고 매도 프롬프트의 편집 가능한 절을 고친다 (스펙 4절).
 
         매도 판단 검증 **다음**에 돈다. 게이트는 순서대로 월 순수익(4-A) → 표본 10건(4.3)이고,
         둘 다 LLM 호출 전에 코드가 본다. 고친 날만 메일이 나가고, 고치지 않는 날이 정상이다.
+
+        `force`는 UI '강제 갱신' 버튼이 쓴다 — `tune_prompt`와 같이 월 순수익 게이트만
+        건너뛰고, 표본 10건 요건은 그대로 본다.
         """
         today = today or date.today()
         if self.exit_tuner is None:
             return
-        if self._tuning_blocked_by_monthly_return(today):
+        if not force and self._tuning_blocked_by_monthly_return(today):
             return
 
         old_version = self.exit_prompt_store.load_version()

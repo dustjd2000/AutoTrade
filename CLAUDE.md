@@ -93,7 +93,11 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   대조해 `exit_reviews`에 남기고 메일로 보내며(PRD 5.14절), `DailyWorkflow.tune_exit_prompt`가
   그 결과로 매도 프롬프트의 편집 가능한 세 절을 같은 방식으로 고친다(PRD 5.15절). 두 자동
   수정 모두 이번 달 순수익률이 `TUNE_SKIP_MONTHLY_RETURN_PERCENT`(기본 5%) 이상이면 부르지
-  않고 건너뛴다 — 잘 되고 있으면 흔들지 않는다.
+  않고 건너뛴다 — 잘 되고 있으면 흔들지 않는다. 다만 **설정 탭의 '강제 갱신' 버튼 둘**
+  (`tune_prompt_force`/`tune_exit_prompt_force` → `force=True`)은 이 월 순수익 게이트만
+  건너뛴다 — 표본 게이트(추천 검증 0건 / 매도 검증 10건 미만)는 강제로도 열리지 않는다.
+  스케줄용 액션과 **이름이 다른 별개 액션**이라 15:35와 겹쳐 눌러도 `ActionRunner`의 중복
+  방지에 막히지 않고 순서대로 돈다 (PRD 5.13·5.15절 "강제 갱신 버튼").
 - 새 전략을 추가할 때는 `BaseStrategy`를 구현하는 새 모듈만 추가하면 되고, 나머지
   (주문 실행/리스크/로깅)는 그대로 재사용된다 — 단, 시간 기반 전략이라면 1호 전략처럼
   `DailyWorkflow`류의 오케스트레이션을 별도로 붙여야 한다.

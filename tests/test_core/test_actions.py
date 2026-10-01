@@ -4,6 +4,7 @@ import pytest
 
 from src.core.actions import (
     ACTION_LABELS,
+    CONFIRM_ACTIONS,
     MANUAL_ACTIONS,
     ORDER_ACTIONS,
     SCHEDULED_ACTIONS,
@@ -21,9 +22,15 @@ def make_runtime(calls):
         send_final_report=lambda: calls.append("final_report"),
         drop_buy_plans=lambda tickers: calls.append(f"drop_plan:{','.join(tickers)}"),
         review_recommendations=lambda: calls.append("review_recommendations"),
-        tune_prompt=lambda: calls.append("tune_prompt"),
+        # 스케줄은 인자 없이, '강제 갱신' 버튼은 force=True로 부른다 — 어느 쪽으로 불렸는지
+        # 기록해야 버튼이 월 순수익 게이트를 건너뛰는지 검사할 수 있다
+        tune_prompt=lambda force=False: calls.append(
+            "tune_prompt_force" if force else "tune_prompt"
+        ),
         review_exits=lambda: calls.append("review_exits"),
-        tune_exit_prompt=lambda: calls.append("tune_exit_prompt"),
+        tune_exit_prompt=lambda force=False: calls.append(
+            "tune_exit_prompt_force" if force else "tune_exit_prompt"
+        ),
     )
     engine = SimpleNamespace(
         force_close_all_positions=lambda reason="day_end": calls.append(f"sell_all:{reason}"),
@@ -119,6 +126,35 @@ def test_exit_review_steps_are_scheduled_only_and_off_the_loop(action):
     for step in steps:
         step.run()
     assert calls == [action]
+
+
+@pytest.mark.parametrize("action", ["tune_prompt_force", "tune_exit_prompt_force"])
+def test_force_tune_steps_are_buttons_that_do_not_order(action):
+    """설정 탭 버튼이므로 MANUAL이되, 주문을 내지 않으니 실전 계좌 경고는 붙지 않는다."""
+    assert action in MANUAL_ACTIONS
+    assert action not in SCHEDULED_ACTIONS
+    assert action not in ORDER_ACTIONS
+    assert action in CONFIRM_ACTIONS
+
+
+@pytest.mark.parametrize("action", ["tune_prompt_force", "tune_exit_prompt_force"])
+def test_force_tune_steps_run_off_the_loop_thread_with_force(action):
+    """LLM 호출이 걸려 루프를 막으면 안 되고, 월 순수익 게이트를 건너뛰어야 한다."""
+    calls = []
+    steps = manual_steps(make_runtime(calls), action)
+    assert [s.touches_orders for s in steps] == [False]
+    for step in steps:
+        step.run()
+    assert calls == [action]
+
+
+def test_force_tune_is_a_separate_action_from_the_schedule():
+    """같은 액션이면 15:35 스케줄과 겹쳐 누를 때 중복 방지에 막힌다."""
+    calls = []
+    runner = ActionRunner(make_runtime(calls))
+
+    assert drain(runner, ["tune_prompt", "tune_prompt_force"]) == [True, True]
+    assert calls == ["tune_prompt", "tune_prompt_force"]
 
 
 def test_every_action_has_a_label_and_steps():

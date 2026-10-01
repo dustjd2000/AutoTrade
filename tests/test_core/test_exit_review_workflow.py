@@ -256,6 +256,40 @@ def test_exit_tuning_is_skipped_when_the_balance_is_unknown(tmp_path):
     assert workflow.exit_tuner.calls == []
 
 
+def test_exit_tuning_force_ignores_the_monthly_bar(tmp_path):
+    """'강제 갱신' 버튼은 월 순수익 게이트를 건너뛴다."""
+    workflow = tuning_workflow(tmp_path)
+    monthly(workflow, 600_000.0)  # 게이트에 걸리는 +5.26%
+    workflow.exit_tuner.result = SimpleNamespace(change=True, reason="놓침 10건", sections={"time": LONG_TIME})
+
+    workflow.tune_exit_prompt(date(2026, 9, 29), force=True)
+
+    assert len(workflow.exit_tuner.calls) == 1
+    assert workflow.exit_prompt_store.load_version() == "20260929"
+
+
+def test_exit_tuning_force_still_waits_for_ten_reviews(tmp_path):
+    """표본 게이트는 강제로도 열리지 않는다."""
+    workflow = tuning_workflow(tmp_path, reviews=9)
+    workflow.tune_exit_prompt(date(2026, 9, 29), force=True)
+    assert workflow.exit_tuner.calls == []
+
+
+def test_exit_tuning_force_ignores_an_unknown_balance(tmp_path):
+    """잔고 조회가 실패해도(= 월 순수익 불명) 강제 갱신은 돈다 — 같은 게이트다."""
+    workflow = tuning_workflow(tmp_path)
+
+    def boom():
+        raise RuntimeError("token")
+
+    workflow.account.get_balance_snapshot = boom
+    workflow.exit_tuner.result = SimpleNamespace(change=False, reason="표본 부족", sections={})
+
+    workflow.tune_exit_prompt(date(2026, 9, 29), force=True)
+
+    assert len(workflow.exit_tuner.calls) == 1
+
+
 def test_exit_tuning_skips_without_a_tuner(tmp_path):
     workflow = tuning_workflow(tmp_path)
     workflow.exit_tuner = None
