@@ -18,10 +18,16 @@ from typing import Dict, List, Optional, Tuple
 import anthropic
 
 from config.settings import Settings
+from src.llm.recommender import _extract_json
 
 logger = logging.getLogger(__name__)
 
-MAX_TOKENS = 2000
+# 관측 출력 토큰이 957·798이었다 (effort=low, max_uses=3, 2종목 실측) — 2000으로는
+# 빠듯했다. Sonnet 5는 adaptive thinking이 기본 on이라 thinking 토큰도 이 예산을 함께
+# 쓰고, 여기에 웹검색까지 돈다. `max_tokens`에 걸리면 stop_reason="max_tokens" →
+# `_verify_one`이 None을 돌려줘 그 종목이 "조용히 통과"로 떨어진다 — 악재를 걸러내야
+# 할 종목을 못 거르는 쪽으로 실패하므로, 관측값의 여유를 넉넉히 두고 8000으로 올렸다.
+MAX_TOKENS = 8000
 # 검색 횟수 상한. 늘리면 느려지고(실측 5회에서 117초) 줄이면 확인을 못 한다.
 MAX_SEARCHES_PER_TICKER = 3
 
@@ -98,16 +104,6 @@ def parse_news_verdict(ticker: str, raw_text: str) -> NewsVerdict:
         blocking=data.get("blocking") is True,
         reason=str(data.get("reason", "")).strip(),
     )
-
-
-def _extract_json(raw_text: str) -> str:
-    """구조화 출력이라 보통 그대로지만, 코드펜스가 붙어 오는 경우를 한 번 벗긴다."""
-    text = raw_text.strip()
-    if text.startswith("```"):
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
-    return text.strip()
 
 
 class NewsVerifier:

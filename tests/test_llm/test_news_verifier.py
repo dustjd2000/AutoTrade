@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 from src.llm.news_verifier import (
+    MAX_SEARCHES_PER_TICKER,
     NewsVerdict,
     NewsVerifier,
     build_news_system_prompt,
@@ -49,9 +50,17 @@ def test_user_prompt_names_the_stock():
 
 
 def _verifier(responder):
-    """스트리밍 호출만 가짜로 바꾼 검증기."""
+    """스트리밍 호출만 가짜로 바꾼 검증기.
+
+    `with_options`와 `messages.stream`에 실제로 들어온 kwargs를 `v.calls`에
+    (with_options kwargs, stream kwargs) 튜플로 기록한다 — `tools`/`output_config`/
+    `model`/`max_retries`를 검증하려면 이것 없이는 호출 내용을 볼 방법이 없다
+    (그 전까지는 `messages`만 들여다봐서 `tools`를 통째로 지워도 테스트가 통과했다).
+    병렬 호출이라 순서는 보장하지 않는다.
+    """
     v = NewsVerifier.__new__(NewsVerifier)
     v.settings = SimpleNamespace(anthropic_api_key="k", llm_model="claude-sonnet-5")
+    v.calls = []
 
     class _Stream:
         def __init__(self, text):
@@ -72,12 +81,14 @@ def _verifier(responder):
                 content=[SimpleNamespace(type="text", text=self._text)],
             )
 
-    def stream(**kwargs):
-        return _Stream(responder(kwargs))
+    def with_options(**wo_kwargs):
+        def stream(**kwargs):
+            v.calls.append((wo_kwargs, kwargs))
+            return _Stream(responder(kwargs))
 
-    v._client = SimpleNamespace(
-        with_options=lambda **_: SimpleNamespace(messages=SimpleNamespace(stream=stream))
-    )
+        return SimpleNamespace(messages=SimpleNamespace(stream=stream))
+
+    v._client = SimpleNamespace(with_options=with_options)
     return v
 
 
@@ -112,3 +123,41 @@ def test_verify_drops_a_ticker_whose_call_fails():
 
 def test_verify_returns_empty_for_no_items():
     assert _verifier(lambda k: "{}").verify([], timeout_seconds=60) == {}
+
+
+def test_verify_requests_the_web_search_tool_with_the_configured_max_uses():
+    """`tools`를 빼먹어도 지금까지의 테스트는 통과했다 — 이게 그걸 막는 테스트다."""
+    v = _verifier(lambda k: json.dumps({"checked": True, "blocking": False, "reason": "r"}))
+    v.verify([("259960", "크래프톤")], timeout_seconds=60)
+
+    _, stream_kwargs = v.calls[0]
+    assert stream_kwargs["tools"] == [
+        {"type": "web_search_20260209", "name": "web_search", "max_uses": MAX_SEARCHES_PER_TICKER}
+    ]
+
+
+def test_verify_requests_low_effort_json_schema_output():
+    v = _verifier(lambda k: json.dumps({"checked": True, "blocking": False, "reason": "r"}))
+    v.verify([("259960", "크래프톤")], timeout_seconds=60)
+
+    _, stream_kwargs = v.calls[0]
+    assert stream_kwargs["output_config"]["effort"] == "low"
+    assert stream_kwargs["output_config"]["format"]["type"] == "json_schema"
+
+
+def test_verify_uses_the_configured_model_not_a_hardcoded_one():
+    v = _verifier(lambda k: json.dumps({"checked": True, "blocking": False, "reason": "r"}))
+    v.settings.llm_model = "claude-opus-5"
+    v.verify([("259960", "크래프톤")], timeout_seconds=60)
+
+    _, stream_kwargs = v.calls[0]
+    assert stream_kwargs["model"] == "claude-opus-5"
+
+
+def test_verify_disables_retries():
+    """재시도가 켜져 있으면 예산(timeout_seconds)을 배로 쓴다 — 추천/매도 판단과 같은 이유."""
+    v = _verifier(lambda k: json.dumps({"checked": True, "blocking": False, "reason": "r"}))
+    v.verify([("259960", "크래프톤")], timeout_seconds=60)
+
+    with_options_kwargs, _ = v.calls[0]
+    assert with_options_kwargs["max_retries"] == 0
