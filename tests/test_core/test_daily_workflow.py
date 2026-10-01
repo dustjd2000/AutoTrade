@@ -1992,6 +1992,114 @@ def test_tune_prompt_is_skipped_when_the_month_is_good(tmp_path):
     assert workflow.tuner.calls == []
 
 
+# ── 검증 메일에 자동 수정 결과를 싣는다 (2026-10-01) ─────────
+def _review_day(workflow, day):
+    """오늘 추천 한 건 + 당일 봉 — review_recommendations가 검증 메일을 보내는 조건."""
+    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
+    workflow.collector.market_data.today_metrics = {"005930": _metrics()}
+
+
+def _review_mail(workflow):
+    [mail] = [m for m in workflow.email.sent if "추천 검증" in m[0]]
+    return mail[1]
+
+
+def test_review_mail_reports_the_prompt_change(tmp_path):
+    """검증 메일은 자동 수정이 끝난 **뒤**에 나가, 그 결과를 함께 싣는다."""
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 8)
+    _review_day(workflow, day)
+    workflow.tuner.result = SimpleNamespace(
+        change=True, reason="목표가 미도달 반복", sections={"outlook": LONG_OUTLOOK}
+    )
+
+    workflow.review_recommendations(day)
+
+    assert len(workflow.tuner.calls) == 1, "검증이 자동 수정을 직접 부른다"
+    body = _review_mail(workflow)
+    assert f"수정함 ({PROMPT_TEMPLATE_VERSION} → 20260908)" in body
+    assert "목표가 미도달 반복" in body
+    # 전후 비교가 담긴 수정 메일은 종전대로 따로 나간다
+    assert any("추천 프롬프트 수정" in m[0] for m in workflow.email.sent)
+
+
+def test_review_mail_reports_the_tuners_reason_for_no_change(tmp_path):
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 8)
+    _review_day(workflow, day)
+    workflow.tuner.result = SimpleNamespace(change=False, reason="표본이 얇다", sections={})
+
+    workflow.review_recommendations(day)
+
+    assert "수정 안 함 — 표본이 얇다" in _review_mail(workflow)
+    assert len(workflow.email.sent) == 1, "고치지 않은 날은 수정 메일이 없다"
+
+
+def test_review_mail_reports_the_monthly_gate(tmp_path):
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 8)
+    _review_day(workflow, day)
+    workflow.trade_store.monthly_summary = lambda year, month, up_to: MonthlySummary(
+        realized_pnl=600_000.0, fees=0.0
+    )
+
+    workflow.review_recommendations(day)
+
+    assert workflow.tuner.calls == []
+    # 월초 자산 추정치 = 12,000,000 - 600,000 → 600,000 / 11,400,000 = +5.26%
+    assert "수정 안 함 — 이번 달 순수익 +5.26% ≥ 기준 5.0%" in _review_mail(workflow)
+
+
+def test_review_mail_reports_a_tuner_failure(tmp_path):
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 8)
+    _review_day(workflow, day)
+    workflow.tuner.result = None
+
+    workflow.review_recommendations(day)
+
+    assert "수정 안 함 — 판단 실패" in _review_mail(workflow)
+
+
+def test_review_mail_has_no_tuning_block_without_a_tuner(tmp_path):
+    workflow = build_workflow(tmp_path)
+    workflow.tuner = None
+    day = date(2026, 9, 8)
+    _review_day(workflow, day)
+
+    workflow.review_recommendations(day)
+
+    assert "프롬프트 자동 수정" not in _review_mail(workflow)
+
+
+def test_tuning_still_runs_on_a_day_without_recommendations(tmp_path):
+    """오늘 추천이 없어도 최근 10거래일 검증 결과로는 고칠 수 있다 — 종전 스케줄과 같다."""
+    workflow = build_workflow(tmp_path)
+    _verified_recommendation(workflow, date(2026, 9, 7))
+    workflow.tuner.result = SimpleNamespace(change=False, reason="r", sections={})
+
+    workflow.review_recommendations(date(2026, 9, 8))
+
+    assert len(workflow.tuner.calls) == 1
+    assert workflow.email.sent == [], "검증할 추천이 없으니 검증 메일은 없다"
+
+
+def test_review_mail_is_sent_even_if_tuning_raises(tmp_path):
+    """자동 수정에서 예상 못 한 예외가 나도 검증 메일은 나간다."""
+    workflow = build_workflow(tmp_path)
+    day = date(2026, 9, 8)
+    _review_day(workflow, day)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("tuner exploded")
+
+    workflow.tuner.tune = boom
+
+    workflow.review_recommendations(day)
+
+    assert "수정 안 함 — 판단 실패" in _review_mail(workflow)
+
+
 def test_force_runs_the_tuner_even_when_the_month_is_good(tmp_path):
     """'강제 갱신' 버튼은 월 순수익 게이트를 건너뛴다."""
     workflow = build_workflow(tmp_path)

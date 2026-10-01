@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from src.core.events import BuyExecution, BuyOutcome, BuyRecord, UnsellableView
+from src.core.events import BuyExecution, BuyOutcome, BuyRecord, TuningOutcome, UnsellableView
 from src.llm.news_verifier import NewsVerdict
 from src.llm.recommender import StockRecommendation
 from src.llm.tuner import VersionStats
@@ -514,6 +514,28 @@ def test_recommendation_email_is_unchanged_without_verdicts():
     """검증을 끈 날에는 메일 모양이 종전과 같아야 한다."""
     _, body = templates.recommendation_email([_rec("005930", "삼성전자")], date(2026, 10, 1), 0.5, 2)
     assert "악재" not in body
+
+
+def test_review_email_reports_a_prompt_change():
+    """검증 메일만 봐도 오늘 프롬프트가 바뀌었는지 알 수 있어야 한다."""
+    tuning = TuningOutcome(changed=True, reason="목표가 미도달 반복", old_version="20260903", new_version="20261001")
+    _, body = templates.recommendation_review_email([], date(2026, 10, 1), tuning=tuning)
+    assert "■ 추천 프롬프트 자동 수정" in body
+    assert "수정함 (20260903 → 20261001)" in body
+    assert "목표가 미도달 반복" in body
+
+
+def test_review_email_reports_why_the_prompt_was_not_changed():
+    tuning = TuningOutcome(changed=False, reason="이번 달 순수익 +6.10% ≥ 기준 5.0%")
+    _, body = templates.exit_review_email([], [], date(2026, 10, 1), tuning=tuning)
+    assert "■ 매도 프롬프트 자동 수정" in body
+    assert "수정 안 함 — 이번 달 순수익 +6.10% ≥ 기준 5.0%" in body
+
+
+def test_review_email_has_no_tuning_block_without_an_outcome():
+    """자동 수정 단계가 없으면(튜너 없음) 블록 자체를 싣지 않는다."""
+    _, body = templates.recommendation_review_email([], date(2026, 10, 1))
+    assert "프롬프트 자동 수정" not in body
 
 
 def test_recommendation_email_does_not_hardcode_the_buy_time():

@@ -56,9 +56,10 @@ MANUAL_ACTIONS: Dict[str, str] = {
     "drop_plan": "선택 삭제",
     # ①~⑤ 그리드가 아니라 설정 탭의 프롬프트 설정 옆에 둔다 — 하루 흐름의 단계가 아니라
     # 프롬프트를 손보는 일이라, 매매 버튼들과 섞이면 성격이 흐려진다.
-    # 스케줄용 'tune_prompt'/'tune_exit_prompt'와 **다른 액션**인 것은 의도된 설계다:
-    # 이쪽만 월 순수익 게이트를 건너뛰고(force=True), 이름이 달라야 15:35 스케줄과
-    # 겹쳐 눌러도 ActionRunner의 중복 방지에 막히지 않고 순서대로 돈다.
+    # 스케줄용 'review_recommendations'/'review_exits'(그 안에서 자동 수정이 돈다)와
+    # **다른 액션**인 것은 의도된 설계다: 이쪽만 월 순수익 게이트를 건너뛰고(force=True),
+    # 이름이 달라야 15:35 스케줄과 겹쳐 눌러도 ActionRunner의 중복 방지에 막히지 않고
+    # 순서대로 돈다.
     "tune_prompt_force": "추천 프롬프트 강제 갱신",
     "tune_exit_prompt_force": "매도 프롬프트 강제 갱신",
 }
@@ -72,10 +73,9 @@ SCHEDULED_ACTIONS: Dict[str, str] = {
     "daily_reset": "일일 상태 초기화",
     "close_out": "마감 정리 (미체결 취소 + 전량 청산)",
     "daily_report": "최종 리포트 메일 (스케줄)",
-    "review_recommendations": "추천 검증 메일 (스케줄)",
-    "tune_prompt": "추천 프롬프트 자동 수정 (스케줄)",
-    "review_exits": "매도 판단 검증 메일 (스케줄)",
-    "tune_exit_prompt": "매도 프롬프트 자동 수정 (스케줄)",
+    # 프롬프트 자동 수정은 각 검증 안에서 돈다 — 수정 여부를 검증 메일에 싣기 위해서다 (2026-10-01)
+    "review_recommendations": "추천 검증·프롬프트 자동 수정 (스케줄)",
+    "review_exits": "매도 판단 검증·프롬프트 자동 수정 (스케줄)",
 }
 
 ACTION_LABELS: Dict[str, str] = {**MANUAL_ACTIONS, **SCHEDULED_ACTIONS}
@@ -150,7 +150,7 @@ def manual_steps(runtime, action: str, tickers: Iterable[str] = ()) -> List[Manu
                 touches_orders=True,
             )
         ],
-        # 아래 스케줄 전용 'tune_prompt'/'tune_exit_prompt'와 같은 함수를 부르되 force=True다
+        # 15:35 검증이 끝에서 부르는 것과 같은 함수를 부르되 force=True다
         # — 이번 달 순수익이 기준 이상이어도 건너뛰지 않는다. 표본이 모자랄 때 멈추는 것은
         # 그대로다 (재료가 없으면 LLM이 고칠 근거 자체가 없다).
         # LLM 호출과 파일 쓰기가 걸리므로 루프 스레드를 쓰지 않는다. 주문을 내지 않는다.
@@ -186,25 +186,17 @@ def manual_steps(runtime, action: str, tickers: Iterable[str] = ()) -> List[Manu
         "daily_report": lambda: [
             ManualStep(SCHEDULED_ACTIONS["daily_report"], runtime.workflow.send_final_report)
         ],
-        # 일봉 조회와 LLM 호출이 걸리므로 루프 스레드를 쓰지 않는다 (touches_orders=False).
-        # 주문을 내지 않으므로 실시간 감시와 직렬화할 이유도 없다.
+        # 일봉 조회·LLM 호출·프롬프트 파일 쓰기가 걸리므로 루프 스레드를 쓰지 않는다
+        # (touches_orders=False). 주문을 내지 않으므로 실시간 감시와 직렬화할 이유도 없다.
         "review_recommendations": lambda: [
             ManualStep(
                 SCHEDULED_ACTIONS["review_recommendations"],
                 runtime.workflow.review_recommendations,
             )
         ],
-        # LLM 호출과 파일 쓰기가 걸리므로 루프 스레드를 쓰지 않는다. 주문을 내지 않는다.
-        "tune_prompt": lambda: [
-            ManualStep(SCHEDULED_ACTIONS["tune_prompt"], runtime.workflow.tune_prompt)
-        ],
-        # 체결 동기화·LLM 호출이 걸리므로 루프 스레드를 쓰지 않는다. 주문을 내지 않는다.
+        # 체결 동기화·LLM 호출·프롬프트 파일 쓰기가 걸리므로 루프 스레드를 쓰지 않는다.
         "review_exits": lambda: [
             ManualStep(SCHEDULED_ACTIONS["review_exits"], runtime.workflow.review_exits)
-        ],
-        # LLM 호출과 파일 쓰기가 걸리므로 루프 스레드를 쓰지 않는다. 주문을 내지 않는다.
-        "tune_exit_prompt": lambda: [
-            ManualStep(SCHEDULED_ACTIONS["tune_exit_prompt"], runtime.workflow.tune_exit_prompt)
         ],
     }
     # 일괄 실행은 '진입'까지만 — 청산과 리포트는 스케줄에 맡긴다.

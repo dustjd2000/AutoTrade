@@ -295,3 +295,45 @@ def test_exit_tuning_skips_without_a_tuner(tmp_path):
     workflow.exit_tuner = None
     workflow.tune_exit_prompt(date(2026, 9, 29))
     assert workflow.email.sent == []
+
+
+# ── 검증 메일에 매도 프롬프트 자동 수정 결과를 싣는다 (2026-10-01) ──
+def _exit_review_mail(workflow):
+    [mail] = [m for m in workflow.email.sent if "매도 판단 검증" in m[0]]
+    return mail[1]
+
+
+def test_exit_review_mail_reports_the_prompt_change(tmp_path):
+    workflow = tuning_workflow(tmp_path)
+    samsung_life_day(workflow)
+    workflow.exit_tuner.result = SimpleNamespace(change=True, reason="놓침 10건", sections={"time": LONG_TIME})
+
+    workflow.review_exits(DAY)
+
+    assert len(workflow.exit_tuner.calls) == 1, "검증이 자동 수정을 직접 부른다"
+    body = _exit_review_mail(workflow)
+    assert f"수정함 ({EXIT_PROMPT_TEMPLATE_VERSION} → 20260922)" in body
+    assert "놓침 10건" in body
+    assert any("매도 프롬프트 수정" in m[0] for m in workflow.email.sent)
+
+
+def test_exit_review_mail_reports_the_sample_gate(tmp_path):
+    workflow = tuning_workflow(tmp_path, reviews=8)  # 오늘 1건(v2)은 현 버전 표본이 아니다
+    samsung_life_day(workflow)
+
+    workflow.review_exits(DAY)
+
+    assert workflow.exit_tuner.calls == []
+    assert "수정 안 함 — 현 버전" in _exit_review_mail(workflow)
+    assert "8건" in _exit_review_mail(workflow)
+
+
+def test_exit_tuning_still_runs_on_a_day_without_sells(tmp_path):
+    """매도가 없는 날도 쌓인 표본으로는 고칠 수 있다 — 종전 스케줄과 같다."""
+    workflow = tuning_workflow(tmp_path)
+    workflow.exit_tuner.result = SimpleNamespace(change=False, reason="r", sections={})
+
+    workflow.review_exits(DAY)
+
+    assert len(workflow.exit_tuner.calls) == 1
+    assert workflow.email.sent == []

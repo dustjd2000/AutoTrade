@@ -273,14 +273,12 @@ def build_runtime(settings: Settings) -> Runtime:
         (CANCEL_UNFILLED_TIME, "cancel_unfilled"),
         (FORCE_CLOSE_TIME, "close_out"),
         (REPORT_TIME, "daily_report"),
-        # 리포트 다음에 등록한다 — 같은 시각의 두 잡은 등록 순서대로 큐에 들어간다
+        # 리포트 다음에 등록한다 — 같은 시각의 두 잡은 등록 순서대로 큐에 들어간다.
+        # 프롬프트 자동 수정은 별도 잡이 아니다 — 각 검증이 끝에서 직접 부르고, 그 결과를
+        # 실어 검증 메일을 보낸다 (2026-10-01, PRD 5.13·5.15)
         (REPORT_TIME, "review_recommendations"),
-        # 검증 다음에 등록한다 — 그날 검증 결과가 이 단계의 판단 재료다
-        (REPORT_TIME, "tune_prompt"),
-        # 추천 쪽 다음에 등록한다 — 같은 시각의 잡은 등록 순서대로 큐에 들어간다.
-        # 검증이 먼저 끝나야 튜너가 오늘 결과까지 본다 (스펙 2026-09-22 3.1)
+        # 추천 쪽 다음에 등록한다 — 같은 시각의 잡은 등록 순서대로 큐에 들어간다
         (REPORT_TIME, "review_exits"),
-        (REPORT_TIME, "tune_exit_prompt"),
     ):
         scheduler.add_job(
             trigger_time,

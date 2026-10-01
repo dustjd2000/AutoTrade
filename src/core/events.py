@@ -229,3 +229,17 @@ class FillRecord:
     @property
     def label(self) -> str:
         return format_stock(self.ticker, self.name)
+
+
+@dataclass(frozen=True)
+class TuningOutcome:
+    """15:35 프롬프트 자동 수정 한 번의 결과 — 검증 메일 끝에 싣는다 (PRD 5.13·5.15).
+
+    고친 날은 `reason`이 LLM이 댄 수정 이유이고, 고치지 않은 날은 고치지 않은 사유
+    (월 순수익 게이트·표본 부족·LLM 판단·실패)다.
+    """
+
+    changed: bool
+    reason: str
+    old_version: str = ""
+    new_version: str = ""

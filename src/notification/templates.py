@@ -7,6 +7,7 @@ from src.core.events import (
     BuyExecution,
     BuyOutcome,
     BuyRecord,
+    TuningOutcome,
     UnsellableView,
     format_stock,
 )
@@ -126,13 +127,30 @@ def _price_move_line(row: RecommendationRow) -> str:
     return f"   {prefix}종가: {row.actual_close:,.0f}원{rate}"
 
 
+def _tuning_lines(title: str, tuning: Optional[TuningOutcome]) -> List[str]:
+    """검증 메일 끝의 자동 수정 결과 블록. 자동 수정 단계가 없으면(None) 싣지 않는다."""
+    if tuning is None:
+        return []
+    if tuning.changed:
+        lines = [
+            f"■ {title}",
+            f"   수정함 ({tuning.old_version} → {tuning.new_version}) — {tuning.reason}",
+            "   (전후 비교는 별도 수정 메일 참고)",
+        ]
+    else:
+        lines = [f"■ {title}", f"   수정 안 함 — {tuning.reason}"]
+    return lines + [""]
+
+
 def recommendation_review_email(
-    rows: List[RecommendationRow], today: date
+    rows: List[RecommendationRow], today: date, tuning: Optional[TuningOutcome] = None
 ) -> tuple[str, str]:
     """15:35 추천 검증 이메일 (PRD 5.5-B '추천 검증').
 
     일일 리포트와 별개의 메일이다 — 리포트는 보유 종목이 전부 매도되면 15:30 이전에 조기
     발송될 수 있고, 그때는 당일 고가·저가·종가가 아직 확정되지 않는다.
+
+    `tuning`은 바로 앞에 돈 추천 프롬프트 자동 수정의 결과다 (PRD 5.13).
 
     표가 없어 HTML을 함께 만들지 않는다. (제목, 평문)만 돌려준다.
     """
@@ -161,6 +179,7 @@ def recommendation_review_email(
             lines.append(f"   평가: {row.review}")
         lines.append("")
 
+    lines.extend(_tuning_lines("추천 프롬프트 자동 수정", tuning))
     lines.append("※ 목표 매수가·매도가와 전망은 참고 수치이며 주문에 사용되지 않습니다.")
     lines.append("※ 목표 매수가 '도달'은 당일 저가가 그 가격까지 내려왔다는 뜻이며, 실제 매수")
     lines.append("   여부는 매수 시각의 갭 판정과 10:10 미체결 취소가 따로 정합니다.")
@@ -217,12 +236,17 @@ def _ratio_text(ratio: Optional[float]) -> str:
 
 
 def exit_review_email(
-    rows: List[ExitReviewRow], decisions: List[AIExitDecisionRow], today: date
+    rows: List[ExitReviewRow],
+    decisions: List[AIExitDecisionRow],
+    today: date,
+    tuning: Optional[TuningOutcome] = None,
 ) -> tuple[str, str]:
     """15:35 매도 판단 검증 이메일 (스펙 2026-09-22 3.4).
 
     잣대는 순수익이다 — 분류(순이익 확정/놓침/기회 없음)가 맨 앞에 온다. 표가 없어
     HTML을 함께 만들지 않는다. (제목, 평문)만 돌려준다.
+
+    `tuning`은 바로 앞에 돈 매도 프롬프트 자동 수정의 결과다 (PRD 5.15).
     """
     known = [r.net_pnl for r in rows if r.net_pnl is not None]
     total = sum(known)
@@ -256,6 +280,7 @@ def exit_review_email(
             lines.append(f"   평가: {row.review}")
         lines.append("")
 
+    lines.extend(_tuning_lines("매도 프롬프트 자동 수정", tuning))
     lines.append("※ 순손익은 수수료·세금을 뺀 값입니다. 고점은 엔진이 켜져 있던 동안만 잽니다.")
     return subject, "\n".join(lines)
 

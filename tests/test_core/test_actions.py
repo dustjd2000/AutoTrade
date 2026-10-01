@@ -22,8 +22,8 @@ def make_runtime(calls):
         send_final_report=lambda: calls.append("final_report"),
         drop_buy_plans=lambda tickers: calls.append(f"drop_plan:{','.join(tickers)}"),
         review_recommendations=lambda: calls.append("review_recommendations"),
-        # 스케줄은 인자 없이, '강제 갱신' 버튼은 force=True로 부른다 — 어느 쪽으로 불렸는지
-        # 기록해야 버튼이 월 순수익 게이트를 건너뛰는지 검사할 수 있다
+        # '강제 갱신' 버튼은 force=True로 부른다 — 어느 쪽으로 불렸는지 기록해야 버튼이
+        # 월 순수익 게이트를 건너뛰는지 검사할 수 있다 (스케줄 쪽은 검증 안에서 부른다)
         tune_prompt=lambda force=False: calls.append(
             "tune_prompt_force" if force else "tune_prompt"
         ),
@@ -101,20 +101,14 @@ def test_review_recommendations_step_runs_off_the_loop_thread():
     assert steps[0].touches_orders is False
 
 
-def test_tune_prompt_step_is_scheduled_only():
-    assert "tune_prompt" in SCHEDULED_ACTIONS
-    assert "tune_prompt" not in MANUAL_ACTIONS
-    assert "tune_prompt" not in ORDER_ACTIONS
+@pytest.mark.parametrize("action", ["tune_prompt", "tune_exit_prompt"])
+def test_tuning_is_not_a_separate_scheduled_step(action):
+    """자동 수정은 각 검증 안에서 돈다 — 수정 여부를 검증 메일에 싣기 위해서다 (2026-10-01)."""
+    assert action not in SCHEDULED_ACTIONS
+    assert action not in MANUAL_ACTIONS
 
 
-def test_tune_prompt_step_runs_off_the_loop_thread():
-    runtime = make_runtime([])
-    steps = manual_steps(runtime, "tune_prompt")
-    assert len(steps) == 1
-    assert steps[0].touches_orders is False
-
-
-@pytest.mark.parametrize("action", ["review_exits", "tune_exit_prompt"])
+@pytest.mark.parametrize("action", ["review_recommendations", "review_exits"])
 def test_exit_review_steps_are_scheduled_only_and_off_the_loop(action):
     """LLM 호출이 걸리므로 루프 스레드를 쓰지 않는다. 주문을 내지 않는다 (스펙 2026-09-22 3.1)."""
     assert action in SCHEDULED_ACTIONS
@@ -153,8 +147,8 @@ def test_force_tune_is_a_separate_action_from_the_schedule():
     calls = []
     runner = ActionRunner(make_runtime(calls))
 
-    assert drain(runner, ["tune_prompt", "tune_prompt_force"]) == [True, True]
-    assert calls == ["tune_prompt", "tune_prompt_force"]
+    assert drain(runner, ["review_recommendations", "tune_prompt_force"]) == [True, True]
+    assert calls == ["review_recommendations", "tune_prompt_force"]
 
 
 def test_every_action_has_a_label_and_steps():

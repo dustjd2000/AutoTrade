@@ -18,6 +18,7 @@ from src.core.events import (
     OrderSide,
     OrderStatus,
     OrderType,
+    TuningOutcome,
     format_stock,
 )
 from src.data.collector import DataCollector, market_looks_closed
@@ -80,6 +81,13 @@ def _is_market_closed_rejection(message: Optional[str]) -> bool:
     """주문 거부 사유가 '휴장'인지 (PRD 10절 '휴장일 자동 판정')."""
     text = message or ""
     return any(marker in text for marker in MARKET_CLOSED_REJECT_TEXTS)
+
+
+def _no_change_outcome(result) -> TuningOutcome:
+    """튜너가 고치지 않기로 했거나(change=False) 응답을 못 받은(None) 결과 — 두 프롬프트 공용."""
+    if result is None:
+        return TuningOutcome(changed=False, reason="판단 실패")
+    return TuningOutcome(changed=False, reason=getattr(result, "reason", "") or "고칠 필요 없음")
 
 # 잔고 대조로 접수 행을 옮길 때 쓰는 상태 (`_settled_row`) — 부분체결은 표에 남지만
 # 체크 열은 비운다. 남은 미체결분만 골라 취소하면 이미 체결된 몫까지 덮어쓰기 때문이다.
@@ -1304,22 +1312,31 @@ class DailyWorkflow:
             return False
 
     def review_recommendations(self, today: Optional[date] = None) -> None:
-        """15:35 — 오늘 추천한 종목의 실제 움직임을 대조해 저장하고 별도 메일로 보낸다.
+        """15:35 — 오늘 추천한 종목의 실제 움직임을 대조해 저장하고, 추천 프롬프트 자동 수정을
+        돌린 뒤 그 결과까지 실어 별도 메일로 보낸다.
 
         추천 목록은 메모리가 아니라 DB에서 읽는다 — 엔진이 장중에 재시작돼도 그날 검증이
         빠지지 않는다. 최종 리포트와 별개의 메일인 이유는 `recommendation_review_email`
         주석 참고 (리포트는 전량 매도 시 15:30 이전에 조기 발송될 수 있다).
+
+        자동 수정은 2026-10-01까지 별도 스케줄 단계였다. 검증 메일에 수정 여부를 싣기 위해
+        여기서 부른다 — 순서(검증 → 수정)는 그대로이고, 메일만 수정 **뒤**로 밀렸다.
+        오늘 추천이 없어도 자동 수정은 돈다 (최근 10거래일 검증 결과가 재료다).
         """
         today = today or date.today()
         rows = self.trade_store.recommendations_for(today)
-        if not rows:
+        if rows:
+            self._fill_actual_moves(today, rows)
+            self._fill_reviews(today, rows)
+        else:
             logger.info("오늘 추천 기록이 없습니다 — 검증을 건너뜁니다 (%s).", today)
+
+        # 검증 **다음**에 돈다 — 그날 검증 결과가 판단 재료다
+        tuning = self._tune_for_review_mail(self.tune_prompt, today)
+        if not rows:
             return
 
-        self._fill_actual_moves(today, rows)
-        self._fill_reviews(today, rows)
-
-        subject, body = templates.recommendation_review_email(rows, today)
+        subject, body = templates.recommendation_review_email(rows, today, tuning)
         self.email.send(subject, body)
         logger.info("추천 검증 메일 발송 (%s, %d종목)", today, len(rows))
 
@@ -1427,35 +1444,53 @@ class DailyWorkflow:
         monthly.base_asset = snapshot.total_asset - monthly.net_pnl
         return monthly
 
-    def _tuning_blocked_by_monthly_return(self, today: date) -> bool:
-        """이번 달 순수익률이 기준 이상이면 True — 두 프롬프트 모두 고치지 않는다 (스펙 4-A).
+    def _monthly_return_block_reason(self, today: date) -> Optional[str]:
+        """이번 달 순수익률이 기준 이상이면 그 사유 — 두 프롬프트 모두 고치지 않는다 (스펙 4-A).
 
-        수익률을 알 수 없으면(잔고 조회 실패·기준자산 0 이하) 역시 True — 아무것도 바꾸지
-        않는 것이 기본 상태다.
+        수익률을 알 수 없으면(잔고 조회 실패·기준자산 0 이하) 역시 사유를 돌려준다 — 아무것도
+        바꾸지 않는 것이 기본 상태다. 막지 않으면 None. 사유는 검증 메일에 그대로 실린다.
         """
         try:
             snapshot = self.account.get_balance_snapshot()
         except Exception:
             logger.warning("잔고 조회 실패 — 월 순수익을 알 수 없어 프롬프트를 고치지 않습니다.", exc_info=True)
-            return True
+            return "잔고 조회 실패로 이번 달 순수익을 알 수 없음"
         monthly = self._monthly_summary_with_base(today, snapshot)
         if monthly.base_asset <= 0:
             logger.warning("월초 자산 추정치가 0 이하라 월 순수익을 알 수 없어 프롬프트를 고치지 않습니다.")
-            return True
+            return "월초 자산 추정치가 0 이하라 이번 달 순수익을 알 수 없음"
         ratio = monthly.net_pnl / monthly.base_asset
         if ratio >= self.tune_skip_monthly_return_ratio:
             logger.info(
                 "이번 달 순수익 %+.2f%% ≥ 기준 %.1f%% — 프롬프트를 고치지 않습니다 (%s).",
                 ratio * 100, self.tune_skip_monthly_return_ratio * 100, today,
             )
-            return True
-        return False
+            return (
+                f"이번 달 순수익 {ratio * 100:+.2f}% ≥ 기준 "
+                f"{self.tune_skip_monthly_return_ratio * 100:.1f}%"
+            )
+        return None
+
+    @staticmethod
+    def _tune_for_review_mail(tune, today: date) -> Optional[TuningOutcome]:
+        """검증 메일에 실을 자동 수정 결과를 받는다. 예상 못 한 예외도 메일을 막지 않는다.
+
+        종전에는 자동 수정이 독립된 스케줄 단계라 거기서 난 예외가 검증 메일과 무관했다.
+        한 단계로 묶인 지금은 여기서 삼키지 않으면 검증 메일까지 함께 사라진다.
+        """
+        try:
+            return tune(today)
+        except Exception:
+            logger.exception("프롬프트 자동 수정이 실패했습니다 — 검증 메일은 그대로 보냅니다.")
+            return TuningOutcome(changed=False, reason="판단 실패")
 
     def review_exits(self, today: Optional[date] = None) -> None:
-        """15:35 — 오늘 매도한 종목의 순손익을 AI 매도 판단 이력과 대조해 남기고 메일로 보낸다.
+        """15:35 — 오늘 매도한 종목의 순손익을 AI 매도 판단 이력과 대조해 남기고, 매도
+        프롬프트 자동 수정을 돌린 뒤 그 결과까지 실어 메일로 보낸다.
 
         잣대는 순수익이다 (스펙 2026-09-22 1절). 분류는 코드가(`exit_review`), 평가문은 LLM이
-        쓴다. 매도가 없던 날은 아무것도 하지 않는다. 어떤 실패도 매매에 영향이 없다.
+        쓴다. 매도가 없던 날은 메일이 없지만 자동 수정은 돈다 (쌓인 표본이 재료다).
+        어떤 실패도 매매에 영향이 없다. 자동 수정을 여기서 부르는 이유는 `review_recommendations`.
         """
         today = today or date.today()
         self._sync_fills(today)
@@ -1468,18 +1503,22 @@ class DailyWorkflow:
             self.trade_store.last_exit_reasons(today),
             self.trade_store.tickers_with_unknown_pnl(today),
         )
-        if not rows:
+        if rows:
+            self._fill_exit_reviews(today, rows, decisions)
+            for row in rows:
+                try:
+                    self.trade_store.save_exit_review(row)
+                except Exception:
+                    logger.exception("매도 판단 검증 저장 실패: %s", row.label)
+        else:
             logger.info("오늘 매도한 종목이 없습니다 — 매도 판단 검증을 건너뜁니다 (%s).", today)
+
+        # 검증 **다음**에 돈다 — 오늘 저장한 검증 결과까지 표본에 든다 (스펙 2026-09-22 3.1)
+        tuning = self._tune_for_review_mail(self.tune_exit_prompt, today)
+        if not rows:
             return
 
-        self._fill_exit_reviews(today, rows, decisions)
-        for row in rows:
-            try:
-                self.trade_store.save_exit_review(row)
-            except Exception:
-                logger.exception("매도 판단 검증 저장 실패: %s", row.label)
-
-        subject, body = templates.exit_review_email(rows, decisions, today)
+        subject, body = templates.exit_review_email(rows, decisions, today, tuning)
         self.email.send(subject, body)
         logger.info("매도 판단 검증 메일 발송 (%s, %d종목)", today, len(rows))
 
@@ -1512,11 +1551,15 @@ class DailyWorkflow:
         for row in rows:
             row.review = (reviews or {}).get(row.ticker, "")
 
-    def tune_prompt(self, today: Optional[date] = None, force: bool = False) -> None:
+    def tune_prompt(
+        self, today: Optional[date] = None, force: bool = False
+    ) -> Optional[TuningOutcome]:
         """15:35 — 최근 추천 성과를 보고 추천 프롬프트의 다섯 절을 자동으로 고친다.
 
-        추천 검증 **다음**에 돈다 — 그날 검증이 끝나야 판단 재료가 완성된다. 고친 날만
-        메일이 나가고, 고치지 않는 날이 정상 동작이다 (PRD '프롬프트 자동 수정').
+        추천 검증(`review_recommendations`)이 그 끝에서 부른다 — 그날 검증이 끝나야 판단
+        재료가 완성된다. 고친 날만 수정 메일이 나가고, 고치지 않는 날이 정상 동작이다
+        (PRD '프롬프트 자동 수정'). 어느 쪽이든 결과를 돌려줘 검증 메일에 싣게 한다.
+        튜너가 없으면 None — 검증 메일에 블록을 싣지 않는다.
 
         `force`는 UI '강제 갱신' 버튼이 쓴다 — 월 순수익 게이트만 건너뛴다. 검증된 추천이
         없을 때 멈추는 것은 그대로다: 재료가 없으면 고칠 근거 자체가 없다.
@@ -1526,14 +1569,16 @@ class DailyWorkflow:
         """
         today = today or date.today()
         if self.tuner is None:
-            return
-        if not force and self._tuning_blocked_by_monthly_return(today):
-            return
+            return None
+        if not force:
+            blocked = self._monthly_return_block_reason(today)
+            if blocked:
+                return TuningOutcome(changed=False, reason=blocked)
 
         rows = self.trade_store.recent_recommendations()
         if not rows:
             logger.info("검증된 추천이 없습니다 — 프롬프트 수정을 건너뜁니다 (%s).", today)
-            return
+            return TuningOutcome(changed=False, reason="검증된 추천이 없음")
 
         stats = tuner_module.group_by_version(rows)
         before = self.prompt_store.load_sections()
@@ -1547,18 +1592,18 @@ class DailyWorkflow:
                 today,
                 getattr(result, "reason", "판단 실패"),
             )
-            return
+            return _no_change_outcome(result)
 
         sections = tuner_module.sanitize_sections(result.sections)
         if not sections:
             logger.warning("수정안이 안전장치에 전부 걸렸습니다 — 그대로 둡니다 (%s).", today)
-            return
+            return TuningOutcome(changed=False, reason="수정안이 안전장치에 전부 걸림")
 
         try:
             new_version = self.prompt_store.save(sections, result.reason, today)
         except OSError:
             logger.exception("프롬프트 파일 쓰기에 실패했습니다 — 그대로 둡니다.")
-            return
+            return TuningOutcome(changed=False, reason="프롬프트 파일 쓰기 실패")
 
         after = self.prompt_store.load_sections()
         subject, body = templates.prompt_tuning_email(
@@ -1572,21 +1617,29 @@ class DailyWorkflow:
         )
         self.email.send(subject, body)
         logger.info("프롬프트 수정 메일 발송 (%s, %s → %s)", today, old_version, new_version)
+        return TuningOutcome(
+            changed=True, reason=result.reason, old_version=old_version, new_version=new_version
+        )
 
-    def tune_exit_prompt(self, today: Optional[date] = None, force: bool = False) -> None:
+    def tune_exit_prompt(
+        self, today: Optional[date] = None, force: bool = False
+    ) -> Optional[TuningOutcome]:
         """15:35 — 매도 판단 검증 결과를 보고 매도 프롬프트의 편집 가능한 절을 고친다 (스펙 4절).
 
-        매도 판단 검증 **다음**에 돈다. 게이트는 순서대로 월 순수익(4-A) → 표본 10건(4.3)이고,
-        둘 다 LLM 호출 전에 코드가 본다. 고친 날만 메일이 나가고, 고치지 않는 날이 정상이다.
+        매도 판단 검증(`review_exits`)이 그 끝에서 부른다. 게이트는 순서대로 월 순수익(4-A) →
+        표본 10건(4.3)이고, 둘 다 LLM 호출 전에 코드가 본다. 고친 날만 수정 메일이 나가고,
+        고치지 않는 날이 정상이다. 결과는 `tune_prompt`와 같이 돌려줘 검증 메일에 싣는다.
 
         `force`는 UI '강제 갱신' 버튼이 쓴다 — `tune_prompt`와 같이 월 순수익 게이트만
         건너뛰고, 표본 10건 요건은 그대로 본다.
         """
         today = today or date.today()
         if self.exit_tuner is None:
-            return
-        if not force and self._tuning_blocked_by_monthly_return(today):
-            return
+            return None
+        if not force:
+            blocked = self._monthly_return_block_reason(today)
+            if blocked:
+                return TuningOutcome(changed=False, reason=blocked)
 
         old_version = self.exit_prompt_store.load_version()
         verified = self.trade_store.count_exit_reviews(old_version)
@@ -1595,7 +1648,13 @@ class DailyWorkflow:
                 "매도 프롬프트 %s로 검증된 종목이 %d건이라(기준 %d건) 고치지 않습니다 (%s).",
                 old_version, verified, exit_tuner_module.MIN_REVIEWS_FOR_TUNING, today,
             )
-            return
+            return TuningOutcome(
+                changed=False,
+                reason=(
+                    f"현 버전 {old_version} 검증 {verified}건 < 기준 "
+                    f"{exit_tuner_module.MIN_REVIEWS_FOR_TUNING}건"
+                ),
+            )
 
         rows = self.trade_store.recent_exit_reviews()
         stats = exit_tuner_module.group_by_version(rows)
@@ -1607,20 +1666,20 @@ class DailyWorkflow:
             logger.info(
                 "매도 프롬프트를 고치지 않습니다 (%s): %s", today, getattr(result, "reason", "판단 실패")
             )
-            return
+            return _no_change_outcome(result)
 
         sections = tuner_module.sanitize_sections(
             result.sections, EXIT_PROMPT_SECTION_ORDER, exit_tuner_module.MAX_SECTIONS_PER_CHANGE
         )
         if not sections:
             logger.warning("매도 프롬프트 수정안이 안전장치에 전부 걸렸습니다 — 그대로 둡니다 (%s).", today)
-            return
+            return TuningOutcome(changed=False, reason="수정안이 안전장치에 전부 걸림")
 
         try:
             new_version = self.exit_prompt_store.save(sections, result.reason, today)
         except OSError:
             logger.exception("매도 프롬프트 파일 쓰기에 실패했습니다 — 그대로 둡니다.")
-            return
+            return TuningOutcome(changed=False, reason="프롬프트 파일 쓰기 실패")
 
         after = self.exit_prompt_store.load_sections()
         subject, body = templates.exit_prompt_tuning_email(
@@ -1634,6 +1693,9 @@ class DailyWorkflow:
         )
         self.email.send(subject, body)
         logger.info("매도 프롬프트 수정 메일 발송 (%s, %s → %s)", today, old_version, new_version)
+        return TuningOutcome(
+            changed=True, reason=result.reason, old_version=old_version, new_version=new_version
+        )
 
     def _why_history(self) -> str:
         """직전 변경들의 이유 — `PromptStore.why_history`로 옮겼다 (매도 프롬프트와 공유)."""
