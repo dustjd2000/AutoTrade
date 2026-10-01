@@ -3,7 +3,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, time as dt_time
 from time import monotonic
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import anthropic
 
@@ -292,7 +292,11 @@ class StockRecommendation:
     outlook: str = ""
 
 
-def build_user_prompt(daily_data: List[DailyStockData], target_count: int = 3) -> str:
+def build_user_prompt(
+    daily_data: List[DailyStockData],
+    target_count: int = 3,
+    exclude_tickers: Iterable[str] = (),
+) -> str:
     lines = [
         "코스피 대형주 데이터입니다. **전일(직전 거래일) 마감 지표**와 **오늘 장중 현재 지표**를",
         "함께 제공합니다.",
@@ -342,6 +346,14 @@ def build_user_prompt(daily_data: List[DailyStockData], target_count: int = 3) -
         f"\n위 데이터를 참고해 오늘 급등이 예상되는 종목 {target_count}개와 "
         "각 종목의 목표 매수가·목표 매도가를 추천하세요."
     )
+
+    excluded = tuple(exclude_tickers)
+    if excluded:
+        # 재추천이다. 이유를 적지 않으면 "왜 빼라는지" 모른 채 비슷한 종목을 다시 고른다
+        lines.append(
+            f"\n**아래 종목은 장중 확인 결과 악재가 있어 제외됐습니다. 다시 추천하지 마십시오: "
+            f"{', '.join(excluded)}**"
+        )
     return "\n".join(lines)
 
 
@@ -541,13 +553,19 @@ class LLMRecommender:
         )
 
     def recommend(
-        self, daily_data: List[DailyStockData], timeout_seconds: Optional[float] = None
+        self,
+        daily_data: List[DailyStockData],
+        timeout_seconds: Optional[float] = None,
+        exclude_tickers: Iterable[str] = (),
     ) -> Optional[List[StockRecommendation]]:
-        """LLM 호출 및 응답 파싱. 실패/타임아웃/형식 오류 시 None을 반환하고 해당일 매수는 스킵된다."""
+        """LLM 호출 및 응답 파싱. 실패/타임아웃/형식 오류 시 None을 반환하고 해당일 매수는 스킵된다.
+
+        `exclude_tickers`는 뉴스 검증에서 탈락한 종목을 뺀 재추천에 쓴다 (PRD 5.5-B '뉴스 검증').
+        """
         if timeout_seconds is None:
             timeout_seconds = budget_seconds(self.settings.buy_time, datetime.now())
         target_count = self.settings.target_stock_count
-        user_prompt = build_user_prompt(daily_data, target_count)
+        user_prompt = build_user_prompt(daily_data, target_count, exclude_tickers)
         # 어떤 입력으로 그 추천이 나왔는지 남긴다 — 추천이 타당했는지 되짚을 유일한 근거다
         logger.info(
             "LLM 요청 (prompt_version=%s, 후보 %d종목, 예산 %.0f초):\n%s",

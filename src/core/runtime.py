@@ -39,6 +39,7 @@ from src.data.disclosure import DisclosureClient
 from src.llm.exit_advisor import ExitAdvisor, HoldingView, make_exit_prompt_store
 from src.llm.exit_reviewer import ExitReviewer
 from src.llm.exit_tuner import ExitPromptTuner
+from src.llm.news_verifier import NewsVerifier
 from src.llm.recommender import LLMRecommender
 from src.llm.reviewer import LLMReviewer
 from src.llm.tuner import PromptTuner
@@ -242,6 +243,9 @@ def build_runtime(settings: Settings) -> Runtime:
         buy_price_tolerance_ratio=settings.buy_price_tolerance_ratio,
         gap_down_tolerance_ratio=settings.gap_down_tolerance_ratio,
         ws_client=ws_client,
+        news_verifier=NewsVerifier(settings),
+        news_verify_enabled=settings.news_verify_enabled,
+        buy_time=settings.buy_time,
     )
     exit_advisor = ExitAdvisor(settings, prompt_store=exit_prompt_store)
 

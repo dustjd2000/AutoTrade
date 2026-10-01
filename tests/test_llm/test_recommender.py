@@ -678,6 +678,24 @@ def test_each_default_section_carries_its_own_header():
         assert text.lstrip().startswith("## "), key
 
 
+# ── 뉴스 검증 재추천 (exclude_tickers) ───────────────────────────────
+
+
+def test_user_prompt_lists_the_excluded_tickers():
+    """재추천에서 탈락 종목을 다시 고르면 루프가 된다 — 프롬프트가 알아야 한다."""
+    prompt = build_user_prompt(
+        [stock(ticker="005930")], target_count=2, exclude_tickers=("259960", "241560")
+    )
+    assert "259960" in prompt and "241560" in prompt
+    assert "다시 추천하지 마십시오" in prompt
+
+
+def test_user_prompt_without_excluded_tickers_has_no_exclusion_notice():
+    """제외 종목이 없는 평소 호출에는 재추천 문구가 섞이지 않는다."""
+    prompt = build_user_prompt([stock(ticker="005930")])
+    assert "다시 추천하지 마십시오" not in prompt
+
+
 def test_default_prompt_keeps_locked_and_editable_sections_in_order():
     prompt = build_system_prompt(3)
     headers = [

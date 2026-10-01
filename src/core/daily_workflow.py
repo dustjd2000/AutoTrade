@@ -2,8 +2,9 @@ import json
 import logging
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime
+from datetime import time as dt_time
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from src.api.account import AccountClient
 from src.core import exit_review
@@ -25,6 +26,7 @@ from src.llm import exit_tuner as exit_tuner_module
 from src.llm import reviewer as reviewer_module
 from src.llm import tuner as tuner_module
 from src.llm.exit_advisor import EXIT_PROMPT_SECTION_ORDER, build_exit_locked_text, make_exit_prompt_store
+from src.llm.news_verifier import NewsVerdict
 from src.llm.prompt_store import PromptStore
 from src.llm.recommender import LLMRecommender, build_locked_prompt_text, tick_size
 from src.logger.trade_store import MonthlySummary, TradeStore
@@ -33,6 +35,10 @@ from src.notification import chart, templates
 from src.strategy.llm_momentum import LLMMomentumStrategy
 
 logger = logging.getLogger(__name__)
+
+# 이보다 적게 남았으면 뉴스 검증을 건너뛴다 — 반쯤 하다 마는 것보다 안 하는 것이 낫다.
+# 2종목 병렬 실측이 30초이고 꼬리가 120초다 (스펙 2절).
+MIN_NEWS_VERIFY_SECONDS = 60
 
 # 최종 리포트를 보낸 날짜를 남기는 마커 파일. 인메모리 필드로 두면 엔진 재시작
 # (설정 저장·앱 재실행)마다 DailyWorkflow가 새로 만들어지면서 표시가 사라져,
@@ -111,6 +117,9 @@ class DailyWorkflow:
         buy_records_path: Optional[Path] = None,
         buy_price_tolerance_ratio: float = 0.02,
         gap_down_tolerance_ratio: float = 0.01,
+        news_verifier=None,
+        news_verify_enabled: bool = True,
+        buy_time: Optional[dt_time] = None,
     ):
         self.collector = collector
         self.recommender = recommender
@@ -159,6 +168,13 @@ class DailyWorkflow:
         self.buy_price_tolerance_ratio = buy_price_tolerance_ratio
         # 09:08 현재가가 추천 시점 가격보다 이만큼 넘게 낮으면 건너뛴다. 0이면 끈다 (_gap_note 참고)
         self.gap_down_tolerance_ratio = gap_down_tolerance_ratio
+        # 추천 종목의 악재를 웹검색으로 확인하는 모듈 (PRD 5.5-B '뉴스 검증'). None이면
+        # 검증 단계 자체를 건너뛴다 — 추천이 검증 이전과 같게 동작한다.
+        self.news_verifier = news_verifier
+        self.news_verify_enabled = news_verify_enabled
+        # `self.settings`가 없어 스칼라로 받는다 (buy_price_tolerance_ratio와 같은 꼴).
+        # None이면 매수 시각을 몰라 검증에 쓸 시간 예산을 계산할 수 없으므로 건너뛴다.
+        self.buy_time = buy_time
 
     # ── '매수 예정' 표 (PRD 5.10) ────────────────────────────
     def buy_plan_snapshot(self, today: Optional[date] = None) -> List[BuyPlanView]:
@@ -388,25 +404,86 @@ class DailyWorkflow:
             self.engine.notify("[경고] LLM 추천 실패/타임아웃 — 오늘 매수를 스킵합니다.")
             return
 
+        verdicts = self._verify_news(recommendations)
+        blocked = [r for r in recommendations if self._is_blocked(r.ticker, verdicts)]
+        if blocked:
+            # 탈락분을 빼고 **한 번만** 다시 추천받는다. 두 번째 재추천은 시간이 폭발하고,
+            # 세 번째 추천은 이미 두 번 걸러낸 뒤라 후보 질도 떨어진다 (스펙 4.1).
+            kept = [r for r in recommendations if r not in blocked]
+            excluded = tuple(r.ticker for r in blocked)
+            logger.info(
+                "뉴스 검증에서 %d종목이 탈락했습니다: %s — 제외하고 한 번 더 추천받습니다.",
+                len(blocked), ", ".join(excluded),
+            )
+            replacements = self.recommender.recommend(daily_data, exclude_tickers=excluded) or []
+            replacement_verdicts = self._verify_news(replacements)
+            verdicts.update(replacement_verdicts)
+            kept += [r for r in replacements if not self._is_blocked(r.ticker, replacement_verdicts)]
+            recommendations = kept
+
+        if not recommendations:
+            logger.error("뉴스 검증에서 추천 종목이 전부 탈락했습니다 — 오늘 매수를 스킵합니다.")
+            self.engine.notify("[경고] 추천 종목이 모두 악재로 탈락 — 오늘 매수를 스킵합니다.")
+            self._save_recommendations(today, [], verdicts)
+            return
+
         self.strategy.set_recommendations(recommendations)
         board = self._board_from_recommendations(recommendations)
         self._set_buy_board(today, board)
         self._watch_plan_prices([plan.ticker for plan in board])
-        self._save_recommendations(today, recommendations)
+        self._save_recommendations(today, recommendations, verdicts)
         subject, body = templates.recommendation_email(
             recommendations, today, self.strategy.investable_ratio, self.strategy.target_stock_count
         )
         self.email.send(subject, body)
         logger.info("Recommendation email sent for %s", today)
 
-    def _save_recommendations(self, today: date, recommendations) -> None:
+    def _verify_news(self, recommendations) -> Dict[str, NewsVerdict]:
+        """추천 종목의 악재를 확인한다. 어떤 실패도 빈 dict로 떨어진다 (= 전원 통과).
+
+        검증은 추가 안전장치지 관문이 아니다 — 막으면 그날 매매가 통째로 빠지고,
+        통과시키면 2026-10-01 이전과 같은 상태일 뿐이다.
+        """
+        if not self.news_verify_enabled or self.news_verifier is None or not recommendations:
+            return {}
+        if self.buy_time is None:
+            return {}
+        # `budget_seconds`를 쓰지 않는다 — 그쪽은 바닥이 MIN_BUDGET_SECONDS(120초)라
+        # 매수 시각이 이미 지났어도 120을 돌려준다. 추천 호출에는 그 바닥이 맞지만
+        # (늦더라도 추천은 나와야 한다), 검증은 늦으면 **안 하는 것이 맞다.**
+        buy_at = datetime.combine(date.today(), self.buy_time)
+        remaining = (buy_at - datetime.now()).total_seconds()
+        if remaining < MIN_NEWS_VERIFY_SECONDS:
+            logger.warning(
+                "매수까지 %.0f초뿐이라 뉴스 검증을 건너뜁니다 (최소 %d초).",
+                remaining, MIN_NEWS_VERIFY_SECONDS,
+            )
+            return {}
+        budget = remaining
+        try:
+            return self.news_verifier.verify(
+                [(r.ticker, r.name) for r in recommendations], timeout_seconds=budget
+            )
+        except Exception:
+            logger.exception("뉴스 검증이 실패했습니다 — 추천을 그대로 씁니다.")
+            return {}
+
+    @staticmethod
+    def _is_blocked(ticker: str, verdicts: Dict[str, NewsVerdict]) -> bool:
+        """판정이 없으면 통과다 — 호출 실패·형식 오류가 매수를 막으면 안 된다."""
+        verdict = verdicts.get(ticker)
+        return bool(verdict and verdict.blocking)
+
+    def _save_recommendations(
+        self, today: date, recommendations, verdicts: Optional[Dict[str, NewsVerdict]] = None
+    ) -> None:
         """추천을 DB에 남긴다 — 15:35 검증이 읽는 유일한 출처다 (PRD 5.5-B '추천 검증').
 
         실패해도 삼킨다. 기록은 사후 분석용이고, 매매가 그것 때문에 멈출 이유가 없다.
         """
         try:
             self.trade_store.save_recommendations(
-                today, recommendations, self.recommender.prompt_version
+                today, recommendations, self.recommender.prompt_version, verdicts
             )
         except Exception:
             logger.exception("추천 기록 저장에 실패했습니다 — 오늘 검증 메일이 비게 됩니다.")

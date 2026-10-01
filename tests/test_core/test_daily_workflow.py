@@ -1,4 +1,5 @@
 from datetime import date
+from datetime import time as dt_time
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,7 @@ from src.core.events import (
     OrderType,
 )
 from src.data.collector import DailyStockData
+from src.llm.news_verifier import NewsVerdict
 from src.llm.prompt_store import PromptStore
 from src.llm.recommender import PROMPT_TEMPLATE_VERSION, StockRecommendation
 from src.logger.trade_store import DailySummary, MonthlySummary, RecommendationRow, TradeRow, TradeStore
@@ -36,6 +38,19 @@ def buy_records_file(tmp_path, monkeypatch):
     path = tmp_path / "buy_records.json"
     monkeypatch.setattr(daily_workflow, "DEFAULT_BUY_RECORDS_PATH", path)
     return path
+
+
+@pytest.fixture(autouse=True)
+def news_verify_always_has_time(monkeypatch):
+    """`_verify_news`의 시간 가드(`MIN_NEWS_VERIFY_SECONDS`)가 벽시계에 의존하지 않게 한다.
+
+    가드는 "매수 시각까지 실제로 남은 시간"을 보므로, 테스트를 언제 돌리느냐에 따라
+    검증이 조용히 건너뛰어질 수 있다 — 그러면 "검증이 안 돌았는데 통과한 것처럼 보이는"
+    거짓 통과가 난다. 기본값을 터무니없이 낮춰 둬서 `remaining`이 얼마든 항상 가드를
+    통과하게 만든다. "시간이 없으면 건너뛴다" 자체를 확인하는 테스트만 자기 안에서
+    반대로(터무니없이 높게) 덮어써 건너뛰는 쪽을 확정적으로 재현한다.
+    """
+    monkeypatch.setattr(daily_workflow, "MIN_NEWS_VERIFY_SECONDS", -10**9)
 
 
 class FakeEmail:
@@ -1473,6 +1488,27 @@ class FakeTuner:
         return self.result
 
 
+class FakeRecommender:
+    """재추천(최대 1회, 뉴스 검증 탈락분 제외)을 검증하기 위한 가짜.
+
+    `results`는 호출될 때마다 하나씩 꺼내 쓰는 큐다 — 1차 추천과 재추천이 서로 다른
+    목록을 돌려줘야 재추천 로직(탈락분 제외 → 한 번 더 추천)을 검증할 수 있다.
+    `calls`에는 매 호출이 받은 키워드 인자를 쌓는다 — `exclude_tickers`가 실제로
+    넘어갔는지 보는 용도다. 큐가 바닥나면 추천 실패(None)와 같은 동작을 흉내낸다.
+    """
+
+    def __init__(self):
+        self.results = [[_recommendation()]]
+        self.calls = []
+        self.prompt_version = PROMPT_TEMPLATE_VERSION
+
+    def recommend(self, daily_data, **kwargs):
+        self.calls.append(kwargs)
+        if not self.results:
+            return None
+        return self.results.pop(0)
+
+
 def build_workflow(tmp_path):
     """recommend_and_notify가 진짜 TradeStore에 저장하는지 보는 테스트 전용 조립.
 
@@ -1515,9 +1551,7 @@ def build_workflow(tmp_path):
     )
     return DailyWorkflow(
         collector=SimpleNamespace(collect=lambda: daily_data, market_data=FakeMarketData()),
-        recommender=SimpleNamespace(
-            recommend=lambda d: [_recommendation()], prompt_version=PROMPT_TEMPLATE_VERSION
-        ),
+        recommender=FakeRecommender(),
         strategy=strategy,
         engine=engine,
         account=SimpleNamespace(
@@ -1530,6 +1564,13 @@ def build_workflow(tmp_path):
         reviewer=FakeReviewer(),
         tuner=FakeTuner(),
         prompt_store=PromptStore(tmp_path / "prompt"),
+        # 뉴스 검증은 기본적으로 꺼둔다(news_verifier=None) — 검증 동작은 아래 테스트들이
+        # workflow.news_verifier에 FakeVerifier를 끼워 넣어 개별적으로 켠다. buy_time은
+        # 반드시 줘야 한다 — None이면 `_verify_news`가 "예산을 모름"으로 보고 항상
+        # 건너뛰어, 검증 테스트들이 전부 거짓 통과한다.
+        news_verifier=None,
+        news_verify_enabled=True,
+        buy_time=dt_time(9, 8),
     )
 
 
@@ -1970,3 +2011,134 @@ def test_force_still_needs_a_verified_recommendation(tmp_path):
 
     assert workflow.tuner.calls == []
     assert workflow.email.sent == []
+
+
+# ── 뉴스 검증 재추천 (PRD 5.5-B '뉴스 검증') ─────────────────────────
+
+
+class FakeVerifier:
+    """NewsVerifier 대역 — 넘겨받은 종목코드를 calls에 쌓고, 미리 정한 판정만 돌려준다.
+
+    실제 NewsVerifier처럼 **판정이 난 종목만** dict에 담는다 — verdicts에 없는
+    종목코드는 '판정 없음(=통과)'을 그대로 흉내낸다.
+    """
+
+    def __init__(self):
+        self.calls = []
+        self.verdicts = {}
+
+    def verify(self, items, timeout_seconds):
+        self.calls.append([t for t, _ in items])
+        return {t: v for t, v in self.verdicts.items() if t in dict(items)}
+
+
+def test_clean_verdicts_do_not_trigger_a_second_recommendation(tmp_path):
+    """전원 통과면 재추천이 필요 없다 — 추천 호출은 한 번으로 끝난다."""
+    workflow = build_workflow(tmp_path)
+    workflow.news_verifier = FakeVerifier()
+    workflow.recommender.results = [[_recommendation("005930"), _recommendation("000660")]]
+
+    workflow.recommend_and_notify(date(2026, 10, 1))
+
+    assert len(workflow.recommender.calls) == 1
+    assert [r.ticker for r in workflow.strategy._recommendations] == ["005930", "000660"]
+
+
+def test_a_blocking_verdict_drops_the_stock_and_recommends_once_more(tmp_path):
+    """탈락 종목을 빼고 한 번 더 추천받아, 그 결과를 원래 추천에 더한다."""
+    workflow = build_workflow(tmp_path)
+    verifier = FakeVerifier()
+    verifier.verdicts = {
+        "005930": NewsVerdict("005930", checked=True, blocking=True, reason="유상증자")
+    }
+    workflow.news_verifier = verifier
+    workflow.recommender.results = [
+        [_recommendation("005930"), _recommendation("000660")],
+        [_recommendation("035420")],
+    ]
+
+    workflow.recommend_and_notify(date(2026, 10, 1))
+
+    assert len(workflow.recommender.calls) == 2
+    assert workflow.recommender.calls[1]["exclude_tickers"] == ("005930",)
+    assert sorted(r.ticker for r in workflow.strategy._recommendations) == ["000660", "035420"]
+
+
+def test_the_second_round_is_the_last_one(tmp_path):
+    """재추천 결과가 또 탈락해도 세 번째는 없다 — 시간이 폭발한다."""
+    workflow = build_workflow(tmp_path)
+    verifier = FakeVerifier()
+    verifier.verdicts = {
+        "005930": NewsVerdict("005930", checked=True, blocking=True, reason="x"),
+        "035420": NewsVerdict("035420", checked=True, blocking=True, reason="y"),
+    }
+    workflow.news_verifier = verifier
+    workflow.recommender.results = [
+        [_recommendation("005930"), _recommendation("000660")],
+        [_recommendation("035420")],
+    ]
+
+    workflow.recommend_and_notify(date(2026, 10, 1))
+
+    assert len(workflow.recommender.calls) == 2
+    assert [r.ticker for r in workflow.strategy._recommendations] == ["000660"]
+
+
+def test_verification_failure_passes_everything_through(tmp_path):
+    """판정이 안 난 종목은 통과다 — 검증은 관문이 아니다."""
+    workflow = build_workflow(tmp_path)
+
+    class Boom:
+        def verify(self, items, timeout_seconds):
+            raise RuntimeError("API 실패")
+
+    workflow.news_verifier = Boom()
+    workflow.recommender.results = [[_recommendation("005930"), _recommendation("000660")]]
+
+    workflow.recommend_and_notify(date(2026, 10, 1))
+
+    assert len(workflow.recommender.calls) == 1
+    assert len(workflow.strategy._recommendations) == 2
+
+
+def test_verification_is_skipped_when_disabled(tmp_path):
+    """토글을 끄면 검증기를 아예 부르지 않는다."""
+    workflow = build_workflow(tmp_path)
+    verifier = FakeVerifier()
+    workflow.news_verifier = verifier
+    workflow.news_verify_enabled = False
+    workflow.recommender.results = [[_recommendation("005930")]]
+
+    workflow.recommend_and_notify(date(2026, 10, 1))
+
+    assert verifier.calls == []
+
+
+def test_all_blocked_skips_the_day(tmp_path):
+    """1차·2차 모두 전원 탈락이면 살 것이 없다 — 매수를 건너뛴다."""
+    workflow = build_workflow(tmp_path)
+    verifier = FakeVerifier()
+    verifier.verdicts = {
+        "005930": NewsVerdict("005930", checked=True, blocking=True, reason="x"),
+        "035420": NewsVerdict("035420", checked=True, blocking=True, reason="y"),
+    }
+    workflow.news_verifier = verifier
+    workflow.recommender.results = [[_recommendation("005930")], [_recommendation("035420")]]
+
+    workflow.recommend_and_notify(date(2026, 10, 1))
+
+    assert workflow.strategy._recommendations == []
+
+
+def test_verification_is_skipped_when_the_buy_time_is_too_close(tmp_path, monkeypatch):
+    """매수까지 시간이 없으면 반쯤 하다 마는 것보다 안 하는 것이 낫다."""
+    monkeypatch.setattr(daily_workflow, "MIN_NEWS_VERIFY_SECONDS", 10**9)
+    workflow = build_workflow(tmp_path)
+    verifier = FakeVerifier()
+    workflow.news_verifier = verifier
+    workflow.recommender.results = [[_recommendation("005930")]]
+
+    workflow.recommend_and_notify(date(2026, 10, 1))
+
+    assert verifier.calls == []
+    assert len(workflow.strategy._recommendations) == 1  # 건너뛰어도 매수는 간다
