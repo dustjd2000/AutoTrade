@@ -15,7 +15,10 @@ from src.llm.recommender import MAX_TOKENS, _extract_json
 logger = logging.getLogger(__name__)
 
 # 청산 판단 프롬프트 버전 — 추천 프롬프트(PROMPT_TEMPLATE_VERSION)와 따로 움직인다.
-EXIT_PROMPT_TEMPLATE_VERSION = "v2"
+# v3 (2026-10-01): 노이즈 수준 고점에 반납 수치를 주지 않도록 바꿨다 (`_peak_text`).
+# 프롬프트가 달라지면 검증 표본을 섞으면 안 되므로 버전을 올린다 — `exit_reviews`의
+# 10건 게이트도 v3 기준으로 다시 센다.
+EXIT_PROMPT_TEMPLATE_VERSION = "v3"
 
 # 응답 스키마 — 종목마다 판정과 근거를 받는다 (확정 2026-09-19). 전량 판정이던 시절에는
 # {sell, reason} 하나였다.
@@ -132,22 +135,34 @@ def _sell_target_text(holding: HoldingView) -> str:
     return f"{holding.target_sell_price:,.0f}원 — 아직 {gap * 100:.2f}% 아래입니다"
 
 
-def _peak_text(holding: HoldingView) -> str:
+def _peak_text(holding: HoldingView, min_peak: float = 0.0) -> str:
     """당일 고점 대비 반납폭 — '밀렸다'를 서술이 아니라 수치로 준다.
 
     되돌림을 판단 기준 1번으로 두었는데도 모델이 궤적에서 스스로 읽지 않고 "여전히
     플러스"로 넘어갔다 (2026-09-10). 반납폭과 반납 비율을 계산해서 넘긴다.
+
+    **단, 고점이 `min_peak`에 못 미치면 반납 수치를 아예 주지 않는다** (2026-10-01).
+    매수 15분 뒤 첫 호출 시점의 '고점'은 +0.02~0.26% 같은 노이즈인데, 거기에 "절반
+    이상 반납" 기준을 적용하면 평단 아래로 한 틱만 내려가도 "반납율 100%"가 되어
+    매도 근거가 성립한다 — 실제로 9월 AI 매도 사유의 대부분이 그것이었고, 그 결과
+    매도의 77%가 10:59 이전에 몰려 상방을 통째로 잘랐다. 손절선을 프롬프트에서 뺀
+    2026-09-18과 같은 처방이다: 쓰지 말라고 지시하는 대신 숫자를 주지 않는다.
+    기준값은 이익 반납 감시(`DrawdownTracker`)와 같은 `AI_EXIT_DRAWDOWN_PERCENT`다.
     """
     if holding.peak_return is None:
         return "고점 정보 없음"
+    if holding.peak_return <= 0 or holding.peak_return < min_peak:
+        return (
+            f"이익 고점 없음 (당일 고점이 {_pct(max(min_peak, 0.0))}에 못 미칩니다 "
+            "— 되돌림은 이 종목의 판단 근거가 아닙니다)"
+        )
     given_back = max(0.0, holding.peak_return - holding.net_return)
-    share = given_back / holding.peak_return if holding.peak_return > 0 else 0.0
+    share = given_back / holding.peak_return
     if given_back <= 0:
         return f"당일 고점 {_pct(holding.peak_return)} (지금이 당일 고점입니다)"
-    tail = f", 고점 이익의 {min(1.0, share) * 100:.0f}%를 반납" if holding.peak_return > 0 else ""
     return (
         f"당일 고점 {_pct(holding.peak_return)} → 현재 {_pct(holding.net_return)} "
-        f"({given_back * 100:.2f}%p 반납{tail})"
+        f"({given_back * 100:.2f}%p 반납, 고점 이익의 {min(1.0, share) * 100:.0f}%를 반납)"
     )
 
 
@@ -218,10 +233,13 @@ DEFAULT_EXIT_PROMPT_SECTIONS: Dict[str, str] = {
     "criteria": """## 판단 기준
 아래 기준을 **종목마다 따로** 적용하십시오.
 
-1. **되돌림** — 종목마다 `당일 고점 → 현재`와 반납폭(%p·비율)을 함께 드립니다.
-   직접 계산하지 말고 그 수치를 쓰십시오. **고점 이익의 절반 이상을 반납했다면 그것
-   자체가 매도 근거입니다** — "여전히 플러스"는 반박이 되지 않습니다. 남은 이익을
-   지키는 것도 이 판단의 역할입니다.
+1. **되돌림** — 지킬 만한 이익 고점이 있었던 종목에만 `당일 고점 → 현재`와
+   반납폭(%p·비율)을 드립니다. 직접 계산하지 말고 그 수치를 쓰십시오.
+   **고점 이익의 절반 이상을 반납했다면 그것 자체가 매도 근거입니다** —
+   "여전히 플러스"는 반박이 되지 않습니다. 남은 이익을 지키는 것도 이 판단의 역할입니다.
+   되돌림 자리에 **"이익 고점 없음"**이라고 적힌 종목은 애초에 지킬 이익이 없었던
+   것입니다. 그런 종목을 되돌림을 이유로 팔지 마십시오 — 아래 2·3번이나 "손실 중인
+   종목" 절의 근거로만 판단하십시오.
 2. **아침 전망의 유효성** — 이 종목을 고를 때 본 시나리오(`outlook`/`reason`)가
    지금도 살아 있는지, 아니면 이미 깨졌는지를 판단하십시오. **아침에 함께 세운 목표
    매도가를 이미 넘어섰다면 그 시나리오는 "유효하게 진행 중"이 아니라 "달성된"
@@ -273,6 +291,7 @@ def build_exit_user_prompt(
     trace: List[TracePoint],
     minutes_to_close: int,
     partial: bool,
+    min_peak: float = 0.0,
 ) -> str:
     lines = [
         "보유 종목을 종목마다 지금 매도할지 판단하기 위한 현재 상황입니다.",
@@ -293,7 +312,7 @@ def build_exit_user_prompt(
             f"- {h.ticker} {h.name}: 평단 {h.avg_price:,.0f}원, 현재가 {h.current_price:,.0f}원, "
             f"수량 {h.quantity}주, 순손익률 {_pct(h.net_return)}"
         )
-        lines.append(f"  되돌림: {_peak_text(h)}")
+        lines.append(f"  되돌림: {_peak_text(h, min_peak)}")
         lines.append(f"  아침 목표 매도가: {_sell_target_text(h)}")
         lines.append(f"  아침 근거: {h.reason}")
         lines.append(f"  아침 전망: {h.outlook}")
@@ -363,6 +382,9 @@ class ExitAdvisor:
             trace,
             minutes_to_close,
             partial,
+            # 이익 반납 감시(`DrawdownTracker`)와 같은 기준을 쓴다 — 호출을 앞당길 만큼의
+            # 고점이 아니면 판단 근거로도 삼지 않는다 (2026-10-01, `_peak_text` 참고)
+            self.settings.ai_exit_drawdown_ratio,
         )
         logger.info(
             "AI 매도 판단 요청 (exit_prompt_version=%s, 보유 %d종목):\n%s",

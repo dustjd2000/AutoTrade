@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 from src.core.exit_trace import TracePoint
@@ -87,7 +88,7 @@ def test_system_prompt_makes_holding_the_default():
 def test_decide_returns_none_when_api_raises(tmp_path):
     advisor = ExitAdvisor.__new__(ExitAdvisor)
     advisor.prompt_store = make_exit_prompt_store(tmp_path / "exit_prompt")
-    advisor.settings = SimpleNamespace(anthropic_api_key="k", llm_model="claude-opus-5")
+    advisor.settings = SimpleNamespace(anthropic_api_key="k", llm_model="claude-opus-5", ai_exit_drawdown_ratio=0.01)
 
     class Boom:
         def with_options(self, **kwargs):
@@ -157,7 +158,7 @@ class FakeClient:
 def _advisor_with_response(response, tmp_path, events=()):
     advisor = ExitAdvisor.__new__(ExitAdvisor)
     advisor.prompt_store = make_exit_prompt_store(tmp_path / "exit_prompt")
-    advisor.settings = SimpleNamespace(anthropic_api_key="k", llm_model="claude-opus-5")
+    advisor.settings = SimpleNamespace(anthropic_api_key="k", llm_model="claude-opus-5", ai_exit_drawdown_ratio=0.01)
     advisor._client = FakeClient(response, events)
     return advisor
 
@@ -263,6 +264,73 @@ def test_system_prompt_makes_a_big_giveback_a_sell_reason():
 
     assert "고점 이익의 절반 이상을 반납했다면 그것" in system
     assert "여전히 플러스" in system
+
+
+# ── 최소 고점 요건 (2026-10-01) ─────────────────────────────
+# 매수 15분 뒤 첫 호출의 '고점'은 +0.02~0.26%짜리 노이즈인데, 거기에 "절반 이상 반납"을
+# 적용하면 평단 아래로 한 틱만 내려가도 "반납율 100%"가 되어 매도 근거가 선다. 실제
+# 9월 AI 매도 사유의 대부분이 그것이었다. 손절선을 뺀 2026-09-18과 같이, 지시가 아니라
+# 숫자를 주지 않는 것으로 막는다.
+def test_prompt_withholds_the_giveback_when_the_peak_is_noise():
+    """2026-09-30 현대로템 — 고점 +0.12%에서 -0.66%를 '100% 반납'으로 읽고 팔았다."""
+    view = holding(net_return=-0.0066, peak_return=0.0012)
+    prompt = build_exit_user_prompt([view], trace_points(), 330, False, min_peak=0.01)
+
+    assert "되돌림: 이익 고점 없음" in prompt
+    assert "반납" not in prompt.split("되돌림:")[1].split("\n")[0].replace(
+        "되돌림은 이 종목의 판단 근거가 아닙니다", ""
+    )
+    assert "+0.12%" not in prompt
+
+
+def test_prompt_withholds_the_giveback_when_the_peak_was_never_positive():
+    """2026-10-01 두산밥캣 — 고점 -0.23%에서 -1.85%를 '1.63%p 반납'으로 읽고 팔았다.
+
+    한 번도 이익이었던 적이 없는 종목에 '반납'은 애초에 성립하지 않는다.
+    """
+    view = holding(net_return=-0.0185, peak_return=-0.0023)
+    prompt = build_exit_user_prompt([view], trace_points(), 330, False, min_peak=0.01)
+
+    assert "되돌림: 이익 고점 없음" in prompt
+    assert "1.63%p" not in prompt
+
+
+def test_prompt_still_reports_a_real_giveback_above_the_threshold():
+    """기준을 넘는 고점에서는 종전대로 수치를 준다 — 이 경로를 죽이는 수정이 아니다."""
+    view = holding(net_return=0.0141, peak_return=0.0446)
+    prompt = build_exit_user_prompt([view], trace_points(), 330, False, min_peak=0.01)
+
+    assert "되돌림: 당일 고점 +4.46% → 현재 +1.41% (3.05%p 반납, 고점 이익의 68%를 반납)" in prompt
+
+
+def test_system_prompt_tells_the_model_what_no_peak_means():
+    """'이익 고점 없음'이 무슨 뜻인지 적어 두지 않으면 모델이 스스로 궤적에서 계산한다."""
+    system = build_exit_system_prompt()
+
+    assert "이익 고점 없음" in system
+    assert "되돌림을 이유로 팔지 마십시오" in system
+
+
+def test_decide_uses_the_drawdown_setting_as_the_minimum_peak():
+    """이익 반납 감시와 같은 기준을 쓴다 — 호출을 앞당길 고점이 아니면 근거도 아니다."""
+    captured = {}
+    advisor = ExitAdvisor.__new__(ExitAdvisor)
+    advisor.settings = SimpleNamespace(
+        anthropic_api_key="k", llm_model="claude-opus-5", ai_exit_drawdown_ratio=0.01
+    )
+    advisor.prompt_store = make_exit_prompt_store(Path("data") / "nonexistent_exit_prompt")
+
+    def fake_stream(*args, **kwargs):
+        captured["system"] = kwargs["system"]
+        captured["user"] = kwargs["messages"][0]["content"]
+        raise RuntimeError("stop here — 프롬프트만 본다")
+
+    advisor._client = SimpleNamespace(
+        with_options=lambda **_: SimpleNamespace(messages=SimpleNamespace(stream=fake_stream))
+    )
+    advisor.decide([holding(net_return=-0.0066, peak_return=0.0012)], [], 330, False)
+
+    assert "이익 고점 없음" in captured["user"]
 
 
 def test_prompt_has_no_stop_loss_line():
