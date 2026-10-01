@@ -197,6 +197,41 @@ def test_recent_band_ignores_zero_prices():
     assert result.moving_average == 70000.0
 
 
+def test_short_moving_average_uses_the_five_most_recent_closes():
+    """20일 이평만으로는 추세 방향을 알 수 없다 — 5일 이평을 함께 낸다 (2026-10-01)."""
+    # 최신순 20봉: 최근 5봉이 100, 그 앞 15봉이 200
+    closes = [100.0] * 5 + [200.0] * 15
+    client = make_client(
+        {
+            "daly_stkpc": [
+                candle(f"2026{i:04d}", close=str(c), high=str(c), low=str(c))
+                for i, c in enumerate(closes, start=1)
+            ]
+        }
+    )
+
+    metrics = client.get_previous_day_metrics("005930", today=date(2026, 10, 1))
+
+    assert metrics.short_moving_average == 100.0
+    assert metrics.moving_average == pytest.approx((100 * 5 + 200 * 15) / 20)
+
+
+def test_short_moving_average_is_zero_when_there_are_too_few_bars():
+    """봉이 5개 미만이면 산출 불가 — 0.0으로 둬서 프롬프트에서 통째로 빠지게 한다."""
+    client = make_client(
+        {
+            "daly_stkpc": [
+                candle(f"2026{i:04d}", close="100000", high="100000", low="100000")
+                for i in range(1, 5)  # 4봉
+            ]
+        }
+    )
+
+    metrics = client.get_previous_day_metrics("005930", today=date(2026, 10, 1))
+
+    assert metrics.short_moving_average == 0.0
+
+
 def test_previous_day_metrics_returns_none_without_usable_candles():
     client = make_client({"daly_stkpc": [candle("20260806")]})
 

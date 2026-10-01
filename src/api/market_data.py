@@ -32,6 +32,9 @@ class PreviousDayMetrics:
     recent_high: float = 0.0      # 당일 제외 최근 거래일 중 최고가
     recent_low: float = 0.0       # 당일 제외 최근 거래일 중 최저가
     moving_average: float = 0.0   # 당일 제외 최근 거래일 종가 평균
+    # 최근 SHORT_MA_DAYS 거래일 종가 평균. moving_average와의 비율이 추세 방향이다.
+    # 봉이 모자라면 0.0 (= 산출 불가, 거래량 급증 배수와 같은 규약)
+    short_moving_average: float = 0.0
 
 
 @dataclass
@@ -72,6 +75,11 @@ MARKET_PATH = "/api/dostk/mrkcond"
 # ka10086이 한 번 호출에 돌려주는 20거래일치를 그대로 쓴다. 여기에 당일 봉이 섞여 오므로
 # 그것을 뺀 나머지(전일 1행 + 그 이전 행들)로 전일 지표와 급증 배수를 계산한다.
 DAILY_CANDLE_COUNT = 20
+
+# 추세 방향용 단기 이평 구간 (2026-10-01). 20일 이평만 주면 "지금 이평 아래"는 알아도
+# "이평이 내려가는 중"은 알 수 없어, 하락 추세 종목이 떨어질수록 더 매력적으로 평가됐다
+# (PRD 10절 "하락 추세에 대한 방어가 없다").
+SHORT_MA_DAYS = 5
 
 
 def _first_present(row: Dict[str, Any], *keys: str):
@@ -208,6 +216,11 @@ class MarketDataClient:
         highs = _positive_prices(past, "high_pric")
         lows = _positive_prices(past, "low_pric")
         closes = _positive_prices(past, "close_pric", "cur_prc")
+        # closes는 past(최신순)에서 뽑았으므로 앞에서 자른 것이 최근 구간이다
+        short_closes = closes[:SHORT_MA_DAYS]
+        short_average = (
+            sum(short_closes) / len(short_closes) if len(short_closes) == SHORT_MA_DAYS else 0.0
+        )
 
         return PreviousDayMetrics(
             ticker=ticker,
@@ -220,6 +233,7 @@ class MarketDataClient:
             recent_high=max(highs) if highs else 0.0,
             recent_low=min(lows) if lows else 0.0,
             moving_average=sum(closes) / len(closes) if closes else 0.0,
+            short_moving_average=short_average,
         )
 
     def get_today_metrics(

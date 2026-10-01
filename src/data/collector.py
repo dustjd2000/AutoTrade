@@ -71,6 +71,8 @@ class DailyStockData:
     recent_high: float = 0.0      # 당일 제외 최근 거래일 중 최고가
     recent_low: float = 0.0       # 당일 제외 최근 거래일 중 최저가
     moving_average: float = 0.0   # 당일 제외 최근 거래일 종가 평균
+    # 최근 5거래일 종가 평균 — moving_average와의 비율이 추세 방향이다 (2026-10-01)
+    short_moving_average: float = 0.0
     # 전일 변동폭 (%) = (전일 고가 − 전일 저가) ÷ 전일 종가 × 100 (확정 2026-08-14).
     # 후보를 거르는 데는 쓰지 않고 프롬프트에만 싣는다 — 2026-08-14 실측 분포에서 변동폭이
     # 큰 종목이 곧 손실 종목이 아니었다 (PRD 5.5-B '당일 지표 병행 수집'의 변동폭 항목).
@@ -398,6 +400,7 @@ class DataCollector:
             recent_high=metrics.recent_high,
             recent_low=metrics.recent_low,
             moving_average=metrics.moving_average,
+            short_moving_average=metrics.short_moving_average,
             prev_range_pct=(
                 (metrics.high - metrics.low) / metrics.close * 100
                 if metrics.close > 0 and metrics.high > 0 and metrics.low > 0
