@@ -16,6 +16,7 @@ from src.llm.recommender import (
     apply_price_guardrail,
     attach_recommend_price,
     budget_seconds,
+    build_locked_prompt_text,
     build_system_prompt,
     build_user_prompt,
     drop_other_setups,
@@ -473,6 +474,49 @@ def test_build_system_prompt_states_both_day_basis():
     assert "10:10" in prompt  # 미체결 취소 규칙을 알려야 목표가를 현실적으로 잡는다
 
 
+def test_user_prompt_shows_the_short_moving_average_gap():
+    """떨어지는 중인지 눌린 것인지를 가르려면 이평 방향이 필요하다 (2026-10-01)."""
+    prompt = build_user_prompt(
+        [
+            stock(
+                moving_average=207_726.0,
+                short_moving_average=198_420.0,
+                recent_high=220_000.0,
+                recent_low=194_300.0,
+            )
+        ],
+        target_count=2,
+    )
+
+    assert "5일 이평 198,420 (20일 대비 -4.48%)" in prompt
+
+
+def test_user_prompt_omits_the_short_moving_average_when_unavailable():
+    """0을 적으면 그 0을 근거로 삼는다 — 못 구한 값은 줄에서 통째로 뺀다."""
+    prompt = build_user_prompt(
+        [
+            stock(
+                moving_average=207_726.0,
+                short_moving_average=0.0,
+                recent_high=220_000.0,
+                recent_low=194_300.0,
+            )
+        ],
+        target_count=2,
+    )
+
+    assert "5일 이평" not in prompt
+    assert "이동평균 207,726" in prompt  # 20일 이평은 그대로 남는다
+
+
+def test_locked_prompt_carries_the_trend_section():
+    """튜너가 지울 수 없는 자리에 있어야 한다 — judgment_criteria는 편집 가능한 절이다."""
+    locked = build_locked_prompt_text(target_count=2)
+
+    assert "## 추세 판단" in locked
+    assert "5일 이평이 20일 이평보다 낮고" in locked
+
+
 # ── 목표 매도가 (참고용, v7) ─────────────────────────────────
 def test_parse_reads_target_sell_price():
     raw = (
@@ -675,7 +719,7 @@ def test_default_prompt_text_is_pinned():
     같은 종류).
     """
     digest = hashlib.sha256(build_system_prompt(3).encode("utf-8")).hexdigest()
-    assert digest == "516ab82ed8d984de8a0d4fc952732a8e82bfb7020bb1a69cb67ea36ab473b7ae"
+    assert digest == "9684a0816a322555066ecee702b99cd2cde28bd20aa2af0ba43883b77e7b4e96"
 
 
 # ── PromptStore 연동 (파일 프롬프트, PRD '프롬프트 자동 수정') ─────────────

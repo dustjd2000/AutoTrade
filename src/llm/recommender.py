@@ -139,7 +139,7 @@ def normalize_target_price(target_price: float, reference_price: float) -> int:
 
 # 에이전트가 고칠 수 있는 다섯 절 (PRD '프롬프트 자동 수정'). 헤더 줄을 본문에 포함해 둔다 —
 # 조립할 때 코드가 헤더를 붙이면 에이전트가 헤더를 고치고 싶어도 못 고친다.
-# 잠긴 절(역할·절대 규칙·추천 유형)은 build_system_prompt 안에 그대로 남는다: 코드가 강제하는
+# 잠긴 절(역할·절대 규칙·추세 판단·추천 유형)은 build_system_prompt 안에 그대로 남는다: 코드가 강제하는
 # 규칙의 문장판이라, 문장만 바뀌면 조용히 추천이 0종목이 된다.
 PROMPT_SECTION_ORDER = ("judgment_criteria", "buy_target", "sell_target", "outlook", "reason")
 
@@ -205,7 +205,7 @@ reason은 반드시 제공된 데이터의 구체적 수치를 인용해 작성�
 
 
 def build_locked_prompt_text(target_count: int) -> str:
-    """고칠 수 없는 세 절(역할·절대 규칙·추천 유형).
+    """고칠 수 없는 네 절(역할·절대 규칙·추세 판단·추천 유형).
 
     자동 수정 에이전트에게 참고용으로 이 함수의 결과를 그대로 넘긴다. 텍스트를 복사해 두면
     에이전트가 보는 규칙과 추천이 실제로 쓰는 규칙이 어긋난다 (PRD '프롬프트 자동 수정').
@@ -230,6 +230,15 @@ def build_locked_prompt_text(target_count: int) -> str:
 6. target_price는 **원 단위 정수**로, 해당 종목의 **당일 현재가** 대비 ±5% 이내에서 제시하십시오.
    당일 지표가 없는 종목만 전일 종가를 기준으로 삼으십시오.
 7. target_sell_price는 **원 단위 정수**로, 반드시 target_price보다 높아야 합니다.
+
+## 추세 판단
+`5일 이평`이 함께 주어진 종목은 그 값과 `20일 대비` 비율로 **추세 방향**을 판단하십시오.
+낙폭이 크다는 것과 떨어지는 중이라는 것은 다릅니다 — 이 전략이 노리는 것은 **눌렸다가
+되돌리는 종목**이지, 계속 내려가는 종목이 아닙니다.
+**5일 이평이 20일 이평보다 낮고 그 격차가 벌어지는 방향이면 하락 추세로 보고 순위를
+낮추십시오.** "이평 대비 더 많이 떨어졌다"는 그 자체로는 매력이 아닙니다 — 추세가 꺾인
+종목은 떨어질수록 더 싸 보이지만 되돌림은 오지 않습니다.
+`5일 이평`이 없는 종목은 이 기준을 적용하지 말고 나머지 기준으로만 평가하십시오.
 
 ## 추천 유형 (setup)
 각 종목에 아래 셋 중 하나를 `setup`으로 붙이십시오. 실제로 보이는 대로 붙이고, 추천하고 싶은
@@ -302,6 +311,13 @@ def build_user_prompt(daily_data: List[DailyStockData], target_count: int = 3) -
                 f"최근 고가 {d.recent_high:,.0f} / 최근 저가 {d.recent_low:,.0f} / "
                 f"이동평균 {d.moving_average:,.0f}, "
             )
+        # 20일 이평만 주면 "지금 이평 아래"는 알아도 "이평이 내려가는 중"은 알 수 없다.
+        # 해석("하락 추세")은 코드가 붙이지 않고 비율만 준다 — 라벨을 붙이면 경계값 하나가
+        # 판정을 가르고, 그 라벨 자체가 근거로 쓰인다 (2026-10-01)
+        trend = ""
+        if d.short_moving_average > 0 and d.moving_average > 0:
+            gap = (d.short_moving_average - d.moving_average) / d.moving_average * 100
+            trend = f"5일 이평 {d.short_moving_average:,.0f} (20일 대비 {gap:+.2f}%), "
         # 당일 지표도 같은 규약이다 — 못 받았으면 0을 적지 않고 '없음'이라고 밝힌다
         if d.today_price > 0:
             today = (
@@ -318,6 +334,7 @@ def build_user_prompt(daily_data: List[DailyStockData], target_count: int = 3) -
             f"전일 변동폭 {d.prev_range_pct:.2f}%, "
             f"전일 거래량 {d.prev_volume:,}(평균대비 {surge}), "
             f"{band}"
+            f"{trend}"
             f"뉴스/공시: {headlines}"
         )
 
