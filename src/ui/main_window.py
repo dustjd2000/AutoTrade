@@ -604,11 +604,11 @@ class MainWindow(QMainWindow):
         self._exit_percent = QLineEdit()
         self._exit_percent.setPlaceholderText("예: 5 (순손익 -5%에 닿은 종목을 자동 매도)")
         self._exit_percent.setValidator(QDoubleValidator(0.0, 100.0, 2))
-        # 09:08 현재가가 목표 매수가보다 이만큼 넘게 높으면 그 종목을 건너뛴다
+        # 매수 시각의 현재가가 목표 매수가보다 이만큼 넘게 높으면 그 종목을 건너뛴다
         self._buy_price_tolerance = QLineEdit()
         self._buy_price_tolerance.setPlaceholderText("예: 2 (목표가 +2% 초과 시 매수 안 함)")
         self._buy_price_tolerance.setValidator(QDoubleValidator(0.0, 100.0, 2))
-        # 09:08 현재가가 추천 시점 가격보다 이만큼 넘게 낮으면 건너뛴다. 위와 달리 0이 '끔'이다
+        # 매수 시각의 현재가가 추천 시점 가격보다 이만큼 넘게 낮으면 건너뛴다. 위와 달리 0이 '끔'이다
         self._gap_down_tolerance = QLineEdit()
         self._gap_down_tolerance.setPlaceholderText("예: 1 (전일 종가 -1% 미만 시 매수 안 함, 0=끔)")
         self._gap_down_tolerance.setValidator(QDoubleValidator(0.0, 100.0, 2))
@@ -672,7 +672,7 @@ class MainWindow(QMainWindow):
         # 이름만으로는 무엇에 대한 허용치인지 알 수 없다 — 손절과 달리 '팔 때'가 아니라
         # '사기 전'을 보는 값이라는 점이 특히 드러나야 한다
         gap_hint = QLabel(
-            "(09:08 현재가가 목표 매수가보다 이 비율을 넘게 높으면 갭 상승으로 보고 "
+            "(매수 시각의 현재가가 목표 매수가보다 이 비율을 넘게 높으면 갭 상승으로 보고 "
             "그 종목은 매수하지 않습니다)"
         )
         gap_hint.setWordWrap(True)
@@ -684,7 +684,7 @@ class MainWindow(QMainWindow):
         # 위 '갭 허용치'와 기준이 다르다(목표가가 아니라 전일 종가). 0의 의미도 반대라서
         # 둘 다 적어 두지 않으면 같은 규약으로 읽는다 (PRD 5.5-B)
         gap_down_hint = QLabel(
-            "(09:08 현재가가 추천 시점 가격보다 이 비율을 넘게 낮으면 갭 하락으로 보고 "
+            "(매수 시각의 현재가가 추천 시점 가격보다 이 비율을 넘게 낮으면 갭 하락으로 보고 "
             "그 종목은 매수하지 않습니다. 0을 넣으면 이 판정을 끕니다)"
         )
         gap_down_hint.setWordWrap(True)
@@ -734,7 +734,7 @@ class MainWindow(QMainWindow):
         run_layout.setSpacing(8)
 
         run_hint = QLabel(
-            "스케줄(추천 시각 / 09:08 / 10:10 / 15:15 / 15:35)과 무관하게 지금 바로 실행합니다. "
+            "스케줄(추천 시각 / 매수 시각 / 10:10 / 15:15 / 15:35)과 무관하게 지금 바로 실행합니다. "
             "엔진이 실행 중일 때만 동작하며, 장 시간 외에는 주문이 거부될 수 있습니다.\n"
             "일괄 수행은 ①② (추천→지정가 매수)만 돌립니다. 매수 후에는 순손익 기준 손절이 "
             "종목별로 자동 감시되며, "

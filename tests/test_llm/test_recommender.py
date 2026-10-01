@@ -168,7 +168,7 @@ def test_apply_price_guardrail_uses_matching_stock():
 
 
 def test_attach_recommend_price_carries_today_price():
-    """09:08 갭 하락 판정 기준가는 추천 시각의 현재가다 (PRD 5.5-B)."""
+    """매수 시각 갭 하락 판정 기준가는 추천 시각의 현재가다 (PRD 5.5-B)."""
     recommendations = [StockRecommendation("005930", "삼성전자", 70_000, "수급")]
 
     attach_recommend_price(

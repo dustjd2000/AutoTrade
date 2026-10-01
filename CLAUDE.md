@@ -46,7 +46,8 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   15:35 — 15:35에는 리포트 → 추천 검증 → 추천 프롬프트 자동 수정 → 매도 판단 검증 → 매도
   프롬프트 자동 수정 다섯 단계가 등록 순서대로 돈다)와
   `WebSocketClient` 콜백(실시간 시세 기반)이 함께 돈다. 이 중 **추천 시각과 매수 시각만 설정값**이고
-  (`settings.recommend_time`/`buy_time`, `.env`의 `RECOMMEND_TIME`·`BUY_TIME`, 기본 09:05·09:08)
+  (`settings.recommend_time`/`buy_time`, `.env`의 `RECOMMEND_TIME`·`BUY_TIME`, 기본 09:05·09:10 —
+  매수 기본값은 2026-10-01에 뉴스 검증·재추천 자리를 내느라 09:08에서 옮겼다)
   나머지는 코드 상수다. 두 값은 UI에서 고를 수 없고 라벨로 보여주기만 하며, "추천은 개장 후,
   매수는 추천 +3분 이상"을 `Settings.validate()`가 엔진 시작 단계에서 강제한다.
 - **공휴일에는 스케줄이 스스로 멈춘다** (확정 2026-09-24, PRD 10절 "휴장일 자동 판정").
@@ -77,8 +78,17 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   급증 배수 상위 40종목에는 `ka10001`로 당일 현재가·등락률·거래량을 추가로 조회해 갭 하락
   배제와 LLM 프롬프트(오늘 전망 포함)에 쓴다.
 - 1호 전략(`src/strategy/llm_momentum.py`의 `LLMMomentumStrategy`)은 시간 기반 전략이라
-  `generate_signal`은 항상 `HOLD`만 반환한다. 실제 진입은 `DailyWorkflow`가 추천 시각/09:08
-  스케줄에서 `set_recommendations` → `build_buy_plans`를 직접 호출해 트리거한다. 매수는
+  `generate_signal`은 항상 `HOLD`만 반환한다. 실제 진입은 `DailyWorkflow`가 추천 시각/매수 시각
+  스케줄에서 `set_recommendations` → `build_buy_plans`를 직접 호출해 트리거한다.
+  추천 프롬프트에는 20일 이평과 함께 **5일 이평**(20일 대비 비율)이 실리고, 그것으로 추세
+  방향을 보라는 지시는 튜너가 못 고치는 잠긴 절 `## 추세 판단`에 있다 — 코드로 거르지는
+  않는다 (확정 2026-10-01). 추천 직후에는 **뉴스 검증**(`src/llm/news_verifier.py`)이 추천된
+  종목만 종목별·병렬로 웹검색해 구체적 악재(`blocking`)를 찾고, 걸린 종목을 빼고 **딱 한 번**
+  다시 추천받는다(재추천에는 탈락 종목과 생존 종목을 함께 알려 중복 매수를 막는다). **실패·
+  타임아웃·`checked=false`·시간 부족은 전부 "종전대로 매수"로 떨어진다** — 검증은 관문이 아니다.
+  매수 시각까지 남은 시간에서 재추천 예약분(180초)을 떼고도 60초가 안 남으면 검증을 건너뛰므로,
+  추천과 매수 사이가 좁으면 사실상 꺼진다. `NEWS_VERIFY_ENABLED=0`으로 끈다 (PRD 5.5-B
+  "뉴스 검증"). 매수는
   LLM이 함께 제시한 **목표 매수가로 지정가** 주문이고, 10:10에 미체결분을 취소하면서
   매수 결과 메일을 보낸다(`cancel_unfilled_buys`). 청산은 `RiskManager.check_position_exits`
   (실시간 시세 콜백, **종목별** 순손익 -설정값 이하 손절), 설정 주기마다 종목마다 묻는

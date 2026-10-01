@@ -91,7 +91,7 @@ class OrderResult:
 
 
 class BuyOutcome(Enum):
-    """09:08 매수 한 종목의 결과.
+    """매수 한 종목의 결과.
 
     접수·부분체결·체결은 주문이 살아 있는 상태, 건너뜀·실패는 매수하지 못한 상태다.
     """
@@ -109,7 +109,7 @@ class BuyOutcome(Enum):
 
 @dataclass
 class BuyRecord:
-    """09:08 매수 실행 결과 한 종목 — 매수 알림 메일의 표 한 줄."""
+    """매수 실행 결과 한 종목 — 매수 알림 메일의 표 한 줄."""
     ticker: str
     name: Optional[str] = None
     outcome: BuyOutcome = BuyOutcome.ORDERED
@@ -140,7 +140,7 @@ class BuyRecord:
 
 @dataclass
 class BuyExecution:
-    """09:08 매수 실행 전체 결과 — 매수 알림 메일의 원본 데이터.
+    """매수 실행 전체 결과 — 매수 알림 메일의 원본 데이터.
 
     10:10 미체결 취소를 마친 뒤에 만들어지지만, 그 시점에도 체결 조회가 실패하면 체결가가
     비어 있을 수 있다(접수 상태). 체결가·수수료·손익의 최종 확정은 15:35 리포트가 담당한다.

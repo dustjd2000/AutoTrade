@@ -34,7 +34,7 @@ from src.llm.exit_advisor import ExitDecision, PositionExit
 
 from tests.test_core.test_portfolio_exit import make_engine, two_holdings
 
-# 2026-09-09는 수요일(거래일). 기본 매수 시각 09:08 + 15분 = 09:23이 창의 시작이다.
+# 2026-09-09는 수요일(거래일). 매수 시각 09:08로 두면 + 15분 = 09:23이 창의 시작이다.
 BUY_TIME = dt_time(9, 8)
 IN_WINDOW = datetime(2026, 9, 9, 10, 0)
 WINDOW_START = datetime(2026, 9, 9, 9, 23)

@@ -16,13 +16,13 @@ class BuyPlan:
     amount: float        # 종목당 배정액
     target_price: int    # 지정가 매수 가격 (LLM 제시 → 호가 단위·가드레일 보정 완료)
     reason: str
-    recommend_price: float = 0.0  # 09:08 갭 하락 판정의 기준값 (0 = 모름 → 판정 건너뜀)
+    recommend_price: float = 0.0  # 매수 시각 갭 하락 판정의 기준값 (0 = 모름 → 판정 건너뜀)
 
 
 class LLMMomentumStrategy(BaseStrategy):
     """1호 전략 — LLM 기반 급등 예상 대형주 매수 (PRD 5.5-B).
 
-    09:05 LLM 추천 → 09:08 매수를 스케줄러가 트리거하는 시간 기반 전략이므로,
+    추천 시각 LLM 추천 → 매수 시각 매수를 스케줄러가 트리거하는 시간 기반 전략이므로,
     실시간 시세 콜백(generate_signal)에서는 신규 진입 신호를 내지 않는다.
     보유 포지션의 청산은 RiskManager.check_position_exits(종목별 손절), AI 매도 판단
     (종목별 판단, 확정 2026-09-19), 장 마감 강제청산이 담당한다.
