@@ -8,6 +8,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from src.core.events import FillRecord, OrderResult, OrderSide, OrderStatus, format_stock
 # 순환 참조 없음 — recommender는 config.settings와 src.data.collector만 본다.
+from src.llm.news_verifier import NewsVerdict
 from src.llm.recommender import StockRecommendation
 
 logger = logging.getLogger(__name__)
@@ -66,13 +67,19 @@ CREATE TABLE IF NOT EXISTS recommendations (
     buy_target_hit INTEGER,
     sell_target_hit INTEGER,
     review TEXT,
+    news_checked INTEGER,
+    news_blocking INTEGER,
+    news_reason TEXT,
     UNIQUE (day, ticker)
 );
 """
 
-# recommendations 테이블에 뒤늦게 추가될 컬럼들 — 지금은 비어 있다. trades와 같은 패턴을
-# 갖춰 둬야 다음 컬럼 추가 때 CREATE TABLE IF NOT EXISTS가 조용히 no-op되는 함정을 피한다.
-RECOMMENDATION_MIGRATIONS: Tuple[Tuple[str, str], ...] = ()
+# 이미 만들어진 DB에 뒤늦게 추가된 컬럼 — 2026-10-01 뉴스 검증 (PRD 5.5-B)
+RECOMMENDATION_MIGRATIONS: Tuple[Tuple[str, str], ...] = (
+    ("news_checked", "ALTER TABLE recommendations ADD COLUMN news_checked INTEGER"),
+    ("news_blocking", "ALTER TABLE recommendations ADD COLUMN news_blocking INTEGER"),
+    ("news_reason", "ALTER TABLE recommendations ADD COLUMN news_reason TEXT"),
+)
 
 # AI 매도 판단 한 건(종목 하나)마다 한 줄 (스펙 2026-09-22 2.1). 판단은 메모리와 로그 텍스트에만
 # 남았어서 엔진이 재시작되면 사라졌다 — 15:35 매도 판단 검증의 원천이다.
@@ -260,6 +267,9 @@ class RecommendationRow:
     buy_target_hit: Optional[bool] = None
     sell_target_hit: Optional[bool] = None
     review: str = ""
+    news_checked: Optional[bool] = None
+    news_blocking: Optional[bool] = None
+    news_reason: str = ""
 
     @property
     def label(self) -> str:
@@ -351,7 +361,11 @@ class TradeStore:
 
     # ── 추천 기록 (PRD 5.5-B '추천 검증') ────────────────────
     def save_recommendations(
-        self, day: date, recommendations: List[StockRecommendation], prompt_version: str
+        self,
+        day: date,
+        recommendations: List[StockRecommendation],
+        prompt_version: str,
+        verdicts: Optional[Dict[str, NewsVerdict]] = None,
     ) -> None:
         """그날 추천 메일에 실린 종목을 남긴다.
 
@@ -366,6 +380,11 @@ class TradeStore:
         아무것도 하지 않는다 — 빈 값 하나 때문에 그날 미검증 행을 통째로 날리는 것을 막는다.
         덮어쓸 때 검증 칸(actual_*, *_hit, review)은 건드리지 않는다 — 추천을 다시 돌린
         시점에는 아직 채워져 있지 않고, 채워져 있다면 그것이 더 나중 정보다.
+
+        `verdicts`는 종목코드 → `NewsVerdict` (PRD 5.5-B '뉴스 검증'). 기본값 None이라
+        기존 호출부는 그대로 동작하고, 이 경우 세 열 모두 NULL(검증 안 함)로 들어간다 —
+        0/False(악재 없음, 검증은 했음)과 구분해야 하므로 `int(verdict.checked)`처럼
+        명시적으로 변환하되 verdict 자체가 없으면 None을 그대로 둔다.
         """
         with closing(self._connect()) as conn:
             if recommendations:
@@ -380,8 +399,9 @@ class TradeStore:
             conn.executemany(
                 """INSERT INTO recommendations
                    (day, ticker, name, prompt_version, recommend_price, target_price,
-                    target_sell_price, setup, reason, outlook)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    target_sell_price, setup, reason, outlook,
+                    news_checked, news_blocking, news_reason)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(day, ticker) DO UPDATE SET
                        name = excluded.name,
                        prompt_version = excluded.prompt_version,
@@ -390,7 +410,10 @@ class TradeStore:
                        target_sell_price = excluded.target_sell_price,
                        setup = excluded.setup,
                        reason = excluded.reason,
-                       outlook = excluded.outlook""",
+                       outlook = excluded.outlook,
+                       news_checked = excluded.news_checked,
+                       news_blocking = excluded.news_blocking,
+                       news_reason = excluded.news_reason""",
                 [
                     (
                         day.isoformat(),
@@ -403,6 +426,7 @@ class TradeStore:
                         r.setup,
                         r.reason,
                         r.outlook,
+                        *_news_verdict_columns((verdicts or {}).get(r.ticker)),
                     )
                     for r in recommendations
                 ],
@@ -1090,6 +1114,20 @@ def _weighted_average(pairs: List[Tuple[Optional[float], Optional[int]]]) -> flo
     return sum((p or 0.0) * (q or 0) for p, q in pairs) / total_qty
 
 
+def _news_verdict_columns(
+    verdict: Optional[NewsVerdict],
+) -> Tuple[Optional[int], Optional[int], Optional[str]]:
+    """`NewsVerdict` 하나를 (news_checked, news_blocking, news_reason) 컬럼 값으로.
+
+    판정이 없는 종목(verdict=None)은 세 값 모두 None — '검증 안 함'이다. bool을 그냥
+    저장하면 SQLite가 0/1로 알아서 바꿔 주지만, None까지 함께 다루는 삼항 분기를 한
+    곳에 모아 둬야 save_recommendations의 INSERT 쪽 코드가 번잡해지지 않는다.
+    """
+    if verdict is None:
+        return None, None, None
+    return int(verdict.checked), int(verdict.blocking), verdict.reason
+
+
 def _optional_bool(value) -> Optional[bool]:
     """SQLite의 0/1/NULL을 bool/None으로. NULL은 '판정하지 않음'이라 False와 구분해야 한다."""
     return None if value is None else bool(value)
@@ -1115,6 +1153,9 @@ def _recommendation_row(row) -> RecommendationRow:
         buy_target_hit=_optional_bool(row["buy_target_hit"]),
         sell_target_hit=_optional_bool(row["sell_target_hit"]),
         review=row["review"] or "",
+        news_checked=_optional_bool(row["news_checked"]),
+        news_blocking=_optional_bool(row["news_blocking"]),
+        news_reason=row["news_reason"] or "",
     )
 
 

@@ -2,6 +2,7 @@ import sqlite3
 from datetime import date, datetime
 
 from src.core.events import FillRecord, OrderResult, OrderSide, OrderStatus
+from src.llm.news_verifier import NewsVerdict
 from src.llm.recommender import StockRecommendation
 from src.logger import trade_store as trade_store_module
 from src.logger.trade_store import TradeStore
@@ -580,6 +581,37 @@ def test_save_and_read_recommendations(tmp_path):
     assert row.actual_close is None
     assert row.buy_target_hit is None
     assert row.review == ""
+
+
+def test_save_recommendations_records_the_news_verdict(tmp_path):
+    store = make_store(tmp_path)
+    day = date(2026, 10, 1)
+    rec = _rec(ticker="259960", name="크래프톤")
+    verdicts = {
+        "259960": NewsVerdict(
+            ticker="259960", checked=True, blocking=True, reason="신작 부진"
+        )
+    }
+
+    store.save_recommendations(day, [rec], "v1", verdicts)
+
+    row = store.recommendations_for(day)[0]
+    assert row.news_checked is True
+    assert row.news_blocking is True
+    assert row.news_reason == "신작 부진"
+
+
+def test_save_recommendations_leaves_the_verdict_empty_when_not_verified(tmp_path):
+    """검증을 돌리지 않은 날과 '악재 없음'을 구분해야 한다."""
+    store = make_store(tmp_path)
+    day = date(2026, 10, 1)
+
+    store.save_recommendations(day, [_rec(ticker="259960")], "v1")
+
+    row = store.recommendations_for(day)[0]
+    assert row.news_checked is None
+    assert row.news_blocking is None
+    assert row.news_reason == ""
 
 
 def test_save_recommendations_is_idempotent_per_day_and_ticker(tmp_path):
