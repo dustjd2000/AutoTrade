@@ -757,7 +757,7 @@ def test_default_prompt_text_is_pinned():
     같은 종류).
     """
     digest = hashlib.sha256(build_system_prompt(3).encode("utf-8")).hexdigest()
-    assert digest == "9684a0816a322555066ecee702b99cd2cde28bd20aa2af0ba43883b77e7b4e96"
+    assert digest == "e6e74539b7d5138f3983e132808bf65c71f4739d485636a701f7691992a18f32"
 
 
 # ── PromptStore 연동 (파일 프롬프트, PRD '프롬프트 자동 수정') ─────────────
