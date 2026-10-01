@@ -83,11 +83,17 @@ def test_recommend_time_is_between_market_open_and_buy():
     assert settings.recommend_time < settings.buy_time
 
 
-def test_buy_time_defaults_to_0908(monkeypatch):
+def test_buy_time_defaults_to_0910(monkeypatch):
     from src.core.runtime import CANCEL_UNFILLED_TIME
 
-    assert Settings().buy_time == dt_time(9, 8)
+    assert Settings().buy_time == dt_time(9, 10)
     assert CANCEL_UNFILLED_TIME == dt_time(10, 10)
+
+
+def test_buy_time_defaults_to_nine_ten(monkeypatch):
+    """추천 09:02 + 검증·재추천 여유 8분 (2026-10-01, 09:05에서 이동)."""
+    monkeypatch.delenv("BUY_TIME", raising=False)
+    assert Settings().buy_time_hhmm == "09:10"
 
 
 def test_buy_time_reads_env_value(monkeypatch):
@@ -100,7 +106,7 @@ def test_buy_time_falls_back_when_value_is_broken(monkeypatch):
     """오타 하나로 엔진이 뜨지 않는 것보다 기본값으로 도는 편이 낫다 (Settings.buy_time)."""
     monkeypatch.setenv("BUY_TIME", "구시")
 
-    assert Settings().buy_time == dt_time(9, 8)
+    assert Settings().buy_time == dt_time(9, 10)
 
 
 def test_buy_leaves_room_for_the_recommendation_to_finish():
@@ -246,6 +252,17 @@ def test_parse_flag_keeps_the_given_default_when_value_is_missing():
     assert parse_flag(None, False) is False
     assert parse_flag("1", False) is True
     assert parse_flag("0", True) is False
+
+
+# ── 뉴스 검증 킬 스위치 (2026-10-01, PRD 5.5-B '뉴스 검증') ──────────────
+def test_news_verify_is_on_by_default(monkeypatch):
+    monkeypatch.delenv("NEWS_VERIFY_ENABLED", raising=False)
+    assert Settings().news_verify_enabled is True
+
+
+def test_news_verify_can_be_turned_off(monkeypatch):
+    monkeypatch.setenv("NEWS_VERIFY_ENABLED", "0")
+    assert Settings().news_verify_enabled is False
 
 
 # ── 프롬프트 수정 중지 기준 (스펙 2026-09-22 4-A) ──────────────

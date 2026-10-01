@@ -15,7 +15,10 @@ DEFAULT_RECOMMEND_TIME_HHMM = "09:05"
 # LLM 타임아웃 상한 120초라, 그보다 앞당기면 추천이 아직 없는 채로 매수가 돌아 그날이
 # 통째로 빈다. 간격을 넓히면 그만큼 추천 시점 가격과 주문 시점 가격이 벌어져 갭 판정에
 # 걸리기 쉬워진다 (PRD 10절 "매수 타이밍 조정").
-DEFAULT_BUY_TIME_HHMM = "09:08"
+# 2026-10-01에 09:05 → 09:10. 추천 뒤 뉴스 검증(30초)과 탈락 시 재추천 1회가 들어갈
+# 자리를 만든 것이다. 2026-08-20·21에 09:10 → 09:08 → 09:05로 당겨온 것을 되돌리는
+# 셈이라, 진입 지연이 되돌림 구간을 놓치게 하는지 지켜봐야 한다 (PRD 10절).
+DEFAULT_BUY_TIME_HHMM = "09:10"
 MIN_RECOMMEND_TO_BUY_MINUTES = 3
 MARKET_OPEN_HHMM = "09:00"
 
@@ -209,6 +212,13 @@ class Settings:
     )
     stop_loss_enabled: bool = field(
         default_factory=lambda: parse_flag(os.getenv("STOP_LOSS_ENABLED"), True)
+    )
+
+    # 추천 직후 웹검색으로 악재를 확인할지 (PRD 5.5-B '뉴스 검증'). 끄면 추천이 곧바로
+    # 매수 대상이 된다 — 2026-10-01 이전과 같은 동작이다. 매일 호출 비용이 나가고 아침
+    # 경로를 건드리는 기능이라 재배포 없이 끌 수 있어야 해서 `.env`로 뺐다.
+    news_verify_enabled: bool = field(
+        default_factory=lambda: parse_flag(os.getenv("NEWS_VERIFY_ENABLED"), True)
     )
 
     # 09:00 매수 직전 현재가가 목표 매수가보다 이 비율을 넘게 높으면 그 종목을 건너뛴다.
