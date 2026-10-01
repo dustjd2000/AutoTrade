@@ -2101,6 +2101,37 @@ def test_replacement_duplicating_a_kept_ticker_is_not_bought_twice(tmp_path):
     assert len(tickers) == len(set(tickers)), "같은 종목이 두 번 들어가면 배정액이 2배가 된다"
 
 
+def test_replacement_repeating_a_blocked_ticker_is_dropped_even_if_reverification_fails(tmp_path):
+    """재추천이 1차 탈락 종목을 다시 고르면 코드가 거른다 — 재검증에 맡기지 않는다.
+
+    재검증은 실패하면 '통과'로 떨어지므로(검증은 관문이 아니다), 거기에 맡기면 한 번
+    악재로 판정된 종목이 2차 검증 실패 한 번으로 그대로 매수된다.
+    """
+    workflow = build_workflow(tmp_path)
+
+    class FirstRoundOnly:
+        """1차 호출에만 판정을 주고, 2차(재검증)는 실패한 것처럼 빈 결과를 낸다."""
+
+        def __init__(self):
+            self.calls = 0
+
+        def verify(self, items, timeout_seconds):
+            self.calls += 1
+            if self.calls == 1:
+                return {"005930": NewsVerdict("005930", checked=True, blocking=True, reason="유상증자")}
+            return {}
+
+    workflow.news_verifier = FirstRoundOnly()
+    workflow.recommender.results = [
+        [_recommendation("005930"), _recommendation("000660")],
+        [_recommendation("005930"), _recommendation("035420")],
+    ]
+
+    workflow.recommend_and_notify(date(2026, 10, 1))
+
+    assert [r.ticker for r in workflow.strategy._recommendations] == ["000660", "035420"]
+
+
 def test_merged_recommendations_are_capped_at_the_target_count(tmp_path):
     """병합 결과가 목표 종목 수를 넘지 않고, 1차 생존분이 앞에 온다 (Important 2)."""
     workflow = build_workflow(tmp_path)

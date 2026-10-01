@@ -444,7 +444,9 @@ class DailyWorkflow:
             # 자르는 것과 같은 이유로, LLM이 지시를 어기고 생존 종목을 다시 고르거나 탈락
             # 종목을 또 고르면 여기서 한 번 더 걸러낸다. recommender.py의 중복 제거(seen)는
             # 응답 **하나** 안의 중복만 잡아, 1차·2차 응답을 가로지르는 중복은 못 막는다.
-            kept_tickers = set(already_picked)
+            # 1차 탈락 종목을 재검증에 맡기지 않는 이유: 재검증은 실패하면 통과로 떨어지므로,
+            # 맡기면 한 번 악재로 판정된 종목이 재검증 실패 한 번으로 그대로 매수된다.
+            kept_tickers = set(already_picked) | set(excluded)
             replacement_blocked = [
                 r for r in replacements if self._is_blocked(r.ticker, replacement_verdicts)
             ]
