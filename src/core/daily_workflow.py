@@ -474,7 +474,9 @@ class DailyWorkflow:
         self._watch_plan_prices([plan.ticker for plan in board])
         self._save_recommendations(today, recommendations, verdicts)
         subject, body = templates.recommendation_email(
-            recommendations, today, self.strategy.investable_ratio, self.strategy.target_stock_count
+            recommendations, today, self.strategy.investable_ratio,
+            self.strategy.target_stock_count,
+            verdicts=verdicts, blocked=[v for v in verdicts.values() if v.blocking],
         )
         self.email.send(subject, body)
         logger.info("Recommendation email sent for %s", today)

@@ -1,6 +1,7 @@
 from datetime import date, datetime
 
 from src.core.events import BuyExecution, BuyOutcome, BuyRecord, UnsellableView
+from src.llm.news_verifier import NewsVerdict
 from src.llm.recommender import StockRecommendation
 from src.llm.tuner import VersionStats
 from src.logger.trade_store import DailySummary, MonthlySummary, RecommendationRow, TradeRow
@@ -485,6 +486,40 @@ def test_recommendation_email_omits_empty_outlook():
     )
     _, body = templates.recommendation_email([rec], date(2026, 9, 3), 0.5, 3)
     assert "오늘 전망" not in body
+
+
+def _rec(ticker, name):
+    return StockRecommendation(ticker=ticker, name=name, target_price=1000, reason="근거")
+
+
+def test_recommendation_email_shows_the_blocked_stocks():
+    blocked = [NewsVerdict("259960", checked=True, blocking=True, reason="신작 부진")]
+    _, body = templates.recommendation_email(
+        [_rec("005930", "삼성전자")], date(2026, 10, 1), 0.5, 2, blocked=blocked
+    )
+    assert "악재로 제외된 종목" in body
+    assert "259960" in body and "신작 부진" in body
+
+
+def test_recommendation_email_flags_an_unverified_stock():
+    """'확인 못 함'과 '악재 없음'을 메일에서도 갈라야 한다."""
+    verdicts = {"005930": NewsVerdict("005930", checked=False, blocking=False, reason="검색 실패")}
+    _, body = templates.recommendation_email(
+        [_rec("005930", "삼성전자")], date(2026, 10, 1), 0.5, 2, verdicts=verdicts
+    )
+    assert "악재 확인 못 함" in body
+
+
+def test_recommendation_email_is_unchanged_without_verdicts():
+    """검증을 끈 날에는 메일 모양이 종전과 같아야 한다."""
+    _, body = templates.recommendation_email([_rec("005930", "삼성전자")], date(2026, 10, 1), 0.5, 2)
+    assert "악재" not in body
+
+
+def test_recommendation_email_does_not_hardcode_the_buy_time():
+    """매수 시각은 설정값이다 — 본문에 박아 두면 기본값이 바뀔 때마다 어긋난다."""
+    _, body = templates.recommendation_email([_rec("005930", "삼성전자")], date(2026, 10, 1), 0.5, 1)
+    assert "09:08" not in body
 
 
 def test_monthly_chart_is_embedded_only_when_given():

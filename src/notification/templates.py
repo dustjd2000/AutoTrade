@@ -1,7 +1,7 @@
 import unicodedata
 from datetime import date
 from html import escape
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from src.core.events import (
     BuyExecution,
@@ -12,6 +12,7 @@ from src.core.events import (
 )
 from src.core.exit_review import OUTCOME_LABELS
 from src.llm.exit_reviewer import EXIT_REASON_LABELS
+from src.llm.news_verifier import NewsVerdict
 from src.llm.recommender import StockRecommendation
 from src.logger.trade_store import (
     AIExitDecisionRow,
@@ -37,8 +38,14 @@ def recommendation_email(
     today: date,
     investable_ratio: float,
     target_stock_count: int,
+    verdicts: Optional[Dict[str, NewsVerdict]] = None,
+    blocked: Sequence[NewsVerdict] = (),
 ) -> tuple[str, str]:
-    """09:05 LLM 추천 결과 이메일 (PRD 5.5-B 3단계) — 자동 유효성 검증 없이 그대로 전달."""
+    """LLM 추천 결과 이메일 (PRD 5.5-B 3단계) — 자동 유효성 검증 없이 그대로 전달.
+
+    `verdicts`/`blocked`는 뉴스 검증 결과다. 검증을 돌리지 않은 날에는 둘 다 비어 있어
+    메일 모양이 종전과 같다.
+    """
     subject = f"[AutoTrade] {today:%Y-%m-%d} 급등 예상 대형주 추천 {len(recommendations)}종목"
 
     lines = [f"{today:%Y-%m-%d} LLM 추천 결과입니다.", ""]
@@ -51,6 +58,10 @@ def recommendation_email(
         outlook_line = _outlook_line(r)
         if outlook_line:
             lines.append(outlook_line)
+        # '확인 못 함'과 '악재 없음'을 가른다 — 검증을 통과한 것처럼 읽히면 안 된다
+        verdict = (verdicts or {}).get(r.ticker)
+        if verdict and not verdict.checked:
+            lines.append(f"   ⚠ 악재 확인 못 함: {verdict.reason}")
         lines.extend([f"   추천 근거: {r.reason}", ""])
 
     if len(recommendations) < target_stock_count:
@@ -62,7 +73,15 @@ def recommendation_email(
         )
         lines.append("")
 
-    lines.append("※ 09:08에 위 목표 매수가로 지정가 주문을 넣고, 10:10까지 체결되지 않으면 취소합니다.")
+    # 뉴스 검증에서 빠진 종목 — 메일에 없으면 "왜 추천이 바뀌었나/왜 덜 샀나"를 알 길이 없다
+    if blocked:
+        lines.append("■ 악재로 제외된 종목")
+        for v in blocked:
+            lines.append(f"   {v.ticker}: {v.reason}")
+        lines.append("")
+
+    # 시각은 적지 않는다 — 매수 시각은 설정값(BUY_TIME)이라 본문에 박으면 기본값이 바뀔 때 어긋난다
+    lines.append("※ 매수 시각에 위 목표 매수가로 지정가 주문을 넣고, 10:10까지 체결되지 않으면 취소합니다.")
     # 매도가를 한 줄도 싣지 못했으면 이 주석도 뺀다 — 메일에 없는 값을 설명하는 꼴이 된다
     if any(_sell_target_line(r) for r in recommendations):
         lines.append(
