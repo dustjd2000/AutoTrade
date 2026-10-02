@@ -710,6 +710,17 @@ def test_user_prompt_lists_already_picked_tickers_with_a_different_notice():
     assert "악재" not in picked_line
 
 
+def test_user_prompt_with_already_picked_asks_only_for_the_additional_count():
+    """재추천은 '추가로 N개만'을 요구한다 — 전체 수를 다시 요구하지 않는다 (2026-10-02)."""
+    prompt = build_user_prompt(
+        [stock(ticker="005930")],
+        target_count=1,
+        exclude_tickers=("259960",),
+        already_picked=("000660",),
+    )
+    assert "1개만 추가로" in prompt
+
+
 def test_user_prompt_without_already_picked_has_no_duplicate_notice():
     """생존 종목이 없으면(1차 추천) 중복 금지 문구 자체가 없다."""
     prompt = build_user_prompt([stock(ticker="005930")])

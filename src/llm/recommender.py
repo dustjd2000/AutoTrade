@@ -343,10 +343,19 @@ def build_user_prompt(
             f"뉴스/공시: {headlines}"
         )
 
-    lines.append(
-        f"\n위 데이터를 참고해 오늘 급등이 예상되는 종목 {target_count}개와 "
-        "각 종목의 목표 매수가·목표 매도가를 추천하세요."
-    )
+    picked = tuple(already_picked)
+    if picked:
+        # 재추천은 모자란 수만 요구한다 — 시스템 프롬프트의 종목 수를 그대로 다시 요구하면
+        # 이미 걸러진 후보에서 그만큼을 새로 찾느라 사고가 max_tokens를 다 쓴다 (2026-10-02)
+        lines.append(
+            f"\n위 데이터를 참고해 이미 선정된 종목 외에 오늘 급등이 예상되는 종목 "
+            f"{target_count}개만 추가로 골라, 각 종목의 목표 매수가·목표 매도가를 추천하세요."
+        )
+    else:
+        lines.append(
+            f"\n위 데이터를 참고해 오늘 급등이 예상되는 종목 {target_count}개와 "
+            "각 종목의 목표 매수가·목표 매도가를 추천하세요."
+        )
 
     excluded = tuple(exclude_tickers)
     if excluded:
@@ -356,11 +365,10 @@ def build_user_prompt(
             f"{', '.join(excluded)}**"
         )
 
-    picked = tuple(already_picked)
     if picked:
         # 탈락분(exclude_tickers)과 **다른 문구**를 쓴다 — 같은 문구로 섞으면 생존
         # 종목이 악재 종목으로 읽혀 LLM이 근거 없이 그 종목을 깎아내릴 수 있다. 이 종목은
-        # target_count를 채우려는 재추천이 중복으로 다시 고르는 것을 막기 위한 것뿐이다.
+        # 재추천이 중복으로 다시 고르는 것을 막기 위한 것뿐이다.
         lines.append(
             f"\n**아래 종목은 이미 오늘 추천에 선정됐습니다. 중복 추천하지 마십시오: "
             f"{', '.join(picked)}**"
@@ -569,17 +577,18 @@ class LLMRecommender:
         timeout_seconds: Optional[float] = None,
         exclude_tickers: Iterable[str] = (),
         already_picked: Iterable[str] = (),
+        count: Optional[int] = None,
     ) -> Optional[List[StockRecommendation]]:
         """LLM 호출 및 응답 파싱. 실패/타임아웃/형식 오류 시 None을 반환하고 해당일 매수는 스킵된다.
 
         `exclude_tickers`는 뉴스 검증에서 탈락한 종목을 뺀 재추천에 쓴다 (PRD 5.5-B '뉴스 검증').
-        `already_picked`는 그 재추천에서 이미 살아남은 종목이다 — 재추천도 여전히
-        `target_count`개를 요구하므로, 이걸 알려주지 않으면 LLM이 생존 종목을 다시 골라
-        같은 종목에 배정액이 두 번 들어간다.
+        `already_picked`는 그 재추천에서 이미 살아남은 종목이다 — 이걸 알려주지 않으면
+        LLM이 생존 종목을 다시 골라 같은 종목에 배정액이 두 번 들어간다.
+        `count`는 요구할 종목 수다. 생략하면 설정의 추천 종목 수이고, 재추천은 모자란 수만 넘긴다.
         """
         if timeout_seconds is None:
             timeout_seconds = budget_seconds(self.settings.buy_time, datetime.now())
-        target_count = self.settings.target_stock_count
+        target_count = count if count is not None else self.settings.target_stock_count
         user_prompt = build_user_prompt(daily_data, target_count, exclude_tickers, already_picked)
         # 어떤 입력으로 그 추천이 나왔는지 남긴다 — 추천이 타당했는지 되짚을 유일한 근거다
         logger.info(

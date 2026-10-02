@@ -436,13 +436,17 @@ class DailyWorkflow:
                 "뉴스 검증에서 %d종목이 탈락했습니다: %s — 제외하고 한 번 더 추천받습니다.",
                 len(blocked), ", ".join(excluded),
             )
-            # 생존 종목(kept)도 프롬프트에 알려야 한다 — 재추천도 여전히 target_count개를
-            # 요구하므로, 알리지 않으면 LLM이 생존 종목을 다시 고르는 것이 "정상 동작"이
-            # 되어버려 같은 종목에 배정액이 두 번 들어간다 (리뷰에서 지적된 치명적 결함).
+            # 생존 종목(kept)도 프롬프트에 알려야 한다 — 알리지 않으면 LLM이 생존 종목을
+            # 다시 고르는 것이 "정상 동작"이 되어버려 같은 종목에 배정액이 두 번 들어간다
+            # (리뷰에서 지적된 치명적 결함).
+            # 요구 수는 모자란 만큼만이다 — 전체 수를 다시 요구하면 사고가 max_tokens를 다
+            # 써 재추천이 통째로 실패했다 (2026-10-02).
             already_picked = tuple(r.ticker for r in kept)
-            replacements = self.recommender.recommend(
-                daily_data, exclude_tickers=excluded, already_picked=already_picked
-            ) or []
+            shortfall = self.strategy.target_stock_count - len(kept)
+            replacements = (self.recommender.recommend(
+                daily_data, exclude_tickers=excluded, already_picked=already_picked,
+                count=shortfall,
+            ) or []) if shortfall > 0 else []
             # 재추천 뒤에는 더 미룰 라운드가 없으므로 예약분 없이 남은 시간을 그대로 쓴다
             replacement_verdicts = self._verify_news(replacements)
             verdicts.update(replacement_verdicts)

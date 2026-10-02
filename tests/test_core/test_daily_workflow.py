@@ -2179,6 +2179,10 @@ def test_a_blocking_verdict_drops_the_stock_and_recommends_once_more(tmp_path):
     # 생존 종목(000660)도 재추천 프롬프트에 알려야 한다 — 안 그러면 LLM이 그 종목을
     # 다시 고르는 것이 "정상 동작"이 돼 같은 종목에 배정액이 두 번 들어간다 (Critical 1).
     assert workflow.recommender.calls[1]["already_picked"] == ("000660",)
+    # 모자란 수만 요구한다 — 전체 수를 다시 요구하면 사고가 max_tokens를 다 쓴다 (2026-10-02)
+    assert workflow.recommender.calls[1]["count"] == (
+        workflow.strategy.target_stock_count - 1
+    )
     assert sorted(r.ticker for r in workflow.strategy._recommendations) == ["000660", "035420"]
 
 
