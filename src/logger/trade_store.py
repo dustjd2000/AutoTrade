@@ -1,3 +1,4 @@
+import json
 import logging
 import sqlite3
 from contextlib import closing
@@ -129,6 +130,21 @@ CREATE TABLE IF NOT EXISTS exit_reviews (
     decision_count INTEGER NOT NULL DEFAULT 0,
     review TEXT,
     UNIQUE (day, ticker)
+);
+"""
+
+# 장중 투자자별 순매수 잠정치 (ka10064, 2026-10-08). 15:35에 그날 매도한 종목만 받아 둔다 —
+# AI 매도 판단에 수급을 넣을 가치가 있는지 매도 결과와 대조해 보려는 관찰 기록이고, 아직
+# 어떤 판단에도 쓰지 않는다. raw_json에 투신·연기금 등 세부 구분까지 그대로 남긴다.
+INVESTOR_FLOW_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS investor_flow (
+    day TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    tm TEXT NOT NULL,
+    foreign_net INTEGER NOT NULL,
+    institution_net INTEGER NOT NULL,
+    raw_json TEXT,
+    UNIQUE (day, ticker, tm)
 );
 """
 
@@ -340,6 +356,7 @@ class TradeStore:
             conn.execute(AI_EXIT_DECISION_SCHEMA_SQL)
             conn.execute(POSITION_PEAK_SCHEMA_SQL)
             conn.execute(EXIT_REVIEW_SCHEMA_SQL)
+            conn.execute(INVESTOR_FLOW_SCHEMA_SQL)
             self._migrate(conn, "trades", MIGRATIONS)
             self._migrate(conn, "recommendations", RECOMMENDATION_MIGRATIONS)
             conn.commit()
@@ -739,6 +756,41 @@ class TradeStore:
                 (day.isoformat(),),
             ).fetchall()
         return {row["ticker"]: row["peak_return"] for row in rows}
+
+    def save_investor_flow(self, day: date, ticker: str, points) -> None:
+        """장중 투자자 잠정치를 남긴다. 같은 시각은 덮어쓴다 (15:35를 다시 돌려도 한 벌)."""
+        with closing(self._connect()) as conn:
+            conn.executemany(
+                """INSERT INTO investor_flow
+                   (day, ticker, tm, foreign_net, institution_net, raw_json)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(day, ticker, tm) DO UPDATE SET
+                       foreign_net = excluded.foreign_net,
+                       institution_net = excluded.institution_net,
+                       raw_json = excluded.raw_json""",
+                [
+                    (
+                        day.isoformat(),
+                        ticker,
+                        point.tm,
+                        point.foreign,
+                        point.institution,
+                        json.dumps(point.raw, ensure_ascii=False),
+                    )
+                    for point in points
+                ],
+            )
+            conn.commit()
+
+    def investor_flow_for(self, day: date, ticker: str) -> List[Tuple[str, int, int]]:
+        """그날 그 종목의 (시각, 외국인, 기관) 순매수 잠정치, 시각 오름차순."""
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """SELECT tm, foreign_net, institution_net FROM investor_flow
+                   WHERE day = ? AND ticker = ? ORDER BY tm""",
+                (day.isoformat(), ticker),
+            ).fetchall()
+        return [(row["tm"], row["foreign_net"], row["institution_net"]) for row in rows]
 
     def tickers_with_unknown_pnl(self, day: date) -> Set[str]:
         """그날 체결된 매도 중 `realized_pnl`을 모르는(NULL) 종목코드 (F2, 2026-09-22 최종 리뷰).

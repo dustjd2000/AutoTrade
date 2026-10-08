@@ -64,13 +64,30 @@ class StockMaster:
     name: Optional[str]
     price: float
 
+
+@dataclass
+class InvestorFlowPoint:
+    """장중 투자자별 순매수 잠정치 한 시점 (ka10064, 2026-10-08 추가).
+
+    키움이 장중 몇 차례 발표하는 잠정치라 1분 단위가 아니다 — 2026-10-08 09:30 실측에서
+    09:00·09:19 두 행뿐이었다. 값은 당일 누적 순매수 수량(주)이다. 지금은 기록만 하고
+    판단에는 쓰지 않는다.
+    """
+
+    tm: str            # HHMMSS
+    foreign: int       # 외국인 누적 순매수 (주)
+    institution: int   # 기관계 누적 순매수 (주)
+    raw: Dict[str, Any]  # 투신·보험·은행·연기금 등 세부 구분까지 응답 행 그대로
+
 # 키움 API ID / 경로 (경로는 /api/dostk/{분류} 규약)
 STOCK_INFO_API_ID = "ka10001"   # 주식기본정보요청
 ORDERBOOK_API_ID = "ka10004"    # 주식호가요청
 DAILY_PRICE_API_ID = "ka10086"  # 일별주가요청
+INTRADAY_INVESTOR_API_ID = "ka10064"  # 장중투자자별매매차트요청
 
 STOCK_INFO_PATH = "/api/dostk/stkinfo"
 MARKET_PATH = "/api/dostk/mrkcond"
+CHART_PATH = "/api/dostk/chart"
 
 # ka10086이 한 번 호출에 돌려주는 20거래일치를 그대로 쓴다. 여기에 당일 봉이 섞여 오므로
 # 그것을 뺀 나머지(전일 1행 + 그 이전 행들)로 전일 지표와 급증 배수를 계산한다.
@@ -278,6 +295,34 @@ class MarketDataClient:
                 else 0.0
             ),
         )
+
+    def get_intraday_investor_flow(self, ticker: str) -> List[InvestorFlowPoint]:
+        """그날 장중 투자자별 순매수 잠정치 시계열 (시각 오름차순).
+
+        한 번 호출로 그날 발표된 시점이 전부 오므로, 장 마감 뒤 한 번만 부르면 된다.
+        amt_qty_tp=2(수량), trde_tp=0(순매수) — 2026-10-08 진단(`scripts/check_investor_flow.py`)
+        에서 확인한 요청 모양이다.
+        """
+        data, _ = self._client.request(
+            CHART_PATH,
+            INTRADAY_INVESTOR_API_ID,
+            {"mrkt_tp": "000", "amt_qty_tp": "2", "trde_tp": "0", "stk_cd": ticker},
+        )
+        rows = data.get("opmr_invsr_trde_chart")
+        if not isinstance(rows, list):
+            logger.error("장중 투자자 응답에서 목록 필드를 찾지 못했습니다. 응답 키: %s", list(data.keys()))
+            return []
+        points = [
+            InvestorFlowPoint(
+                tm=str(row.get("tm", "")).strip(),
+                foreign=to_int(row.get("frgnr_invsr")),
+                institution=to_int(row.get("orgn")),
+                raw=row,
+            )
+            for row in rows
+            if str(row.get("tm", "")).strip()
+        ]
+        return sorted(points, key=lambda point: point.tm)
 
     def get_orderbook(self, ticker: str) -> dict:
         """호가 조회."""

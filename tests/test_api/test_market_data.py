@@ -307,3 +307,31 @@ def test_get_today_metrics_skips_a_leading_row_that_is_not_todays():
     assert metrics.low == 69_500.0
     assert metrics.close == 71_000.0
     assert metrics.change_rate == pytest.approx(1.4286, abs=1e-3)
+
+
+def test_get_intraday_investor_flow_parses_rows_in_time_order():
+    client, calls = capturing_client(
+        {
+            "opmr_invsr_trde_chart": [
+                {"tm": "091900", "frgnr_invsr": "-244000", "orgn": "+1200", "invtrt": "0"},
+                {"tm": "090000", "frgnr_invsr": "0", "orgn": "0"},
+                {"tm": "", "frgnr_invsr": "5"},
+            ]
+        }
+    )
+
+    points = client.get_intraday_investor_flow("005930")
+
+    assert calls[0]["api_id"] == "ka10064"
+    assert calls[0]["params"]["stk_cd"] == "005930"
+    assert [(p.tm, p.foreign, p.institution) for p in points] == [
+        ("090000", 0, 0),
+        ("091900", -244000, 1200),
+    ]
+    assert points[1].raw["invtrt"] == "0"
+
+
+def test_get_intraday_investor_flow_returns_empty_on_unexpected_shape():
+    client = make_client({"return_code": 0})
+
+    assert client.get_intraday_investor_flow("005930") == []

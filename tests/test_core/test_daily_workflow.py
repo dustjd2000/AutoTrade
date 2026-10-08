@@ -1454,6 +1454,7 @@ class FakeMarketData:
 
     def __init__(self):
         self.today_metrics = {}
+        self.investor_flow = {}
         # 이 집합에 든 종목코드는 today_metrics를 보지 않고 조회 자체가 터진 것처럼 군다
         # (candle-lookup exception path — None을 돌려주는 것과는 다른 분기다).
         self.raise_for = set()
@@ -1462,6 +1463,11 @@ class FakeMarketData:
         if ticker in self.raise_for:
             raise RuntimeError("candle lookup failed")
         return self.today_metrics.get(ticker)
+
+    def get_intraday_investor_flow(self, ticker):
+        if ticker in self.raise_for:
+            raise RuntimeError("investor flow lookup failed")
+        return self.investor_flow.get(ticker, [])
 
 
 class FakeReviewer:

@@ -1514,6 +1514,7 @@ class DailyWorkflow:
                     self.trade_store.save_exit_review(row)
                 except Exception:
                     logger.exception("매도 판단 검증 저장 실패: %s", row.label)
+            self._record_investor_flow(today, [row.ticker for row in rows])
         else:
             logger.info("오늘 매도한 종목이 없습니다 — 매도 판단 검증을 건너뜁니다 (%s).", today)
 
@@ -1525,6 +1526,22 @@ class DailyWorkflow:
         subject, body = templates.exit_review_email(rows, decisions, today, tuning)
         self.email.send(subject, body)
         logger.info("매도 판단 검증 메일 발송 (%s, %d종목)", today, len(rows))
+
+    def _record_investor_flow(self, today: date, tickers: Iterable[str]) -> None:
+        """오늘 매도한 종목의 장중 외국인·기관 순매수 잠정치를 남긴다 (관찰 기록, 2026-10-08).
+
+        AI 매도 판단에 수급을 넣을 가치가 있는지 매도 결과와 대조해 보려는 것이라 판단에는
+        쓰지 않는다. ka10064는 한 번 호출로 그날 시계열이 다 오므로 장 마감 뒤 한 번이면
+        되고, 장중 루프의 호출 수는 늘지 않는다. 실패는 기록만 빠진다.
+        """
+        for ticker in dict.fromkeys(tickers):
+            try:
+                points = self.collector.market_data.get_intraday_investor_flow(ticker)
+                self.trade_store.save_investor_flow(today, ticker, points)
+            except Exception:
+                logger.exception("장중 투자자 수급 기록 실패: %s", ticker)
+                continue
+            logger.info("장중 투자자 수급 기록: %s %d시점", ticker, len(points))
 
     def _fill_exit_reviews(self, today: date, rows, decisions) -> None:
         """LLM 평가문을 받아 rows에 채운다. 판정 불가(unknown) 종목은 보내지 않는다."""

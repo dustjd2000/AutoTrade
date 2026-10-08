@@ -2,6 +2,7 @@
 import sqlite3
 from datetime import date, datetime
 
+from src.api.market_data import InvestorFlowPoint
 from src.llm.exit_advisor import make_exit_prompt_store
 from src.logger.trade_store import AIExitDecisionRow
 
@@ -69,6 +70,36 @@ def test_review_saves_rows_and_sends_mail(tmp_path):
     assert "순이익 기회 없음" in body
     assert "10:20" in body and "손실은 손절선이 관리" in body
     assert "10:20 하방선 이탈 뒤 보유했다." in body
+
+
+def test_review_records_intraday_investor_flow_for_sold_tickers(tmp_path):
+    workflow = build_exit_workflow(tmp_path)
+    samsung_life_day(workflow)
+    workflow.collector.market_data.investor_flow = {
+        "032830": [
+            InvestorFlowPoint("091900", -244_000, 0, {"tm": "091900"}),
+            InvestorFlowPoint("090000", 0, 0, {"tm": "090000"}),
+        ]
+    }
+
+    workflow.review_exits(DAY)
+
+    assert workflow.trade_store.investor_flow_for(DAY, "032830") == [
+        ("090000", 0, 0),
+        ("091900", -244_000, 0),
+    ]
+
+
+def test_investor_flow_failure_does_not_block_the_review(tmp_path):
+    workflow = build_exit_workflow(tmp_path)
+    samsung_life_day(workflow)
+    workflow.collector.market_data.raise_for = {"032830"}
+
+    workflow.review_exits(DAY)
+
+    assert workflow.trade_store.investor_flow_for(DAY, "032830") == []
+    assert len(workflow.trade_store.exit_reviews_for(DAY)) == 1
+    assert "매도 판단 검증" in workflow.email.sent[-1][0]
 
 
 def test_review_passes_the_morning_outlook_to_the_llm(tmp_path):
