@@ -613,8 +613,12 @@ class LLMRecommender:
                 system=self._system_prompt(),
                 messages=[{"role": "user", "content": user_prompt}],
                 # 응답 형식을 API가 스키마로 강제한다 (설명이 섞이거나 코드펜스가 붙는 것을 방지)
+                # effort는 기본 high면 사고가 길어지는 날 max_tokens를 사고로 다 쓰거나 예산을
+                # 넘긴다 (2026-10-19 두 번 실패) — 사고 토큰 상한(budget_tokens)은 이 모델에서
+                # 400이라 effort로만 줄일 수 있다. 추천은 핵심 판단이라 low가 아니라 medium.
                 output_config={
-                    "format": {"type": "json_schema", "schema": RECOMMENDATION_SCHEMA}
+                    "format": {"type": "json_schema", "schema": RECOMMENDATION_SCHEMA},
+                    "effort": "medium",
                 },
             ) as stream:
                 for _ in stream:

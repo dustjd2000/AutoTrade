@@ -253,6 +253,25 @@ def test_recommend_returns_none_on_empty_text():
     assert _fake_recommender(response).recommend([]) is None
 
 
+def test_recommend_requests_medium_effort_json_schema_output():
+    """기본 effort(high)로 돌면 사고가 max_tokens를 다 쓰는 날이 있다 (2026-10-19)."""
+    response = _response("end_turn", [SimpleNamespace(type="text", text='{"recommendations": []}')])
+    recommender = _fake_recommender(response)
+    calls = []
+
+    def stream(**kwargs):
+        calls.append(kwargs)
+        return _FakeStream(response)
+
+    recommender._client = SimpleNamespace(
+        with_options=lambda **kw: SimpleNamespace(messages=SimpleNamespace(stream=stream))
+    )
+    recommender.recommend([])
+
+    assert calls[0]["output_config"]["effort"] == "medium"
+    assert calls[0]["output_config"]["format"]["type"] == "json_schema"
+
+
 def test_recommend_returns_none_on_refusal():
     response = _response("refusal", [])
     assert _fake_recommender(response).recommend([]) is None
