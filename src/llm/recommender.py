@@ -57,15 +57,7 @@ def budget_seconds(buy_time: dt_time, now: datetime) -> float:
 # 프롬프트로 유형을 제한하는 것만으로는 소프트 제약이라, 이 값으로 코드가 한 번 더 잘라낸다.
 # 유형을 하나만 열거하면 전부 그 값으로 적어 내므로, 고르지 않을 유형까지 함께 둔다.
 SETUP_REBOUND = "rebound"
-SETUP_BREAKOUT = "breakout"
-SETUP_MOMENTUM = "momentum"
-SETUP_TYPES = (SETUP_REBOUND, SETUP_BREAKOUT, SETUP_MOMENTUM)
-# 매수하는 유형 — 2026-10-22에 되돌림 전용에서 추세 추종(돌파·모멘텀)까지 넓혔다
-# (PRD 5.5-B '추천 유형'). 유형을 밝히지 않은 추천("")은 여전히 잘린다.
-BUY_SETUPS = SETUP_TYPES
-# 추세 추종 유형 — 눌림을 기다리면 미체결로 끝나기 쉬워, 목표 매수가를 추천 시점 현재가로
-# 바꿔 현재가 근처 지정가로 산다 (`apply_trend_buy_price`).
-TREND_SETUPS = (SETUP_BREAKOUT, SETUP_MOMENTUM)
+SETUP_TYPES = (SETUP_REBOUND, "breakout", "momentum")
 
 # 응답 스키마 — 형식을 프롬프트로 부탁하지 않고 구조화 출력으로 API가 보장하게 한다.
 # 최상위를 객체로 감싼 것은 스키마 제약(모든 객체에 additionalProperties: false 필요) 때문이다.
@@ -153,16 +145,15 @@ PROMPT_SECTION_ORDER = ("judgment_criteria", "buy_target", "sell_target", "outlo
 
 DEFAULT_PROMPT_SECTIONS: Dict[str, str] = {
     "judgment_criteria": """## 판단 기준 (제공된 데이터 범위 내에서, 우선순위 순)
-- **최근 가격대에서의 위치** — 어느 추천 유형에 해당하는지를 가르는 기준입니다. '최근 고가/저가'는
+- **최근 가격대에서의 위치 — 낙폭이 얼마나 큰 상태인지**가 이번 선별의 전제입니다. '최근 고가/저가'는
   당일을 제외한 최근 20거래일 이내의 최고가·최저가이고, '이동평균'은 같은 구간의 종가 평균입니다.
-  이동평균 아래로 내려와 있거나 최근 저가에 가까울수록 낙폭이 큰 상태(`rebound` 후보)이고, 최근
-  고가 부근이나 그 위에 있으면 돌파 구간(`breakout` 후보)입니다
-- **당일 등락률과 현재가 — 오늘 실제로 힘이 이어지고 있는지**를 봅니다. `rebound`는 그 낙폭을 오늘
-  되돌리고 있는지, `breakout`·`momentum`은 전일의 강세가 오늘도 이어지고 있는지를 봅니다. 오늘 힘이
-  없는 종목보다 오늘 상승하고 있는 종목이 앞섭니다. '당일 지표 없음'으로 표시된 종목은
+  이동평균 아래로 내려와 있거나 최근 저가에 가까울수록 낙폭이 큰 상태이며, 이미 최근 고가를
+  넘어선 종목은 이 전략의 대상이 아닙니다
+- **당일 등락률과 현재가 — 그 낙폭을 오늘 실제로 되돌리고 있는지**를 봅니다. 낙폭이 컸더라도 오늘
+  힘이 없는 종목보다, 오늘 상승으로 돌아선 종목이 앞섭니다. '당일 지표 없음'으로 표시된 종목은
   이 기준을 적용하지 말고 나머지 기준으로만 평가하십시오
 - 전일 거래량 급증 배수 — 그 이전 거래일들의 평균 거래량 대비 전일 거래량의 배수입니다. 평소보다
-  뚜렷하게 많은 거래가 실린 종목(2배 이상)은 재료가 발생해 관심이 몰렸다는 뜻이므로 그 움직임의
+  뚜렷하게 많은 거래가 실린 종목(2배 이상)은 재료가 발생해 관심이 몰렸다는 뜻이므로 되돌림의
   힘을 재는 근거로 무겁게 보십시오. '판단불가'로 표시된 종목은 이 기준을 적용하지 말고 나머지 기준으로만 평가하십시오
 - 전일 등락률의 방향과 크기 — 거래량이 함께 늘며 오른 종목이 다음 거래일까지 흐름을 잇는 경우가
   많습니다. 거래량만 터지고 크게 하락한 종목은 악재일 가능성을 함께 고려하십시오
@@ -208,10 +199,8 @@ reason에 쓴 내용을 말만 바꿔 다시 쓰지 마십시오.
 reason은 반드시 제공된 데이터의 구체적 수치를 인용해 작성하십시오.
 ("전일 등락률 +2.15%, 전일 거래량 320,450주(평균 대비 3.4배)"처럼 구체적으로.
 "긍정적 모멘텀", "상승 여력" 같은 모호한 표현은 금지합니다.)
-`rebound`는 낙폭이 어디까지 밀렸고 오늘 얼마나 되돌렸는지를 반드시 함께 적으십시오
-("이동평균 82,300원 대비 -6.1%인 77,300원까지 밀렸다가 오늘 +1.80%"처럼).
-`breakout`·`momentum`은 전일의 강세와 오늘 그 흐름이 이어지는 정도를 함께 적으십시오
-("전일 +9.6%로 최근 고가 53,200원을 넘어 마감한 뒤 오늘 +12.8%"처럼).""",
+낙폭이 어디까지 밀렸고 오늘 얼마나 되돌렸는지를 반드시 함께 적으십시오
+("이동평균 82,300원 대비 -6.1%인 77,300원까지 밀렸다가 오늘 +1.80%"처럼).""",
 }
 
 
@@ -224,31 +213,27 @@ def build_locked_prompt_text(target_count: int) -> str:
     return f"""당신은 한국 주식시장(코스피) 단기 모멘텀을 분석하는 애널리스트입니다.
 
 ## 역할
-사용자가 제공하는 **전일 마감 데이터와 당일 장중 데이터를** 근거로, 오늘 오를 것으로 보는
-코스피 대형주 {target_count}종목을 선별하고, 각 종목의 **목표 매수가**와 **목표 매도가**를 제시합니다.
-대상은 **최근 낙폭을 되돌리는 종목**(`rebound`)과 **전일의 강세가 오늘도 이어지는 추세 추종
-종목**(`breakout`·`momentum`)입니다. 사용자가 제공하는 목록은 이미 전일 거래량 급증 배수 상위로
-추려진 후보군입니다.
+사용자가 제공하는 **전일 마감 데이터와 당일 장중 데이터를** 근거로, **최근 낙폭을 되돌리는 구간에
+있는** 코스피 대형주 {target_count}종목을 선별하고, 각 종목의 **목표 매수가**와 **목표 매도가**를
+제시합니다. 사용자가 제공하는 목록은 이미 전일 거래량 급증 배수 상위로 추려진 후보군입니다.
 
 ## 절대 규칙
 1. 반드시 제공된 데이터에 있는 종목 중에서만 선택하십시오. 목록에 없는 종목을 추천하지 마십시오.
 2. 당신의 학습 데이터에 있는 과거 정보나 기억(종목에 대한 일반적 평판 등)에 의존하지 마십시오. 오직
    사용자 메시지로 제공되는 데이터만 근거로 삼으십시오.
 3. 서로 다른 종목만 선택하십시오 (중복 불가).
-4. 모든 추천에 아래 '추천 유형' 중 실제로 보이는 유형을 붙이십시오. 유형 사이에 정원이나
-   우선순위는 없습니다.
-5. 절대적인 확신이 없어도, 유형과 관계없이 상대적으로 가장 강한 신호를 보이는 종목 순으로
-   {target_count}종목을 채우십시오. 오늘 오를 근거가 보이는 종목이 그보다 적으면 더 적게 선정하고,
-   하나도 없으면 빈 배열을 반환하십시오.
+4. **아래 '추천 유형'의 `rebound`에 해당하는 종목만 선택하십시오.** 다른 신호가 아무리 강해도
+   `rebound`가 아닌 종목은 추천하지 마십시오.
+5. 절대적인 확신이 없어도, `rebound` 종목 중 상대적으로 가장 강한 신호를 보이는 종목 순으로
+   {target_count}종목을 채우십시오. `rebound` 종목 자체가 그보다 적으면 더 적게 선정하고, 하나도
+   없으면 빈 배열을 반환하십시오 — 유형을 바꿔 적어 정원을 채우지 마십시오.
 6. target_price는 **원 단위 정수**로, 해당 종목의 **당일 현재가** 대비 ±5% 이내에서 제시하십시오.
-   당일 지표가 없는 종목만 전일 종가를 기준으로 삼으십시오. `breakout`·`momentum` 종목은 아래
-   '목표 매수가 작성 지침'과 관계없이 **당일 현재가를 그대로** 적으십시오 — 이 종목들은 추천
-   시점의 현재가 근처에서 바로 매수합니다.
+   당일 지표가 없는 종목만 전일 종가를 기준으로 삼으십시오.
 7. target_sell_price는 **원 단위 정수**로, 반드시 target_price보다 높아야 합니다.
 
 ## 추세 판단
 `5일 이평`이 함께 주어진 종목은 그 값과 `20일 대비` 비율로 **추세 방향**을 판단하십시오.
-낙폭이 크다는 것과 떨어지는 중이라는 것은 다릅니다 — `rebound`가 노리는 것은 **눌렸다가
+낙폭이 크다는 것과 떨어지는 중이라는 것은 다릅니다 — 이 전략이 노리는 것은 **눌렸다가
 되돌리는 종목**이지, 계속 내려가는 종목이 아닙니다.
 **5일 이평이 20일 이평보다 낮고 그 격차가 벌어지는 방향이면 하락 추세로 보고 순위를
 낮추십시오.** "이평 대비 더 많이 떨어졌다"는 그 자체로는 매력이 아닙니다 — 추세가 꺾인
@@ -256,17 +241,15 @@ def build_locked_prompt_text(target_count: int) -> str:
 `5일 이평`이 없는 종목은 이 기준을 적용하지 말고 나머지 기준으로만 평가하십시오.
 
 ## 추천 유형 (setup)
-각 종목에 아래 셋 중 하나를 `setup`으로 붙이십시오. 실제로 보이는 대로 붙이십시오 — 유형에 따라
-매수 가격을 정하는 방식이 다릅니다.
+각 종목에 아래 셋 중 하나를 `setup`으로 붙이십시오. 실제로 보이는 대로 붙이고, 추천하고 싶은
+종목에 맞춰 유형을 바꿔 적지 마십시오.
 - `rebound` — **낙폭을 되돌리는 구간**입니다. 최근 가격대에서 크게 밀려 있고(전일 종가나 현재가가
   이동평균 아래이거나 최근 저가에 가깝습니다), 오늘 그 낙폭을 되돌리며 올라오고 있는 종목입니다.
-  목표 매수가는 '목표 매수가 작성 지침'을 따릅니다.
 - `breakout` — 최근 고가를 넘어섰거나 그 부근까지 올라온 돌파 구간의 종목입니다.
-- `momentum` — 위 둘 어디에도 해당하지 않고, 전일 강세와 거래량으로 흐름이 오늘도 이어지는
-  종목입니다.
+- `momentum` — 위 둘 어디에도 해당하지 않고, 전일 강세와 거래량만으로 흐름이 이어지는 종목입니다.
 
-`breakout`·`momentum`은 추세 추종이라, 이미 오른 가격을 이유로 배제하지 마십시오. 대신 오늘의
-강세가 전일 거래량 급증 같은 근거로 뒷받침되는지, 오늘 상승이 꺾이고 있지 않은지를 보십시오."""
+**이번 요청에서 추천할 종목은 `rebound`뿐입니다.** 나머지 두 유형은 유형 판정을 정직하게 하기
+위한 선택지이며, 그렇게 판단한 종목은 목록에서 빼십시오."""
 
 
 def build_system_prompt(target_count: int, sections: Optional[Dict[str, str]] = None) -> str:
@@ -299,9 +282,9 @@ class StockRecommendation:
     # 전일 종가는 여기까지 실어 나르지 않는다 (2026-08-14) — 목표가 가드레일은 추천 산출
     # 시점에 `DailyStockData`를 직접 보고 끝나므로, 매수 시각까지 넘길 이유가 없다.
     recommend_price: float = 0.0
-    # LLM이 스스로 밝힌 셋업 유형 (PRD 5.5-B '추천 유형'). `BUY_SETUPS`에 없으면
+    # LLM이 스스로 밝힌 셋업 유형 (PRD 5.5-B '추천 유형 제한'). `SETUP_REBOUND`가 아니면
     # `drop_other_setups`가 주문 경로에 들어가기 전에 잘라낸다. ""는 '밝히지 않음'이며
-    # 마찬가지로 잘린다 — 유형을 모르면 매수 가격 규칙(`apply_trend_buy_price`)을 정할 수 없다.
+    # 마찬가지로 잘린다 — 유형을 확인하지 못한 추천을 통과시키면 필터가 조용히 꺼진다.
     setup: str = ""
     # LLM이 본 오늘의 움직임 전망 (PRD 5.5-B '오늘 전망'). 추천 메일 표시와 15:35 검증에만
     # 쓰고 주문에는 쓰지 않는다 — `target_sell_price`와 같은 방침이다. ""는 '산출 안 됨'이며,
@@ -461,19 +444,19 @@ def parse_recommendations(raw_text: str) -> List[StockRecommendation]:
 def drop_other_setups(
     recommendations: List[StockRecommendation],
 ) -> List[StockRecommendation]:
-    """매수하는 유형(`BUY_SETUPS`) 외의 추천을 걸러낸다 (PRD 5.5-B '추천 유형').
+    """낙폭 되돌림(`SETUP_REBOUND`) 외의 추천을 걸러낸다 (PRD 5.5-B '추천 유형 제한').
 
-    2026-10-22부터 세 유형을 모두 사므로, 실제로 걸리는 것은 유형을 밝히지 않았거나 목록에
-    없는 값을 낸 추천이다 — 유형을 모르면 매수 가격 규칙을 정할 수 없다. 정원을 채우지 못한
-    몫은 `build_buy_plans`가 현금으로 남기므로(1호 전략), 여기서 억지로 채우지 않는다.
+    프롬프트만으로는 소프트 제약이라 — 조건에 맞는 종목이 없는 날 LLM이 정원을 채우려고
+    다른 유형을 섞어 낼 수 있다 — 코드가 한 번 더 자른다. 정원을 채우지 못한 몫은
+    `build_buy_plans`가 현금으로 남기므로(1호 전략), 여기서 억지로 채우지 않는다.
     """
     kept = []
     for rec in recommendations:
-        if rec.setup in BUY_SETUPS:
+        if rec.setup == SETUP_REBOUND:
             kept.append(rec)
         else:
             logger.info(
-                "매수 유형이 아닌 추천을 제외합니다: %s %s (setup=%s) — %s",
+                "낙폭 되돌림이 아닌 추천을 제외합니다: %s %s (setup=%s) — %s",
                 rec.ticker,
                 rec.name,
                 rec.setup or "없음",
@@ -545,32 +528,6 @@ def attach_recommend_price(
     today_price = {data.ticker: data.today_price for data in daily_data}
     for rec in recommendations:
         rec.recommend_price = today_price.get(rec.ticker, 0.0)
-
-
-def apply_trend_buy_price(recommendations: List[StockRecommendation]) -> None:
-    """추세 추종 유형의 목표 매수가를 추천 시점 현재가로 바꾼다 (제자리 수정, PRD 5.5-B).
-
-    눌림을 노린 목표가는 계속 오르는 종목에서 10:10까지 체결되지 않는다. 기준점을 현재가로
-    옮기면 매수 시각의 허용 밴드(`_gap_note`·`_order_price`)가 그대로 '현재가 근처 지정가'가
-    된다 — 그사이 상승 허용치를 넘게 올랐으면 추격하지 않고 건너뛴다. 바뀐 값이 추천 기록에도
-    그대로 남아, 메일·15:35 검증이 실제 주문 기준과 어긋나지 않는다.
-
-    `attach_recommend_price` 뒤에 불러야 한다. 현재가를 모르면(0) LLM 목표가를 그대로 둔다.
-    """
-    for rec in recommendations:
-        if rec.setup not in TREND_SETUPS or rec.recommend_price <= 0:
-            continue
-        original = rec.target_price
-        rec.target_price = int(rec.recommend_price)
-        if rec.target_price != original:
-            logger.info(
-                "추세 추종 매수가 = 추천 시점 현재가: %s %s (setup=%s) — %s원 → %s원",
-                rec.ticker,
-                rec.name,
-                rec.setup,
-                f"{original:,}",
-                f"{rec.target_price:,}",
-            )
 
 
 def warn_invalid_sell_targets(recommendations: List[StockRecommendation]) -> None:
@@ -722,7 +679,7 @@ class LLMRecommender:
         recommendations = drop_other_setups(recommendations)
         if not recommendations:
             logger.warning(
-                "매수 유형으로 분류된 추천이 없습니다 — 오늘 매수를 스킵합니다 "
+                "낙폭 되돌림 구간의 종목이 없습니다 — 오늘 매수를 스킵합니다 "
                 "(prompt_version=%s).",
                 self.prompt_version,
             )
@@ -730,7 +687,6 @@ class LLMRecommender:
 
         apply_price_guardrail(recommendations, daily_data)
         attach_recommend_price(recommendations, daily_data)
-        apply_trend_buy_price(recommendations)
         warn_invalid_sell_targets(recommendations)
         # 매수가와 매도가를 함께 남긴다 — 나중에 실제 고가와 대조해 목표 매도가가
         # 쓸 만했는지 되짚을 근거다 (2026-09-03부터 recommendations 테이블에도 영구 저장된다)
