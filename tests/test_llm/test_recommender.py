@@ -14,6 +14,7 @@ from src.llm.recommender import (
     RECOMMENDATION_SCHEMA,
     StockRecommendation,
     apply_price_guardrail,
+    apply_trend_buy_price,
     attach_recommend_price,
     budget_seconds,
     build_locked_prompt_text,
@@ -363,8 +364,8 @@ def test_drop_unknown_tickers_keeps_only_candidates():
     assert [r.ticker for r in kept] == ["005930"]
 
 
-# ── 추천 유형 (낙폭 되돌림) ─────────────────────────────────
-def test_drop_other_setups_keeps_only_rebound():
+# ── 추천 유형 (되돌림 + 추세 추종, 2026-10-22) ──────────────────
+def test_drop_other_setups_keeps_all_buy_setups():
     recommendations = [
         StockRecommendation("005930", "삼성전자", 70_000, "낙폭 되돌림", setup="rebound"),
         StockRecommendation("000660", "SK하이닉스", 250_000, "신고가 돌파", setup="breakout"),
@@ -373,39 +374,71 @@ def test_drop_other_setups_keeps_only_rebound():
 
     kept = drop_other_setups(recommendations)
 
-    assert [r.ticker for r in kept] == ["005930"]
+    assert [r.ticker for r in kept] == ["005930", "000660", "035420"]
 
 
-def test_drop_other_setups_drops_missing_setup():
-    """유형을 밝히지 않은 추천은 통과시키지 않는다 — 통과시키면 필터가 조용히 꺼진다."""
-    assert drop_other_setups([StockRecommendation("005930", "삼성전자", 70_000, "수급")]) == []
+def test_drop_other_setups_drops_missing_or_unknown_setup():
+    """유형을 모르면 매수 가격 규칙을 정할 수 없으므로 통과시키지 않는다."""
+    recommendations = [
+        StockRecommendation("005930", "삼성전자", 70_000, "수급"),
+        StockRecommendation("000660", "SK하이닉스", 250_000, "수급", setup="swing"),
+    ]
+    assert drop_other_setups(recommendations) == []
 
 
-def test_recommend_returns_none_when_no_rebound_stock():
-    """낙폭 되돌림 종목이 없는 날은 정원을 채우지 않고 그날 매수를 스킵한다."""
-    text = (
-        '{"recommendations": [{"ticker": "068270", "name": "셀트리온",'
-        ' "target_price": 180000, "reason": "돌파", "setup": "breakout"}]}'
-    )
-    response = _response("end_turn", [SimpleNamespace(type="text", text=text)])
+def test_apply_trend_buy_price_uses_recommend_price_for_trend_setups():
+    recommendations = [
+        StockRecommendation("028050", "삼성E&A", 52_000, "돌파", setup="breakout",
+                            recommend_price=53_900.0),
+        StockRecommendation("035420", "NAVER", 198_000, "흐름 지속", setup="momentum",
+                            recommend_price=201_500.0),
+        StockRecommendation("005930", "삼성전자", 69_500, "되돌림", setup="rebound",
+                            recommend_price=70_200.0),
+    ]
 
-    assert _fake_recommender(response).recommend([stock(ticker="068270")]) is None
+    apply_trend_buy_price(recommendations)
+
+    assert [r.target_price for r in recommendations] == [53_900, 201_500, 69_500]
 
 
-def test_recommend_keeps_rebound_and_drops_the_rest():
+def test_apply_trend_buy_price_keeps_llm_target_when_price_unknown():
+    """추천 시점 현재가를 모르면(0) 대신할 값이 없으니 LLM 목표가를 그대로 둔다."""
+    rec = StockRecommendation("028050", "삼성E&A", 52_000, "돌파", setup="breakout")
+
+    apply_trend_buy_price([rec])
+
+    assert rec.target_price == 52_000
+
+
+def test_recommend_buys_trend_setup_at_recommend_time_price():
+    """추세 추종 종목은 버려지지 않고, 목표 매수가가 추천 시점 현재가로 바뀐다."""
     text = (
         '{"recommendations": ['
         '{"ticker": "068270", "name": "셀트리온", "target_price": 180000, "reason": "되돌림",'
         ' "setup": "rebound"},'
-        '{"ticker": "005930", "name": "삼성전자", "target_price": 70000, "reason": "돌파",'
+        '{"ticker": "028050", "name": "삼성E&A", "target_price": 52000, "reason": "돌파",'
         ' "setup": "breakout"}]}'
     )
     response = _response("end_turn", [SimpleNamespace(type="text", text=text)])
     result = _fake_recommender(response).recommend(
-        [stock(ticker="068270", prev_close=180_000.0), stock(ticker="005930")]
+        [
+            stock(ticker="068270", prev_close=180_000.0),
+            stock(ticker="028050", prev_close=47_800.0, today_price=53_900.0),
+        ]
     )
 
-    assert [r.ticker for r in result] == ["068270"]
+    assert [(r.ticker, r.target_price) for r in result] == [("068270", 180_000), ("028050", 53_900)]
+
+
+def test_recommend_returns_none_when_no_setup_is_given():
+    """유형을 밝힌 추천이 하나도 없으면 정원을 채우지 않고 그날 매수를 스킵한다."""
+    text = (
+        '{"recommendations": [{"ticker": "068270", "name": "셀트리온",'
+        ' "target_price": 180000, "reason": "수급"}]}'
+    )
+    response = _response("end_turn", [SimpleNamespace(type="text", text=text)])
+
+    assert _fake_recommender(response).recommend([stock(ticker="068270")]) is None
 
 
 def test_parse_reads_setup():
@@ -416,11 +449,14 @@ def test_parse_reads_setup():
     assert parse_recommendations(raw)[0].setup == "rebound"
 
 
-def test_build_system_prompt_restricts_to_rebound():
+def test_build_system_prompt_offers_rebound_and_trend_setups():
     prompt = build_system_prompt(3)
 
     assert "낙폭을 되돌리는 구간" in prompt
-    assert "rebound" in prompt and "breakout" in prompt
+    assert "rebound" in prompt and "breakout" in prompt and "momentum" in prompt
+    # 추세 추종 종목은 현재가를 그대로 적으라는 지시 — 코드의 apply_trend_buy_price와 짝이다
+    assert "당일 현재가를 그대로" in prompt
+    assert "추천할 종목은 `rebound`뿐" not in prompt
 
 
 # ── 프롬프트 ────────────────────────────────────────────────
@@ -787,7 +823,7 @@ def test_default_prompt_text_is_pinned():
     같은 종류).
     """
     digest = hashlib.sha256(build_system_prompt(3).encode("utf-8")).hexdigest()
-    assert digest == "e6e74539b7d5138f3983e132808bf65c71f4739d485636a701f7691992a18f32"
+    assert digest == "b268658e77dc2b56e6f3a9cfed2c9b18678b3dd01042b44af1f85ea4ec81e99b"
 
 
 # ── PromptStore 연동 (파일 프롬프트, PRD '프롬프트 자동 수정') ─────────────
