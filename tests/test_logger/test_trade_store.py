@@ -862,3 +862,40 @@ def test_same_order_id_with_different_fill_is_recorded(tmp_path):
     applied = store.apply_fills([reused], date(2026, 7, 30))
 
     assert applied == 1
+
+
+# ── 2호 전략 자동 중단 장치의 입력 (PRD 5.5-C) ─────────────────────
+def _etf_trade(store, ticker, day, buy, sell, qty=10, fees=0.0):
+    at = datetime.combine(day, datetime.min.time()).replace(hour=9, minute=10)
+    store.record_fill(OrderResult(order_id="b", ticker=ticker, side=OrderSide.BUY,
+                                  status=OrderStatus.FILLED, quantity=qty, filled_quantity=qty,
+                                  filled_price=buy, timestamp=at))
+    if sell is not None:
+        store.record_fill(OrderResult(order_id="s", ticker=ticker, side=OrderSide.SELL,
+                                      status=OrderStatus.FILLED, quantity=qty, filled_quantity=qty,
+                                      filled_price=sell, timestamp=at.replace(hour=15, minute=15)),
+                          avg_price=buy)
+    if fees:
+        with sqlite3.connect(store.db_path) as conn:
+            conn.execute("UPDATE trades SET commission = ? WHERE ticker = ? AND side = 'sell' "
+                         "AND timestamp LIKE ?", (fees, ticker, f"{day.isoformat()}%"))
+
+
+def test_closed_trade_returns_counts_only_requested_tickers_since_start(tmp_path):
+    store = make_store(tmp_path)
+    _etf_trade(store, "069500", date(2026, 10, 20), 10000, 10100)          # +1%
+    _etf_trade(store, "114800", date(2026, 10, 21), 5000, 4900)            # -2%
+    _etf_trade(store, "005930", date(2026, 10, 21), 1000, 500)             # 다른 종목 — 빠진다
+    _etf_trade(store, "069500", date(2026, 10, 10), 10000, 5000)           # 시작일 전 — 빠진다
+    _etf_trade(store, "069500", date(2026, 10, 22), 10000, None)           # 미청산 — 빠진다
+
+    returns = store.closed_trade_returns(date(2026, 10, 15), date(2026, 10, 22), ("069500", "114800"))
+
+    assert [round(r, 6) for r in returns] == [1.0, -2.0]
+
+
+def test_closed_trade_returns_subtracts_fees(tmp_path):
+    store = make_store(tmp_path)
+    _etf_trade(store, "069500", date(2026, 10, 20), 10000, 10100, fees=500.0)  # (1000-500)/100000
+
+    assert [round(r, 6) for r in store.closed_trade_returns(None, date(2026, 10, 22), ("069500",))] == [0.5]

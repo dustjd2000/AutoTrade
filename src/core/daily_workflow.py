@@ -1,11 +1,12 @@
 import json
 import logging
 from dataclasses import asdict, dataclass, field, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from datetime import time as dt_time
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
+from config.settings import STRATEGY_ETF_REGIME, STRATEGY_LLM
 from src.api.account import AccountClient
 from src.core import exit_review
 from src.core.engine import TradingEngine
@@ -29,10 +30,16 @@ from src.llm import tuner as tuner_module
 from src.llm.exit_advisor import EXIT_PROMPT_SECTION_ORDER, build_exit_locked_text, make_exit_prompt_store
 from src.llm.news_verifier import NewsVerdict
 from src.llm.prompt_store import PromptStore
-from src.llm.recommender import LLMRecommender, build_locked_prompt_text, tick_size
+from src.llm.recommender import (
+    LLMRecommender,
+    StockRecommendation,
+    build_locked_prompt_text,
+    tick_size,
+)
 from src.logger.trade_store import MonthlySummary, TradeStore
 from src.notification.email import EmailNotifier
 from src.notification import chart, templates
+from src.strategy import etf_regime
 from src.strategy.llm_momentum import LLMMomentumStrategy
 
 logger = logging.getLogger(__name__)
@@ -139,6 +146,9 @@ class DailyWorkflow:
         news_verifier=None,
         news_verify_enabled: bool = True,
         buy_time: Optional[dt_time] = None,
+        strategy_mode: str = STRATEGY_LLM,
+        etf_kill_loss_percent: float = 5.0,
+        etf_start_date: Optional[date] = None,
     ):
         self.collector = collector
         self.recommender = recommender
@@ -194,6 +204,14 @@ class DailyWorkflow:
         # `self.settings`가 없어 스칼라로 받는다 (buy_price_tolerance_ratio와 같은 꼴).
         # None이면 매수 시각을 몰라 검증에 쓸 시간 예산을 계산할 수 없으므로 건너뛴다.
         self.buy_time = buy_time
+        # 2호 전략 (PRD 5.5-C). 추천 단계만 갈리고 매수·청산·리포트는 1호와 같은 경로다.
+        self.strategy_mode = strategy_mode
+        self.etf_kill_loss_percent = etf_kill_loss_percent
+        self.etf_start_date = etf_start_date
+
+    @property
+    def etf_mode(self) -> bool:
+        return self.strategy_mode == STRATEGY_ETF_REGIME
 
     # ── '매수 예정' 표 (PRD 5.10) ────────────────────────────
     def buy_plan_snapshot(self, today: Optional[date] = None) -> List[BuyPlanView]:
@@ -401,8 +419,14 @@ class DailyWorkflow:
         ]
 
     def recommend_and_notify(self, today: Optional[date] = None) -> None:
-        """09:05 — 전일·당일 데이터 수집 → LLM 추천 → 결과를 이메일로 발송."""
+        """09:05 — 전일·당일 데이터 수집 → LLM 추천 → 결과를 이메일로 발송.
+
+        2호 전략 모드면 LLM 대신 ETF 국면 신호로 오늘 살 종목을 정한다 (`_recommend_etf`).
+        """
         today = today or date.today()
+        if self.etf_mode:
+            self._recommend_etf(today)
+            return
         daily_data = self.collector.collect()
         if not daily_data:
             logger.error("No daily data collected. Skipping today's recommendation.")
@@ -494,6 +518,121 @@ class DailyWorkflow:
         )
         self.email.send(subject, body)
         logger.info("Recommendation email sent for %s", today)
+
+    # ── 2호 전략 (PRD 5.5-C) ────────────────────────────────
+    def _recommend_etf(self, today: date) -> None:
+        """추천 시각 — 자동 중단 확인 → 휴장 확인 → 국면 신호 → 오늘 살 ETF 1종목을 정해 메일로 알린다.
+
+        LLM·뉴스 검증·추천 기록 저장은 하지 않는다 — 15:35 추천 검증과 프롬프트 자동 수정의
+        재료(`recommendations` 테이블)에 ETF 매매가 섞이면 안 된다.
+        """
+        blocked = self._etf_kill_reason(today)
+        if blocked:
+            logger.warning("2호 전략 자동 중단: %s", blocked)
+            self._send_etf_mail(today, None, None, blocked)
+            return
+
+        market_data = self.engine.market_data
+        ticker = etf_regime.LONG_ETF[0]
+        try:
+            # 한 번 조회가 20거래일치라 당일 봉이 섞이면 지난 봉이 19개뿐이다 — 기준일을 하루
+            # 당긴 조회를 합쳐 20개를 채운다 (`intraday_returns`가 같은 날짜를 한 번만 센다)
+            recent = market_data.get_ohlcv(ticker, base_date=today)
+            earlier = market_data.get_ohlcv(ticker, base_date=today - timedelta(days=1))
+        except Exception:
+            logger.exception("2호 전략 신호용 일봉 조회 실패 — 오늘 매수를 스킵합니다.")
+            self.engine.notify("[경고] 2호 전략 일봉 조회 실패 — 오늘 매수를 스킵합니다.")
+            return
+
+        if not etf_regime.traded_today(recent, today):
+            self.engine.note_market_closed("KODEX 200 일봉에 당일 거래가 없습니다")
+            return
+
+        signal = etf_regime.regime_signal(list(recent) + list(earlier), today)
+        pick = etf_regime.pick_etf(signal)
+        if pick is None:
+            logger.info("2호 전략: 오늘은 쉽니다 (신호 %s)", "없음" if signal is None else f"{signal:+.3f}%")
+            self._send_etf_mail(today, signal, None, None)
+            return
+
+        pick_ticker, pick_name = pick
+        try:
+            price = market_data.get_current_price(pick_ticker).price
+        except Exception:
+            logger.exception("2호 전략 현재가 조회 실패 — 오늘 매수를 스킵합니다: %s", pick_ticker)
+            self.engine.notify(f"[경고] 2호 전략 현재가 조회 실패 ({pick_name}) — 오늘 매수를 스킵합니다.")
+            return
+        if price <= 0:
+            logger.error("2호 전략 현재가가 0입니다 — 오늘 매수를 스킵합니다: %s", pick_ticker)
+            return
+
+        # 목표 매수가 = 추천 시점 현재가 — 매수 시각의 허용 밴드가 그대로 '현재가 근처 지정가'가 된다
+        recommendation = StockRecommendation(
+            ticker=pick_ticker,
+            name=pick_name,
+            target_price=int(price),
+            reason=f"직전 {etf_regime.LOOKBACK_DAYS}거래일 장중 평균 {signal:+.3f}%",
+            recommend_price=price,
+            setup=STRATEGY_ETF_REGIME,
+        )
+        self.strategy.set_recommendations([recommendation])
+        board = self._board_from_recommendations([recommendation])
+        self._set_buy_board(today, board)
+        self._watch_plan_prices([pick_ticker])
+        logger.info(
+            "2호 전략: %s 매수 예정 (신호 %+.3f%%, 기준가 %s원)", pick_name, signal, f"{price:,.0f}"
+        )
+        self._send_etf_mail(today, signal, recommendation, None)
+
+    def _etf_kill_reason(self, today: date) -> Optional[str]:
+        """자동 중단 장치 — 2호 ETF 매매 건별 순수익률 누적합이 문턱 이하면 사유를, 아니면 None.
+
+        집계가 실패하면 막지 않는다 — 장치는 손실을 끊는 그물이고, 기록 문제로 매매가 멈추면
+        원인을 모른 채 하루가 빈다. 대신 로그를 남긴다.
+        """
+        if self.etf_kill_loss_percent <= 0:
+            return None
+        try:
+            returns = self.trade_store.closed_trade_returns(
+                self.etf_start_date, today, etf_regime.ETF_TICKERS
+            )
+        except Exception:
+            logger.exception("2호 전략 누적 손익 집계 실패 — 자동 중단 판정을 건너뜁니다.")
+            return None
+        total = sum(returns)
+        if total > -self.etf_kill_loss_percent:
+            return None
+        since = self.etf_start_date.isoformat() if self.etf_start_date else "처음"
+        return (
+            f"{since}부터 {len(returns)}건 누적 순수익률 {total:+.2f}%가 "
+            f"한도 -{self.etf_kill_loss_percent:g}%에 닿았습니다. 다시 시작하려면 .env의 "
+            f"ETF_START_DATE 또는 ETF_KILL_LOSS_PERCENT를 바꾸고 엔진을 재시작하세요."
+        )
+
+    def _send_etf_mail(
+        self, today: date, signal: Optional[float], recommendation, blocked: Optional[str]
+    ) -> None:
+        """2호 전략의 아침 결정을 알린다 — 매수 / 쉼 / 자동 중단 세 경우를 한 꼴로."""
+        signal_text = "계산 불가" if signal is None else f"{signal:+.3f}%"
+        if blocked:
+            subject = f"[2호 전략] {today} 자동 중단"
+            body = blocked
+        elif recommendation is None:
+            subject = f"[2호 전략] {today} 오늘은 쉽니다"
+            body = (
+                f"직전 {etf_regime.LOOKBACK_DAYS}거래일 장중 평균 {signal_text} — "
+                f"문턱 ±{etf_regime.MIN_SIGNAL_PERCENT}% 안쪽이라 매수하지 않습니다."
+            )
+        else:
+            subject = f"[2호 전략] {today} {recommendation.name} 매수 예정"
+            body = (
+                f"직전 {etf_regime.LOOKBACK_DAYS}거래일 장중 평균 {signal_text}\n"
+                f"매수 종목: {format_stock(recommendation.ticker, recommendation.name)}\n"
+                f"기준가(추천 시점 현재가): {recommendation.target_price:,}원\n"
+                f"투입: 예수금의 {self.strategy.investable_ratio * 100:.0f}%, "
+                f"청산: 손절 또는 15:15 (AI 매도 판단 없음)"
+            )
+        self.email.send(subject, body)
 
     def _verify_news(
         self, recommendations, reserve_seconds: float = 0.0
@@ -1326,8 +1465,12 @@ class DailyWorkflow:
         자동 수정은 2026-10-01까지 별도 스케줄 단계였다. 검증 메일에 수정 여부를 싣기 위해
         여기서 부른다 — 순서(검증 → 수정)는 그대로이고, 메일만 수정 **뒤**로 밀렸다.
         오늘 추천이 없어도 자동 수정은 돈다 (최근 10거래일 검증 결과가 재료다).
+        2호 전략 모드에서는 통째로 건너뛴다 — 1호 프롬프트를 고칠 근거가 없다 (PRD 5.5-C).
         """
         today = today or date.today()
+        if self.etf_mode:
+            logger.info("2호 전략 모드 — 추천 검증·프롬프트 자동 수정을 건너뜁니다.")
+            return
         rows = self.trade_store.recommendations_for(today)
         if rows:
             self._fill_actual_moves(today, rows)
@@ -1495,8 +1638,12 @@ class DailyWorkflow:
         잣대는 순수익이다 (스펙 2026-09-22 1절). 분류는 코드가(`exit_review`), 평가문은 LLM이
         쓴다. 매도가 없던 날은 메일이 없지만 자동 수정은 돈다 (쌓인 표본이 재료다).
         어떤 실패도 매매에 영향이 없다. 자동 수정을 여기서 부르는 이유는 `review_recommendations`.
+        2호 전략 모드에서는 통째로 건너뛴다 — AI 매도 판단이 돌지 않아 대조할 판단이 없다.
         """
         today = today or date.today()
+        if self.etf_mode:
+            logger.info("2호 전략 모드 — 매도 판단 검증·프롬프트 자동 수정을 건너뜁니다.")
+            return
         self._sync_fills(today)
         decisions = self.trade_store.ai_exit_decisions_for(today)
         rows = exit_review.build_exit_review_rows(

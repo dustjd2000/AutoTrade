@@ -1,6 +1,7 @@
 import logging
 import os
 from dataclasses import dataclass, field
+from datetime import date
 from datetime import time as dt_time
 from typing import Optional
 
@@ -22,6 +23,11 @@ DEFAULT_BUY_TIME_HHMM = "09:10"
 MIN_RECOMMEND_TO_BUY_MINUTES = 3
 MARKET_OPEN_HHMM = "09:00"
 
+
+# 전략 선택 (PRD 5.5-C) — 한 번에 하나만 돈다. 기본값은 1호라 값을 바꾸기 전까지 동작이 그대로다.
+STRATEGY_LLM = "llm"
+STRATEGY_ETF_REGIME = "etf_regime"
+STRATEGY_MODES = (STRATEGY_LLM, STRATEGY_ETF_REGIME)
 
 # AI 매도 판단 호출 주기로 고를 수 있는 값 (분) — UI 콤보와 validate()가 함께 쓴다.
 AI_EXIT_INTERVAL_CHOICES = (15, 30, 60)
@@ -254,6 +260,17 @@ class Settings:
     def tune_skip_monthly_return_ratio(self) -> float:
         return self.tune_skip_monthly_return_percent / 100
 
+    # 2호 전략 (PRD 5.5-C) — `.env` 전용. 바꾸면 엔진을 다시 시작해야 한다.
+    strategy_mode: str = field(
+        default_factory=lambda: os.getenv("STRATEGY_MODE", STRATEGY_LLM).strip().lower()
+    )
+    # 2호 ETF 매매의 건별 순수익률 누적합이 -이 값(%) 이하가 되면 매수를 멈춘다 (자동 중단 장치).
+    # 누적은 `etf_start_date`부터 센다 — 비우면 처음부터. 풀려면 사람이 둘 중 하나를 바꾼다.
+    etf_kill_loss_percent: float = field(
+        default_factory=lambda: float(os.getenv("ETF_KILL_LOSS_PERCENT", "5"))
+    )
+    etf_start_date: str = field(default_factory=lambda: os.getenv("ETF_START_DATE", "").strip())
+
     # 손절 판정(및 AI 매도 판단 프롬프트·UI의 합산 순손익 표시)에 반영할 비용 —
     # 매매수수료(매수·매도 동일), 세금(매도 시만), 슬리피지(추정)
     commission_percent: float = field(default_factory=lambda: float(os.getenv("COMMISSION_PERCENT", "0.015")))
@@ -288,6 +305,13 @@ class Settings:
                 f"BUY_TIME은 RECOMMEND_TIME보다 {MIN_RECOMMEND_TO_BUY_MINUTES}분 이상 뒤여야 "
                 f"합니다: 추천 {self.recommend_time_hhmm} / 매수 {self.buy_time_hhmm}"
             )
+        if self.strategy_mode not in STRATEGY_MODES:
+            raise ValueError(f"STRATEGY_MODE는 {STRATEGY_MODES} 중 하나여야 합니다: {self.strategy_mode}")
+        if self.etf_start_date:
+            try:
+                date.fromisoformat(self.etf_start_date)
+            except ValueError:
+                raise ValueError(f"ETF_START_DATE는 YYYY-MM-DD 형식이어야 합니다: {self.etf_start_date}")
         if self.ai_exit_interval_minutes not in AI_EXIT_INTERVAL_CHOICES:
             raise ValueError(
                 f"AI_EXIT_INTERVAL_MINUTES는 {AI_EXIT_INTERVAL_CHOICES} 중 하나여야 합니다: "

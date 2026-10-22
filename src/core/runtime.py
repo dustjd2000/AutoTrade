@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timedelta
 from typing import Callable, List, Optional, Tuple
 
-from config.settings import Settings
+from config.settings import STRATEGY_ETF_REGIME, STRATEGY_LLM, Settings
 from src.api.account import AccountClient
 from src.api.auth import AuthClient
 from src.api.client import KiwoomClient
@@ -48,6 +48,7 @@ from src.notification.alert import AlertNotifier
 from src.notification.email import EmailNotifier
 from src.risk.manager import RiskManager
 from src.scheduler.scheduler import TimeScheduler
+from src.strategy.etf_regime import ETFRegimeStrategy
 from src.strategy.llm_momentum import LLMMomentumStrategy
 
 logger = logging.getLogger(__name__)
@@ -182,10 +183,16 @@ def build_runtime(settings: Settings) -> Runtime:
     account = AccountClient(settings, auth)
     ws_client = WebSocketClient(settings, auth)
 
-    strategy = LLMMomentumStrategy(
-        investable_ratio=settings.investable_ratio,
-        target_stock_count=settings.target_stock_count,
-    )
+    etf_mode = settings.strategy_mode == STRATEGY_ETF_REGIME
+    if etf_mode:
+        # 2호 전략 (PRD 5.5-C) — 종목 수는 1로 고정, 매수·청산 경로는 1호와 같다
+        strategy = ETFRegimeStrategy(investable_ratio=settings.investable_ratio)
+        logger.warning("2호 전략(지수 ETF 국면 추종)으로 시작합니다 — AI 매도 판단은 돌지 않습니다.")
+    else:
+        strategy = LLMMomentumStrategy(
+            investable_ratio=settings.investable_ratio,
+            target_stock_count=settings.target_stock_count,
+        )
     risk_manager = RiskManager(
         max_position_ratio=settings.max_position_ratio,
         max_daily_loss_ratio=settings.max_daily_loss_ratio,
@@ -246,6 +253,9 @@ def build_runtime(settings: Settings) -> Runtime:
         news_verifier=NewsVerifier(settings),
         news_verify_enabled=settings.news_verify_enabled,
         buy_time=settings.buy_time,
+        strategy_mode=settings.strategy_mode,
+        etf_kill_loss_percent=settings.etf_kill_loss_percent,
+        etf_start_date=date.fromisoformat(settings.etf_start_date) if settings.etf_start_date else None,
     )
     exit_advisor = ExitAdvisor(settings, prompt_store=exit_prompt_store)
 
@@ -538,6 +548,11 @@ def ai_exit_due(
     """
     now = now or datetime.now()
     if not is_trading_day(now):
+        return False
+
+    # 2호 전략은 "종가까지 보유"로 검증한 규칙이다 — UI 체크박스와 무관하게 부르지 않는다
+    # (PRD 5.5-C). 엔진 플래그로 막지 않는 이유: UI가 엔진 시작 직후 체크박스 상태를 다시 넣는다.
+    if getattr(runtime.settings, "strategy_mode", STRATEGY_LLM) == STRATEGY_ETF_REGIME:
         return False
 
     engine = runtime.engine

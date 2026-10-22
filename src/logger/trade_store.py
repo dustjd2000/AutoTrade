@@ -939,6 +939,39 @@ class TradeStore:
             ).fetchone()
         return MonthlySummary(realized_pnl=row[0] or 0.0, fees=row[1] or 0.0)
 
+    def closed_trade_returns(
+        self, start_day: Optional[date], up_to: date, tickers: Iterable[str]
+    ) -> List[float]:
+        """기간 안 청산된 매매의 날짜·종목별 순수익률(%) — 2호 전략 자동 중단 장치의 입력 (PRD 5.5-C).
+
+        순손익 = 매도 실현손익 − 그날 그 종목의 수수료·세금(매수분 포함, 일간 집계와 같은 기준),
+        분모 = 매도 수량 × 평단. 매도가 없는 날(미청산)은 뺀다. `start_day`가 None이면 처음부터.
+        """
+        wanted = tuple(tickers)
+        if not wanted:
+            return []
+        start = datetime.combine(start_day, datetime.min.time()).isoformat() if start_day else ""
+        end = datetime.combine(up_to, datetime.max.time()).isoformat()
+        status_marks = ", ".join("?" for _ in FILLED_STATUSES)
+        ticker_marks = ", ".join("?" for _ in wanted)
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"""SELECT date(timestamp) AS d, ticker,
+                           COALESCE(SUM(CASE WHEN side = ? THEN realized_pnl END), 0),
+                           COALESCE(SUM(COALESCE(commission, 0) + COALESCE(tax, 0)), 0),
+                           COALESCE(SUM(CASE WHEN side = ? THEN avg_price * filled_quantity END), 0)
+                    FROM trades
+                    WHERE status IN ({status_marks}) AND ticker IN ({ticker_marks})
+                          AND timestamp BETWEEN ? AND ?
+                    GROUP BY d, ticker ORDER BY d""",
+                (OrderSide.SELL.value, OrderSide.SELL.value, *FILLED_STATUSES, *wanted, start, end),
+            ).fetchall()
+        return [
+            ((realized or 0.0) - (fees or 0.0)) / cost * 100
+            for _day, _ticker, realized, fees, cost in rows
+            if cost
+        ]
+
     def monthly_cumulative_series(
         self, year: int, month: int, up_to: date
     ) -> List[DailyPoint]:

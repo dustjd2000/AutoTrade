@@ -5,6 +5,8 @@ import pytest
 from config.settings import (
     AI_EXIT_INTERVAL_CHOICES,
     DEFAULT_RECOMMEND_TIME_HHMM,
+    STRATEGY_ETF_REGIME,
+    STRATEGY_LLM,
     Settings,
     TUNE_SKIP_MONTHLY_RETURN_CHOICES,
     parse_flag,
@@ -16,6 +18,47 @@ def clear_schedule_times(monkeypatch):
     """다른 테스트나 실제 .env가 남긴 값이 섞이지 않도록 매번 비운 상태에서 시작한다."""
     monkeypatch.delenv("RECOMMEND_TIME", raising=False)
     monkeypatch.delenv("BUY_TIME", raising=False)
+
+
+def _strategy_settings(monkeypatch, **env):
+    monkeypatch.setenv("KIWOOM_APP_KEY", "k")
+    monkeypatch.setenv("KIWOOM_APP_SECRET", "s")
+    monkeypatch.setenv("TRADE_MODE", "paper")
+    monkeypatch.delenv("AI_EXIT_INTERVAL_MINUTES", raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    return Settings()
+
+
+def test_strategy_mode_defaults_to_llm(monkeypatch):
+    """기본값이 1호라 STRATEGY_MODE를 쓰지 않은 기존 .env는 동작이 그대로다 (PRD 5.5-C)."""
+    monkeypatch.delenv("STRATEGY_MODE", raising=False)
+    assert Settings().strategy_mode == STRATEGY_LLM
+
+
+def test_strategy_mode_accepts_etf_regime(monkeypatch):
+    settings = _strategy_settings(monkeypatch, STRATEGY_MODE=" ETF_Regime ")
+    settings.validate()
+    assert settings.strategy_mode == STRATEGY_ETF_REGIME
+
+
+def test_unknown_strategy_mode_blocks_engine_start(monkeypatch):
+    """모르는 값을 1호로 읽어 조용히 돌면 사용자가 고른 전략과 실제가 갈린다."""
+    with pytest.raises(ValueError, match="STRATEGY_MODE"):
+        _strategy_settings(monkeypatch, STRATEGY_MODE="etf").validate()
+
+
+def test_broken_etf_start_date_blocks_engine_start(monkeypatch):
+    with pytest.raises(ValueError, match="ETF_START_DATE"):
+        _strategy_settings(monkeypatch, ETF_START_DATE="2026/10/23").validate()
+
+
+def test_etf_kill_switch_defaults(monkeypatch):
+    monkeypatch.delenv("ETF_KILL_LOSS_PERCENT", raising=False)
+    monkeypatch.delenv("ETF_START_DATE", raising=False)
+    settings = Settings()
+    assert settings.etf_kill_loss_percent == 5.0
+    assert settings.etf_start_date == ""
 
 
 def test_recommend_time_defaults_to_0905():

@@ -206,6 +206,14 @@ def test_no_call_when_ai_exit_disabled():
     assert advisor.calls == []
 
 
+def test_no_call_in_etf_regime_strategy_even_when_enabled():
+    """2호 전략은 '종가까지 보유'로 검증한 규칙이다 — 체크박스가 켜져 있어도 부르지 않는다 (PRD 5.5-C)."""
+    runtime, engine, advisor = make_runtime(holdings=[holding()], ai_exit_enabled=True)
+    runtime.settings.strategy_mode = "etf_regime"
+    asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW, None))
+    assert advisor.calls == []
+
+
 def test_no_call_before_window_opens():
     runtime, engine, advisor = make_runtime(holdings=[holding()])
     asyncio.run(maybe_run_ai_exit_cycle(runtime, BEFORE_WINDOW, None))
