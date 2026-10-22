@@ -175,6 +175,17 @@ class Runtime:
     runner: Optional[ActionRunner] = None
 
 
+def risk_tax_ratio(settings) -> float:
+    """손절 판정(순손익률)에 넣을 매도세율.
+
+    2호 전략은 지수 ETF만 사고, 국내 주식형 ETF는 증권거래세가 면제다 — 주식 세율(`TAX_PERCENT`)을
+    그대로 넣으면 비용이 0.2%p 과대 계상돼 손절이 설정보다 일찍 나간다 (PRD 5.5-C).
+    """
+    if getattr(settings, "strategy_mode", STRATEGY_LLM) == STRATEGY_ETF_REGIME:
+        return 0.0
+    return settings.tax_ratio
+
+
 def build_runtime(settings: Settings) -> Runtime:
     """설정으로부터 매매 런타임 전체를 조립한다 (아직 시작하지는 않는다)."""
     auth = AuthClient(settings)
@@ -200,7 +211,7 @@ def build_runtime(settings: Settings) -> Runtime:
         stop_loss_enabled=settings.stop_loss_enabled,
         max_total_exposure_ratio=settings.max_total_exposure_ratio,
         commission_rate=settings.commission_ratio,
-        tax_rate=settings.tax_ratio,
+        tax_rate=risk_tax_ratio(settings),
         slippage_rate=settings.slippage_ratio,
     )
     trade_store = TradeStore()

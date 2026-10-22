@@ -27,6 +27,7 @@ from src.core.runtime import (
     ai_exit_due,
     ai_exit_window_open,
     maybe_run_ai_exit_cycle,
+    risk_tax_ratio,
     run_ai_exit_cycle,
     watch_ai_exit,
 )
@@ -212,6 +213,12 @@ def test_no_call_in_etf_regime_strategy_even_when_enabled():
     runtime.settings.strategy_mode = "etf_regime"
     asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW, None))
     assert advisor.calls == []
+
+
+def test_stop_loss_tax_is_zero_only_for_etf_strategy():
+    """ETF는 증권거래세 면제라 2호 전략의 손절 판정에서 세금을 빼지 않는다 (PRD 5.5-C)."""
+    assert risk_tax_ratio(SimpleNamespace(strategy_mode="etf_regime", tax_ratio=0.002)) == 0.0
+    assert risk_tax_ratio(SimpleNamespace(strategy_mode="llm", tax_ratio=0.002)) == 0.002
 
 
 def test_no_call_before_window_opens():
