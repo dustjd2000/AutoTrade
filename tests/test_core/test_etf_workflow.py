@@ -10,7 +10,8 @@ import pytest
 from config.settings import STRATEGY_ETF_REGIME
 from src.core import daily_workflow
 from src.core.daily_workflow import DailyWorkflow
-from src.core.events import MarketData
+from src.core import actions
+from src.core.events import MarketData, OrderResult, OrderStatus, OrderType
 from src.strategy.etf_regime import INVERSE_ETF, LONG_ETF, ETFRegimeStrategy
 
 TODAY = date(2026, 10, 23)
@@ -61,10 +62,25 @@ class FakeMarketData:
         return MarketData(ticker=ticker, price=self.price, volume=100)
 
 
-def make_workflow(rows, returns=(), kill_percent=5.0, start=None):
+class FakeOrderClient:
+    def __init__(self, status=OrderStatus.PENDING, error=None):
+        self.orders = []
+        self.status = status
+        self.error = error
+
+    def send_order(self, request):
+        self.orders.append(request)
+        return OrderResult(order_id=str(len(self.orders)), ticker=request.ticker, side=request.side,
+                           status=self.status, quantity=request.quantity, error_message=self.error)
+
+
+def make_workflow(rows, returns=(), kill_percent=5.0, start=None, cash=1_000_000, price=30000.0,
+                  order_status=OrderStatus.PENDING, order_error=None):
     email = FakeEmail()
     notifications, closed = [], []
-    market_data = FakeMarketData(rows)
+    market_data = FakeMarketData(rows, price=price)
+    order_client = FakeOrderClient(order_status, order_error)
+    opened = []
     strategy = ETFRegimeStrategy(investable_ratio=0.5)
     store_calls = []
 
@@ -76,6 +92,9 @@ def make_workflow(rows, returns=(), kill_percent=5.0, start=None):
         market_data=market_data,
         notify=notifications.append,
         note_market_closed=closed.append,
+        order_client=order_client,
+        risk_manager=SimpleNamespace(approve=lambda *a, **kw: True, record_order=lambda *a, **kw: None),
+        note_open_position=opened.append,
     )
     fail = lambda *a, **kw: pytest.fail("2호 모드에서 1호 경로를 불렀습니다")  # noqa: E731
     workflow = DailyWorkflow(
@@ -83,9 +102,10 @@ def make_workflow(rows, returns=(), kill_percent=5.0, start=None):
         recommender=SimpleNamespace(recommend=fail, prompt_version="v"),
         strategy=strategy,
         engine=engine,
-        account=SimpleNamespace(),
+        account=SimpleNamespace(get_cash=lambda: cash, get_positions=lambda: {}),
         trade_store=SimpleNamespace(
             closed_trade_returns=closed_trade_returns,
+            record_fill=lambda *a, **kw: None,
             save_recommendations=fail,
             recommendations_for=fail,
             ai_exit_decisions_for=fail,
@@ -98,6 +118,7 @@ def make_workflow(rows, returns=(), kill_percent=5.0, start=None):
     return SimpleNamespace(
         workflow=workflow, email=email, notifications=notifications, closed=closed,
         market_data=market_data, strategy=strategy, store_calls=store_calls,
+        order_client=order_client, opened=opened,
     )
 
 
@@ -109,7 +130,7 @@ def test_rising_regime_buys_kodex200_at_the_current_price():
     recs = t.strategy._recommendations
     assert [(r.ticker, r.target_price, r.recommend_price) for r in recs] == [(LONG_ETF[0], 30000, 30000.0)]
     assert t.market_data.price_calls == [LONG_ETF[0]]
-    assert len(t.email.sent) == 1 and "KODEX 200 매수 예정" in t.email.sent[0][0]
+    assert len(t.email.sent) == 1 and "KODEX 200 시장가 매수" in t.email.sent[0][0]
 
 
 def test_falling_regime_buys_the_inverse_etf():
@@ -196,3 +217,84 @@ def test_reviews_are_skipped_in_etf_mode():
     t.workflow.review_exits(today=TODAY)
 
     assert t.email.sent == []
+
+
+# ── 매수: 결정 즉시 시장가 (2026-10-23) ─────────────────────────
+def test_buy_sends_a_market_order_right_after_the_decision():
+    t = make_workflow(candles(-0.5), cash=1_000_000, price=1250.0)
+    t.workflow.recommend_and_notify(today=TODAY)
+
+    t.workflow._execute_etf_buy(TODAY)
+
+    [order] = t.order_client.orders
+    assert order.ticker == INVERSE_ETF[0]
+    assert order.order_type == OrderType.MARKET and order.price is None
+    assert order.quantity == 400          # 1,000,000 × 50% ÷ 1,250
+    assert t.opened == [INVERSE_ETF[0]]
+
+
+def test_buy_is_not_repeated_once_ordered_today():
+    """매수 시각 안전망이 같은 날 두 번 사지 않는다 — 매수 기록 파일이 표시다."""
+    t = make_workflow(candles(0.5))
+    t.workflow.recommend_and_notify(today=TODAY)
+
+    t.workflow._execute_etf_buy(TODAY)
+    t.workflow._execute_etf_buy(TODAY)
+
+    assert len(t.order_client.orders) == 1
+
+
+def test_buy_decides_again_when_the_decision_was_lost_by_a_restart():
+    """2026-10-23 09:07 재시작으로 결정이 사라져 매수가 빠졌다 — 안전망이 다시 정해서 산다."""
+    t = make_workflow(candles(0.5))
+
+    t.workflow._execute_etf_buy(TODAY)    # recommend_and_notify를 거치지 않은 새 엔진
+
+    assert [o.ticker for o in t.order_client.orders] == [LONG_ETF[0]]
+
+
+def test_rest_day_is_not_decided_twice():
+    t = make_workflow(candles(0.1))
+    t.workflow.recommend_and_notify(today=TODAY)
+
+    t.workflow._execute_etf_buy(TODAY)
+
+    assert t.order_client.orders == []
+    assert len(t.email.sent) == 1         # '쉽니다' 메일은 한 번만
+
+
+def test_quantity_leaves_room_for_the_market_order_margin():
+    """시장가 매수 증거금은 상한가(+30%) 기준이라, 투입 비율이 높으면 그 한도가 수량을 정한다."""
+    t = make_workflow(candles(0.5), cash=1_300_000, price=10000.0)
+    t.workflow.strategy.investable_ratio = 1.0
+    t.workflow.recommend_and_notify(today=TODAY)
+
+    t.workflow._execute_etf_buy(TODAY)
+
+    assert t.order_client.orders[0].quantity == 100   # 1,300,000 ÷ (10,000 × 1.3)
+
+
+def test_rejected_order_can_be_retried_by_the_safety_net():
+    t = make_workflow(candles(0.5), order_status=OrderStatus.REJECTED, order_error="잔고 부족")
+    t.workflow.recommend_and_notify(today=TODAY)
+
+    t.workflow._execute_etf_buy(TODAY)
+    t.workflow._execute_etf_buy(TODAY)
+
+    assert len(t.order_client.orders) == 2
+    assert any("매수 거부" in n for n in t.notifications)
+
+
+def test_recommend_action_chains_the_buy_in_etf_mode():
+    """2호는 결정 직후 같은 실행에서 산다 — 매수 단계는 루프 스레드(touches_orders)에서 돈다."""
+    t = make_workflow(candles(0.5))
+    runtime = SimpleNamespace(workflow=t.workflow)
+
+    steps = actions.manual_steps(runtime, "recommend")
+
+    assert [s.touches_orders for s in steps] == [False, True]
+
+
+def test_recommend_action_stays_single_step_for_llm_strategy():
+    runtime = SimpleNamespace(workflow=SimpleNamespace(etf_mode=False, recommend_and_notify=lambda: None))
+    assert len(actions.manual_steps(runtime, "recommend")) == 1

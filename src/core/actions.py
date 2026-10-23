@@ -112,10 +112,16 @@ def manual_steps(runtime, action: str, tickers: Iterable[str] = ()) -> List[Manu
     # 않은 액션의 속성(예: 스케줄 전용 액션이 쓰는 runtime.engine.reset_for_new_day)까지
     # 미리 참조해, 그 속성이 없는 호출자(예: 스케줄 전용 액션을 모르는 옛 테스트의 가짜
     # 런타임)가 관계없는 액션을 요청해도 AttributeError로 깨진다.
+    # 2호 전략은 결정 직후 같은 실행에서 시장가로 산다 — 1호처럼 매수 시각까지 기다릴 이유가 없고,
+    # 그 사이 엔진이 재시작되면 결정이 사라져 그날 매수가 빠진다 (2026-10-23, PRD 5.5-C '매수').
+    # 매수 시각의 'buy' 스케줄은 안전망으로 남는다 — 이미 주문했으면 workflow가 건너뛴다.
+    etf_mode = getattr(runtime.workflow, "etf_mode", False) is True
     step_factories: Dict[str, Callable[[], List[ManualStep]]] = {
         "recommend": lambda: [
             ManualStep(MANUAL_ACTIONS["recommend"], runtime.workflow.recommend_and_notify)
-        ],
+        ] + ([
+            ManualStep(MANUAL_ACTIONS["buy"], runtime.workflow.execute_buys, touches_orders=True)
+        ] if etf_mode else []),
         "buy": lambda: [
             ManualStep(MANUAL_ACTIONS["buy"], runtime.workflow.execute_buys, touches_orders=True)
         ],

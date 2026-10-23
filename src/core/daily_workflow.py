@@ -59,6 +59,10 @@ NEWS_VERIFY_MAX_SECONDS = 120.0
 # 떼어두지 않으면 탈락이 하나만 나와도 재추천이 매수 시각을 거의 확실히 넘긴다.
 RERECOMMEND_RESERVE_SECONDS = 180.0
 
+# 2호 전략 시장가 매수의 증거금 배수 — 키움은 시장가 매수 증거금을 상한가(+30%)로 잡는다.
+# 수량을 이 배수 안에서 정하지 않으면 투입 비율이 높을 때 증거금 부족으로 주문이 거부된다.
+MARKET_BUY_MARGIN = 1.3
+
 # 최종 리포트를 보낸 날짜를 남기는 마커 파일. 인메모리 필드로 두면 엔진 재시작
 # (설정 저장·앱 재실행)마다 DailyWorkflow가 새로 만들어지면서 표시가 사라져,
 # 오전에 이미 보낸 리포트를 15:35가 다시 보낸다.
@@ -208,6 +212,9 @@ class DailyWorkflow:
         self.strategy_mode = strategy_mode
         self.etf_kill_loss_percent = etf_kill_loss_percent
         self.etf_start_date = etf_start_date
+        # 오늘 2호 결정(매수/쉼/중단)을 마친 날짜 — 매수 시각 안전망이 결정을 되풀이하지 않게 한다.
+        # 인메모리라 엔진이 재시작되면 비고, 그때는 안전망이 다시 정한다 (`_execute_etf_buy`).
+        self._etf_decided_on: Optional[date] = None
 
     @property
     def etf_mode(self) -> bool:
@@ -529,6 +536,8 @@ class DailyWorkflow:
         blocked = self._etf_kill_reason(today)
         if blocked:
             logger.warning("2호 전략 자동 중단: %s", blocked)
+            self.strategy.set_recommendations([])
+            self._etf_decided_on = today
             self._send_etf_mail(today, None, None, blocked)
             return
 
@@ -552,6 +561,8 @@ class DailyWorkflow:
         pick = etf_regime.pick_etf(signal)
         if pick is None:
             logger.info("2호 전략: 오늘은 쉽니다 (신호 %s)", "없음" if signal is None else f"{signal:+.3f}%")
+            self.strategy.set_recommendations([])
+            self._etf_decided_on = today
             self._send_etf_mail(today, signal, None, None)
             return
 
@@ -576,13 +587,92 @@ class DailyWorkflow:
             setup=STRATEGY_ETF_REGIME,
         )
         self.strategy.set_recommendations([recommendation])
+        self._etf_decided_on = today
         board = self._board_from_recommendations([recommendation])
         self._set_buy_board(today, board)
         self._watch_plan_prices([pick_ticker])
         logger.info(
-            "2호 전략: %s 매수 예정 (신호 %+.3f%%, 기준가 %s원)", pick_name, signal, f"{price:,.0f}"
+            "2호 전략: %s 매수 결정 (신호 %+.3f%%, 기준가 %s원) — 곧바로 시장가로 삽니다",
+            pick_name, signal, f"{price:,.0f}",
         )
         self._send_etf_mail(today, signal, recommendation, None)
+
+    def _execute_etf_buy(self, today: date) -> None:
+        """2호 전략 매수 — 결정한 ETF를 **시장가로 즉시** 산다 (PRD 5.5-C '매수', 확정 2026-10-23).
+
+        추천 단계 직후(같은 실행)와 매수 시각(안전망) 두 번 불린다. 오늘 이미 주문했으면
+        아무것도 하지 않는다 — 매수 기록 파일이 그 표시다. 결정이 없으면(추천 뒤 엔진 재시작
+        — 2026-10-23 09:07에 결정이 사라져 매수가 통째로 빠졌다) 그 자리에서 다시 정한다.
+        판단 재료가 전날까지의 일봉이라 다시 정해도 결과가 같다.
+
+        지정가 밴드를 쓰지 않는 이유: 2호는 가격 예측이 아니라 그날 방향에 올라타는 규칙이라,
+        기준가보다 올랐다고 건너뛰면 오르는 날만 놓친다.
+        """
+        if self._read_buy_records(today) is not None:
+            logger.info("2호 전략: 오늘 이미 매수 주문을 냈습니다 — 건너뜁니다.")
+            return
+        if self._etf_decided_on != today:
+            self._recommend_etf(today)
+
+        cash = self.account.get_cash()
+        plans = self.strategy.build_buy_plans(cash)
+        if not plans:
+            logger.info("2호 전략: 오늘 매수할 종목이 없습니다. 주문가능금액 %s원", f"{cash:,.0f}")
+            return
+
+        plan = plans[0]
+        label = format_stock(plan.ticker, plan.name)
+        try:
+            price = self.engine.market_data.get_current_price(plan.ticker).price
+        except Exception:
+            logger.exception("2호 전략 매수 직전 현재가 조회 실패 — 기준가로 수량을 정합니다: %s", label)
+            price = float(plan.recommend_price or plan.target_price)
+        if price <= 0:
+            logger.error("2호 전략 매수 가격을 알 수 없습니다 — 매수를 건너뜁니다: %s", label)
+            return
+
+        # 키움은 시장가 매수 증거금을 상한가(+30%) 기준으로 잡는다 — 그 한도 안에서 수량을 정한다
+        quantity = int(min(plan.amount // price, cash // (price * MARKET_BUY_MARGIN)))
+        record = BuyRecord(ticker=plan.ticker, name=plan.name, quantity=quantity, reference_price=price)
+        if quantity <= 0:
+            record = replace(record, outcome=BuyOutcome.SKIPPED,
+                             note=f"1주 {price:,.0f}원을 살 금액이 없습니다 (배정 {plan.amount:,.0f}원)")
+            logger.warning("2호 전략 매수 건너뜀: %s — %s", label, record.note)
+        else:
+            request = OrderRequest(
+                ticker=plan.ticker, side=OrderSide.BUY, order_type=OrderType.MARKET,
+                quantity=quantity, price=None, name=plan.name,
+            )
+            positions = self.account.get_positions()
+            if not self.engine.risk_manager.approve(request, positions, reference_price=price):
+                record = replace(record, outcome=BuyOutcome.FAILED, note="리스크 관리 규칙에 걸려 주문하지 않았습니다")
+                self.engine.notify(f"매수 거부 (리스크 관리): {label}")
+            else:
+                result = self.engine.order_client.send_order(request)
+                self.engine.risk_manager.record_order(result)
+                self.trade_store.record_fill(result)
+                if result.status == OrderStatus.REJECTED:
+                    if _is_market_closed_rejection(result.error_message):
+                        self.engine.note_market_closed("주문이 '장이 열리지않는 날'로 거부됐습니다")
+                    self.engine.notify(f"[실패] 2호 전략 매수 거부: {label} x{quantity}주 — {result.error_message}")
+                    record = replace(record, outcome=BuyOutcome.FAILED, order_id=result.order_id,
+                                     note=f"주문 거부: {result.error_message}")
+                else:
+                    record = replace(record, order_id=result.order_id)
+                    self.engine.note_open_position(plan.ticker)
+                    self._clear_report_mark()
+                    if self.ws_client is not None:
+                        self.ws_client.subscribe([plan.ticker])
+                    logger.info(
+                        "2호 전략 시장가 매수 접수: %s %d주 (현재가 %s원, 주문번호 %s)",
+                        label, quantity, f"{price:,.0f}", result.order_id,
+                    )
+
+        self._set_buy_board(today, self._board_from_records([record]))
+        # 접수된 주문만 남긴다 — 이 파일이 "오늘 이미 주문함" 표시라, 실패까지 남기면 매수 시각
+        # 안전망이 재시도하지 못한다
+        if record.outcome == BuyOutcome.ORDERED:
+            self._write_buy_records(cash, plan.amount, [record])
 
     def _etf_kill_reason(self, today: date) -> Optional[str]:
         """자동 중단 장치 — 2호 ETF 매매 건별 순수익률 누적합이 문턱 이하면 사유를, 아니면 None.
@@ -624,11 +714,11 @@ class DailyWorkflow:
                 f"문턱 ±{etf_regime.MIN_SIGNAL_PERCENT}% 안쪽이라 매수하지 않습니다."
             )
         else:
-            subject = f"[2호 전략] {today} {recommendation.name} 매수 예정"
+            subject = f"[2호 전략] {today} {recommendation.name} 시장가 매수"
             body = (
                 f"직전 {etf_regime.LOOKBACK_DAYS}거래일 장중 평균 {signal_text}\n"
-                f"매수 종목: {format_stock(recommendation.ticker, recommendation.name)}\n"
-                f"기준가(추천 시점 현재가): {recommendation.target_price:,}원\n"
+                f"매수 종목: {format_stock(recommendation.ticker, recommendation.name)} — 곧바로 시장가 주문\n"
+                f"결정 시점 현재가: {recommendation.target_price:,}원\n"
                 f"투입: 예수금의 {self.strategy.investable_ratio * 100:.0f}%, "
                 f"청산: 손절 또는 15:15 (AI 매도 판단 없음)"
             )
@@ -717,7 +807,12 @@ class DailyWorkflow:
         그대로 건너뛰어, 1주 값이 배정액보다 비싼 종목은 예수금이 남아 있어도 영영 못 샀다 —
         2026-09-14 삼양식품(1주 1,307,000원 > 배정 1,039,625원)이 그렇게 빠졌고 그날 목표
         매도가까지 갔다. 이제 **총 투입 한도**가 남아 있으면 1주는 산다.
+
+        2호 전략은 시장가로 즉시 산다 — `_execute_etf_buy` (PRD 5.5-C '매수').
         """
+        if self.etf_mode:
+            self._execute_etf_buy(date.today())
+            return
         cash = self.account.get_cash()
         plans = self.strategy.build_buy_plans(cash)
         if not plans:
