@@ -4,8 +4,8 @@ Task 1(2026-09-09)이 익절 자동 청산과 단순익절을 엔진에서 걷�
 체크박스(`익절`/`단순익절적용`)를 `AI 매도 판단` 하나로 정리했다(PRD 10절). 이제 청산
 경로는 두 갈래다 — 손절은 종목별 순손익이 선에 닿는 순간 그 종목만 실시간으로 팔리는
 자동선이고(2026-09-18부터 — 그 전에는 보유 종목 합산이었다), AI 매도 판단은 켜져 있으면
-호출 주기(`_ai_exit_interval` 콤보)마다 보유 종목을 하나씩 보고 종목마다 매도 여부를
-LLM이 판단해, 판정된 종목만 판다(2026-09-19부터 — 그 전에는 전량 판정이었다). 입력값(%)은
+순손익률이 ±1%p 단계를 새로 넘을 때마다(2026-10-23부터 — 그 전에는 15분 등 호출 주기마다)
+LLM이 매도 여부를 판단해, 판정된 종목만 판다. 입력값(%)은
 이제 손절선 하나만 정한다 — 예전에는 AI에게 넘기는 참고선이기도
 했지만 그 쓰임은 없앴다(2026-09-18). 이 문구가 손절/AI 매도 판단의 구분을 흐리면
 "AI 매도 판단을 껐는데도 이익 쪽 청산이 되는 줄 알았다"거나 "손절이 꺼진 줄 몰랐다" 같은
@@ -41,16 +41,6 @@ class FakeTextField:
         return self._text
 
 
-class FakeCombo:
-    """QComboBox 더블 — `_exit_watch_text`가 읽는 `.currentText()`만 있으면 된다."""
-
-    def __init__(self, text):
-        self._text = text
-
-    def currentText(self):
-        return self._text
-
-
 class FakeLabel:
     """QLabel 더블 — `_refresh_exit_flag_hint`가 쓰는 `.setVisible()`/`.setText()`만 있으면 된다."""
 
@@ -65,13 +55,12 @@ class FakeLabel:
         self.text = value
 
 
-def make_fake_window(*, ai_exit=True, stop_loss=True, exit_percent="2", interval_text="15분"):
+def make_fake_window(*, ai_exit=True, stop_loss=True, exit_percent="2"):
     """`_exit_watch_text`가 읽는 위젯만 흉내낸 가짜 `MainWindow`."""
     fake = SimpleNamespace(
         _ai_exit_enabled=FakeCheckable(ai_exit),
         _stop_loss_enabled=FakeCheckable(stop_loss),
         _exit_percent=FakeTextField(exit_percent),
-        _ai_exit_interval=FakeCombo(interval_text),
     )
     fake._exit_watch_text = MethodType(MainWindow._exit_watch_text, fake)
     return fake
@@ -124,16 +113,15 @@ def test_exit_watch_text_flags_ai_exit_being_off_even_when_stop_loss_is_on():
     assert "이익 실현 쪽 실시간 청산이 없습니다" in text
 
 
-def test_exit_watch_text_describes_ai_exit_as_periodic_judgement_not_an_auto_sell_line():
-    """AI 매도 판단에는 가격 기준선이 없다 — 켜져 있어도 '닿으면 자동으로 팔린다'는 인상을 주면 안 된다."""
-    fake = make_fake_window(ai_exit=True, stop_loss=True, exit_percent="2", interval_text="15분")
+def test_exit_watch_text_describes_ai_exit_as_a_step_triggered_judgement_not_an_auto_sell_line():
+    """단계(±1%p)는 판단을 부르는 시점일 뿐이다 — '닿으면 자동으로 팔린다'는 인상을 주면 안 된다."""
+    fake = make_fake_window(ai_exit=True, stop_loss=True, exit_percent="2")
 
     text = fake._exit_watch_text()
 
     assert "손절 -2%" in text
-    assert "15분마다" in text
-    assert "가격 기준선" in text
-    assert "자동으로 걸리지" in text or "자동으로 팔리지" in text
+    assert "+1%·+2%" in text and "-1%·-2%" in text
+    assert "자동으로 팔리지" in text
 
 
 # ── _refresh_exit_flag_hint ─────────────────────────────────

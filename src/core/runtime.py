@@ -6,14 +6,13 @@
 import asyncio
 import inspect
 import logging
-from dataclasses import dataclass
-from datetime import date, datetime, time as dt_time, timedelta
-from typing import Callable, List, Optional, Tuple
+from dataclasses import dataclass, field
+from datetime import date, datetime, time as dt_time
+from typing import Callable, List, Optional
 
-from config.settings import STRATEGY_ETF_REGIME, STRATEGY_LLM, Settings
+from config.settings import Settings
 from src.api.account import AccountClient
 from src.api.auth import AuthClient
-from src.api.client import KiwoomClient
 from src.api.market_data import MarketDataClient
 from src.api.order import OrderClient
 from src.api.websocket_client import WebSocketClient
@@ -33,38 +32,24 @@ from src.core.actions import (  # noqa: F401  (재수출)
 from src.core.daily_workflow import DailyWorkflow
 from src.core.engine import TradingEngine
 from src.core.events import ExitReason
-from src.data.collector import DataCollector, LargeCapUniverse
-from src.core.disclosure_watch import DisclosureWatch
 from src.core.etf_exit_trigger import StepTrigger
-from src.data.disclosure import DisclosureClient
 from src.llm.exit_advisor import ExitAdvisor, HoldingView, make_exit_prompt_store
-from src.llm.exit_reviewer import ExitReviewer
-from src.llm.exit_tuner import ExitPromptTuner
-from src.llm.news_verifier import NewsVerifier
-from src.llm.recommender import LLMRecommender
-from src.llm.reviewer import LLMReviewer
-from src.llm.tuner import PromptTuner
 from src.logger.trade_store import AIExitDecisionRow, TradeStore
 from src.notification.alert import AlertNotifier
 from src.notification.email import EmailNotifier
 from src.risk.manager import RiskManager
 from src.scheduler.scheduler import TimeScheduler
 from src.strategy.etf_regime import ETFRegimeStrategy
-from src.strategy.llm_momentum import LLMMomentumStrategy
 
 logger = logging.getLogger(__name__)
 
-# 1호 전략 하루 흐름 트리거 시각 (PRD 5.5-B, 5.11)
-# **추천(`settings.recommend_time`)과 매수(`settings.buy_time`)만 설정값이다** — 둘 다
-# `.env`로만 바꾸고 UI는 값을 보여주기만 한다 (확정 2026-08-20). 두 시각의 순서와 최소
-# 간격은 `Settings.validate`가 강제한다. 나머지는 장 운영 시간에 맞춰 고정한다.
-# 매수를 개장 후로 옮긴 이력: 2026-08-14에 09:00 → 09:10, 2026-08-20에 09:10 → 09:08
-# (기본값은 `config/settings.py`의 `DEFAULT_BUY_TIME_HHMM`, 근거는 PRD 10절
-# "개장 후 추천으로 이동"·"매수 타이밍 조정").
+# 하루 흐름 트리거 시각 (PRD 5.5-C, 5.11)
+# **결정(`settings.recommend_time`)과 매수 안전망(`settings.buy_time`)만 설정값이다** — 둘 다
+# `.env`로만 바꾸고 UI는 값을 보여주기만 한다. 두 시각의 순서와 최소 간격은
+# `Settings.validate`가 강제한다. 나머지는 장 운영 시간에 맞춰 고정한다. 결정 시각에
+# 곧바로 시장가 매수가 나가고, 매수 시각은 그 사이 재시작으로 결정이 사라진 날의 그물이다.
 DAILY_RESET_TIME = dt_time(8, 40)   # 일일 손실 한도·매매중지 초기화 (연속 실행 대비)
-# 눌림을 기다리는 목표가가 닿을 시간을 30분 더 줬다 (2026-08-20: 09:40 → 10:10).
-# 매수 시각이 설정값이 된 뒤로는 '매수 +N분'이 아니라 고정 시각이다 — 매수를 늦출수록
-# 미체결을 기다리는 시간이 그만큼 짧아진다.
+# 시장가 매수라 보통은 거둘 주문이 없다 — 매수 결과 메일을 보내는 시각이다.
 CANCEL_UNFILLED_TIME = dt_time(10, 10)  # 미체결 매수 취소 → 매수 결과 메일
 # 청산은 장마감 동시호가(15:20~15:30) '이전'에 내야 한다 — 동시호가에 들어간 시장가 주문은
 # 15:30 종가에야 체결되어, 그 사이에 나간 리포트가 그 매도를 미정산으로 싣는다 (2026-08-12).
@@ -94,16 +79,9 @@ BUY_RESULT_CHECK_INTERVAL_SECONDS = 60
 # 시세 틱과 달리 예수금은 자연스러운 갱신 계기가 없어 별도 주기로 돈다.
 CASH_REFRESH_INTERVAL_SECONDS = 60
 
-# AI 매도 판단 — 매수 체결 뒤 이 시간이 지나야 첫 판단을 한다. 체결 직후에는 근거가 없다.
-AI_EXIT_START_DELAY_MINUTES = 15
 # 15:15 강제청산 직전에는 부르지 않는다 — 어차피 곧 팔린다.
 AI_EXIT_END_TIME = dt_time(15, 0)
 AI_EXIT_POLL_SECONDS = 30.0
-# 장중 공시 조회 주기 (PRD 5.5-B '장중 공시'). DART는 시각을 주지 않아 목록을 다시 받아
-# 비교하는 수밖에 없다 — 악재 공시가 뜬 뒤 판단이 돌기까지의 최대 지연이 이 값이다.
-DISCLOSURE_POLL_SECONDS = 300.0
-
-
 # 휴장으로 판정돼도 그대로 도는 스케줄 (PRD 10절 '휴장일 자동 판정').
 # 상태 초기화는 다음 거래일을 위해 필요하고, 마감 정리는 판정이 틀렸을 때 보유분을 그대로
 # 넘기지 않기 위해 남긴다 — 팔 것이 없으면 조용히 끝난다.
@@ -133,10 +111,10 @@ def _trading_days_only(job, name: str):
     """거래일이 아닌 날에는 작업을 건너뛰도록 감싼다.
 
     앱을 며칠 연속 켜두면 스케줄러가 요일과 무관하게 매일 발동한다. 주말에 그대로 두면
-    쓸모없는 LLM 호출(비용)과 추천·리포트 메일이 나가고, 매수는 거래소에서 거부된다.
-    **공휴일은 여기서 걸러내지 못한다** — 요일만 보기 때문이다. 대신 수집한 당일 지표로
-    판정해(`collector.market_looks_closed`) 그날 남은 스케줄을 `_submit`이 건너뛴다
-    (확정 2026-09-24, PRD 10절 '휴장일 자동 판정').
+    쓸모없는 결정·리포트 메일이 나가고, 매수는 거래소에서 거부된다.
+    **공휴일은 여기서 걸러내지 못한다** — 요일만 보기 때문이다. 대신 결정 시각에 KODEX 200
+    당일 거래 여부로 판정해(`etf_regime.traded_today`) 그날 남은 스케줄을 `_submit`이 건너뛴다
+    (PRD 5.5-C '휴장 판정', 10절 '휴장일 자동 판정').
     """
 
     def skipped() -> bool:
@@ -167,26 +145,19 @@ class Runtime:
     scheduler: TimeScheduler
     ws_client: WebSocketClient
     workflow: DailyWorkflow
-    # 보유 종목을 하나씩 지금 매도할지 판단하는 LLM 모듈 (PRD 5.5-B 'AI 매도 판단').
+    # 보유 종목을 하나씩 지금 매도할지 판단하는 LLM 모듈 (PRD 5.5-C '매도 판단').
     exit_advisor: ExitAdvisor
-    # 장중에 새로 뜬 공시를 가려내 위 판단에 넘긴다 (PRD 5.5-B '장중 공시').
-    disclosure_watch: Optional[DisclosureWatch] = None
     # 스케줄 잡과 UI 버튼이 공유하는 실행 통로. build_runtime이 Runtime을 만든 뒤에
     # 채운다 — ActionRunner가 runtime을 참조해야 해서 순서를 뒤집을 수 없다.
     runner: Optional[ActionRunner] = None
-    # 2호 전략의 AI 매도 판단 트리거 (PRD 5.5-C '매도 판단'). 1호면 None이다.
-    etf_exit_trigger: Optional[StepTrigger] = None
+    # AI 매도 판단 트리거 — 순손익률이 ±1%p 단계를 새로 넘을 때 묻는다 (PRD 5.5-C '매도 판단')
+    etf_exit_trigger: StepTrigger = field(default_factory=StepTrigger)
 
 
-def risk_tax_ratio(settings) -> float:
-    """손절 판정(순손익률)에 넣을 매도세율.
-
-    2호 전략은 지수 ETF만 사고, 국내 주식형 ETF는 증권거래세가 면제다 — 주식 세율(`TAX_PERCENT`)을
-    그대로 넣으면 비용이 0.2%p 과대 계상돼 손절이 설정보다 일찍 나간다 (PRD 5.5-C).
-    """
-    if getattr(settings, "strategy_mode", STRATEGY_LLM) == STRATEGY_ETF_REGIME:
-        return 0.0
-    return settings.tax_ratio
+# 손절 판정(순손익률)에 넣을 매도세율 — 2호 전략은 지수 ETF만 사고, 국내 주식형 ETF는
+# 증권거래세가 면제다. 주식 세율(`TAX_PERCENT`)을 그대로 넣으면 비용이 0.2%p 과대 계상돼
+# 손절이 설정보다 일찍 나간다 (PRD 5.5-C).
+ETF_TAX_RATIO = 0.0
 
 
 def build_runtime(settings: Settings) -> Runtime:
@@ -197,16 +168,8 @@ def build_runtime(settings: Settings) -> Runtime:
     account = AccountClient(settings, auth)
     ws_client = WebSocketClient(settings, auth)
 
-    etf_mode = settings.strategy_mode == STRATEGY_ETF_REGIME
-    if etf_mode:
-        # 2호 전략 (PRD 5.5-C) — 종목 수는 1로 고정, 매수·청산 경로는 1호와 같다
-        strategy = ETFRegimeStrategy(investable_ratio=settings.investable_ratio)
-        logger.warning("2호 전략(지수 ETF 국면 추종)으로 시작합니다 — AI 매도 판단은 돌지 않습니다.")
-    else:
-        strategy = LLMMomentumStrategy(
-            investable_ratio=settings.investable_ratio,
-            target_stock_count=settings.target_stock_count,
-        )
+    # 2호 전략 (PRD 5.5-C) — 1호(LLM 대형주 추천)는 2026-10-23에 폐지됐다
+    strategy = ETFRegimeStrategy(investable_ratio=settings.investable_ratio)
     risk_manager = RiskManager(
         max_position_ratio=settings.max_position_ratio,
         max_daily_loss_ratio=settings.max_daily_loss_ratio,
@@ -214,13 +177,11 @@ def build_runtime(settings: Settings) -> Runtime:
         stop_loss_enabled=settings.stop_loss_enabled,
         max_total_exposure_ratio=settings.max_total_exposure_ratio,
         commission_rate=settings.commission_ratio,
-        tax_rate=risk_tax_ratio(settings),
+        tax_rate=ETF_TAX_RATIO,
         slippage_rate=settings.slippage_ratio,
     )
     trade_store = TradeStore()
     email = EmailNotifier(settings)
-    # 아침 수집과 장중 감시가 같은 클라이언트를 쓴다 — 상태가 없고 API 키만 들고 있다
-    disclosures = DisclosureClient(settings.dart_api_key)
 
     engine = TradingEngine(
         auth=auth,
@@ -237,41 +198,17 @@ def build_runtime(settings: Settings) -> Runtime:
     )
     ws_client.on_data(engine.on_market_data)
 
-    # 매도 프롬프트 저장소 하나를 AI 매도 판단과 15:35 튜너가 함께 본다 — 튜너가 고친 절이
-    # 재시작 없이 다음 판단에 반영된다 (스펙 2026-09-22 4.1)
-    exit_prompt_store = make_exit_prompt_store()
-
     workflow = DailyWorkflow(
-        collector=DataCollector(
-            market_data,
-            LargeCapUniverse(KiwoomClient(settings, auth)),
-            disclosures,
-            gap_down_tolerance_ratio=settings.gap_down_tolerance_ratio,
-            notify=engine.notify,
-        ),
-        recommender=LLMRecommender(settings),
         strategy=strategy,
         engine=engine,
         account=account,
         trade_store=trade_store,
         email=email,
-        reviewer=LLMReviewer(settings),
-        tuner=PromptTuner(settings),
-        exit_reviewer=ExitReviewer(settings),
-        exit_tuner=ExitPromptTuner(settings),
-        exit_prompt_store=exit_prompt_store,
-        tune_skip_monthly_return_ratio=settings.tune_skip_monthly_return_ratio,
-        buy_price_tolerance_ratio=settings.buy_price_tolerance_ratio,
-        gap_down_tolerance_ratio=settings.gap_down_tolerance_ratio,
         ws_client=ws_client,
-        news_verifier=NewsVerifier(settings),
-        news_verify_enabled=settings.news_verify_enabled,
-        buy_time=settings.buy_time,
-        strategy_mode=settings.strategy_mode,
         etf_kill_loss_percent=settings.etf_kill_loss_percent,
         etf_start_date=date.fromisoformat(settings.etf_start_date) if settings.etf_start_date else None,
     )
-    exit_advisor = ExitAdvisor(settings, prompt_store=exit_prompt_store)
+    exit_advisor = ExitAdvisor(settings, prompt_store=make_exit_prompt_store())
 
     # 매수/강제청산은 실시간 손절 감시와 직렬화되도록 루프 스레드에서 그대로 실행하고,
     # 오래 걸리는 수집·LLM·리포트는 루프를 막지 않도록 별도 스레드로 넘긴다 — 이 배분은
@@ -286,8 +223,6 @@ def build_runtime(settings: Settings) -> Runtime:
         ws_client=ws_client,
         workflow=workflow,
         exit_advisor=exit_advisor,
-        disclosure_watch=DisclosureWatch(disclosures),
-        etf_exit_trigger=StepTrigger() if etf_mode else None,
     )
     runtime.runner = ActionRunner(runtime)
 
@@ -298,12 +233,6 @@ def build_runtime(settings: Settings) -> Runtime:
         (CANCEL_UNFILLED_TIME, "cancel_unfilled"),
         (FORCE_CLOSE_TIME, "close_out"),
         (REPORT_TIME, "daily_report"),
-        # 리포트 다음에 등록한다 — 같은 시각의 두 잡은 등록 순서대로 큐에 들어간다.
-        # 프롬프트 자동 수정은 별도 잡이 아니다 — 각 검증이 끝에서 직접 부르고, 그 결과를
-        # 실어 검증 메일을 보낸다 (2026-10-01, PRD 5.13·5.15)
-        (REPORT_TIME, "review_recommendations"),
-        # 추천 쪽 다음에 등록한다 — 같은 시각의 잡은 등록 순서대로 큐에 들어간다
-        (REPORT_TIME, "review_exits"),
     ):
         scheduler.add_job(
             trigger_time,
@@ -316,7 +245,7 @@ def build_runtime(settings: Settings) -> Runtime:
 
 def is_trading_day(now: Optional[datetime] = None) -> bool:
     """거래일(월~금)인지. 공휴일은 여기서 판별하지 않는다 — 당일 지표 판정이 맡는다
-    (`collector.market_looks_closed` → `engine.market_closed_today` → `_submit`)."""
+    (`etf_regime.traded_today` → `engine.market_closed_today` → `_submit`)."""
     now = now or datetime.now()
     return now.weekday() < 5  # 5·6 = 토·일
 
@@ -510,98 +439,23 @@ async def watch_cash_refresh(
         await asyncio.get_running_loop().run_in_executor(None, runtime.engine.refresh_cash)
 
 
-def ai_exit_window_open(settings: Settings, now: Optional[datetime] = None) -> bool:
-    """지금이 AI 매도 판단 호출 창 안인지 (매수 시각 +`AI_EXIT_START_DELAY_MINUTES`분 ~ `AI_EXIT_END_TIME`).
-
-    창 시작이 고정 시각이 아닌 이유는 매수 시각(`settings.buy_time`)이 설정값이기 때문이다.
-    """
-    now = now or datetime.now()
-    start = datetime.combine(now.date(), settings.buy_time) + timedelta(
-        minutes=AI_EXIT_START_DELAY_MINUTES
-    )
-    end = datetime.combine(now.date(), AI_EXIT_END_TIME)
-    return start <= now <= end
-
-
-def ai_exit_call_limit(settings: Settings) -> int:
-    """하루 동안 허용할 AI 매도 판단 최대 호출 횟수.
-
-    호출 창(매수 시각 +`AI_EXIT_START_DELAY_MINUTES`분 ~ `AI_EXIT_END_TIME`) 길이를 호출
-    주기(`settings.ai_exit_interval_minutes`)로 나눈 슬롯 수다 (창이 열리는 순간의 호출을
-    포함하도록 +1). 엔진을 하루에 여러 번 재시작해도 누적 호출이 이 값을 넘지 않도록
-    막는다 — `TradingEngine._ai_exit_calls`는 재시작해도 유지되고 08:40 reset_for_new_day
-    에서만 비워지므로, 이 상한이 없으면 재시작할 때마다 사실상 무제한으로 호출된다.
-    """
-    start_minutes = (
-        settings.buy_time.hour * 60 + settings.buy_time.minute + AI_EXIT_START_DELAY_MINUTES
-    )
-    end_minutes = AI_EXIT_END_TIME.hour * 60 + AI_EXIT_END_TIME.minute
-    window_minutes = end_minutes - start_minutes
-    if window_minutes <= 0:
-        return 0
-    return window_minutes // settings.ai_exit_interval_minutes + 1
-
-
 def ai_exit_due(
     runtime: Runtime,
     now: Optional[datetime] = None,
     last_called_at: Optional[datetime] = None,
 ) -> bool:
-    """이번 사이클에 AI 매도 판단을 부를 조건인지 (PRD 5.5-B 'AI 매도 판단').
+    """이번 사이클에 AI 매도 판단을 부를 조건인지 (PRD 5.5-C '매도 판단').
 
-    아래를 전부 만족해야 True다. 하나라도 아니면 그 사이클은 건너뛴다.
-    거래일 → `engine.ai_exit_enabled` → 호출 창 안 → 마지막 호출로부터 주기 경과 →
-    보유 종목 있음 → 하루 호출 상한 안.
-
-    **즉시 호출 사유가 서 있으면** 주기와 하루 상한 두 가지를 건너뛴다. 사유는 둘이다 —
-    장중에 새로 뜬 악재 공시(`DisclosureWatch`, PRD 5.5-B '장중 공시')와 당일 고점 대비
-    이익 반납(`DrawdownTracker`, PRD 5.5-B '이익 반납 감시'). 주기만 건너뛰면 그날의
-    마지막 정규 사이클이 상한에 걸려 대신 빠지고, 그쪽이 장 마감에 더 가까워 손해가 크다.
-    두 트리거 모두 각자의 `MAX_URGENT_TRIGGERS_PER_DAY`(공시 5회 / 반납 10회)로 묶여 있어
-    비용은 그만큼만 는다.
-    거래일·설정·호출 창·보유 종목은 예외 없이 그대로 본다.
+    보유 종목 순손익률이 +1%·+2%… 또는 -1%·-2%… 단계를 새로 넘었으면 True다 (`StepTrigger`).
+    1호 전략 시절의 15분 주기·하루 상한·장중 공시 트리거는 2026-10-23에 폐지됐다.
+    UI의 AI 매도 판단 체크박스(`engine.ai_exit_enabled`)는 그대로 따른다 — 끄면 묻지 않는다.
+    시간은 개장~`AI_EXIT_END_TIME`(15:15 강제청산 직전에는 어차피 곧 팔린다). 호출이 실패해도
+    닿은 단계는 기록된 채로 남는다 — 실패는 보유로 떨어진다는 원칙과 같다.
+    `last_called_at`은 쓰지 않는다 (`maybe_run_ai_exit_cycle`과의 계약 때문에 받기만 한다).
     """
     now = now or datetime.now()
     if not is_trading_day(now):
         return False
-
-    # 2호 전략은 주기가 아니라 순손익률 단계 트리거로 묻는다 (PRD 5.5-C '매도 판단')
-    if getattr(runtime.settings, "strategy_mode", STRATEGY_LLM) == STRATEGY_ETF_REGIME:
-        return etf_exit_due(runtime, now)
-
-    engine = runtime.engine
-    if not engine.ai_exit_enabled:
-        return False
-
-    if not ai_exit_window_open(runtime.settings, now):
-        return False
-
-    urgent = (runtime.disclosure_watch is not None and runtime.disclosure_watch.urgent_pending) or (
-        engine.exit_drawdown.urgent_pending
-    )
-
-    if last_called_at is not None and not urgent:
-        elapsed_minutes = (now - last_called_at).total_seconds() / 60
-        if elapsed_minutes < runtime.settings.ai_exit_interval_minutes:
-            return False
-
-    if not engine.open_tickers:
-        return False
-
-    if not urgent and engine.ai_exit_calls >= ai_exit_call_limit(runtime.settings):
-        return False
-
-    return True
-
-
-def etf_exit_due(runtime, now: datetime) -> bool:
-    """2호 전략: 보유 종목 순손익률이 +1%·+2%… 또는 -1%·-2%… 단계를 새로 넘었으면 True.
-
-    UI의 AI 매도 판단 체크박스(`engine.ai_exit_enabled`)는 그대로 따른다 — 끄면 묻지 않는다.
-    시간은 개장~`AI_EXIT_END_TIME`(15:15 강제청산 직전에는 어차피 곧 팔린다). 매수 직후 대기
-    (`AI_EXIT_START_DELAY_MINUTES`)는 두지 않는다 — 1%p 단계 자체가 노이즈를 거른다.
-    호출이 실패해도 닿은 단계는 기록된 채로 남는다 — 실패는 보유로 떨어진다는 원칙과 같다.
-    """
     engine = runtime.engine
     trigger = getattr(runtime, "etf_exit_trigger", None)
     if trigger is None or not engine.ai_exit_enabled:
@@ -614,7 +468,7 @@ def etf_exit_due(runtime, now: datetime) -> bool:
         if step is not None:
             fired.append(f"{position.ticker} {step:+d}% 단계")
     if fired:
-        logger.info("2호 전략 매도 판단 트리거: %s", ", ".join(fired))
+        logger.info("AI 매도 판단 트리거: %s", ", ".join(fired))
     return bool(fired)
 
 
@@ -680,12 +534,9 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
     """
     now = now or datetime.now()
     engine = runtime.engine
-    # 이번 사이클이 앞당겨진 것이든 아니든 여기서 트리거를 비운다 — 남겨 두면 다음
-    # 주기까지 계속 주기를 건너뛰게 된다.
-    if runtime.disclosure_watch is not None:
-        runtime.disclosure_watch.take_urgent()
+    # 이익 반납 감시의 즉시 호출 표시는 쓰지 않지만(호출은 단계 트리거가 정한다) 비워 둔다
     engine.exit_drawdown.take_urgent()
-    # 판단 전에 남은 고점을 비운다 — 15:35 검증이 이 주기의 고점까지 보게 한다
+    # 판단 전에 남은 고점을 DB에 남긴다 — 재시작해도 프롬프트의 고점이 이어지게 한다
     engine.flush_exit_peaks(force=True)
 
     holdings = engine.exit_candidates()
@@ -707,17 +558,13 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
         engine.exit_trace.append(now, portfolio_return, per_ticker, prices)
         trace = engine.exit_trace.points()
 
-        recommendations = (
-            {r.ticker: r for r in engine.trade_store.recommendations_for(now.date())}
-            if engine.trade_store is not None
-            else {}
-        )
-        # 2호 전략은 추천을 DB에 남기지 않는다(15:35 검증 재료와 섞이지 않게) — 메모리의 오늘
-        # 결정을 대신 넘겨 판단 근거(신호)가 프롬프트에 실리게 한다 (PRD 5.5-C '매도 판단')
+        # 오늘의 결정(메모리)을 넘겨 판단 근거(신호)·시나리오가 프롬프트에 실리게 한다
+        # (PRD 5.5-C '매도 판단'). 재시작으로 결정이 비어 있으면 그 칸은 빈 채로 간다.
         workflow = getattr(runtime, "workflow", None)
-        for rec in getattr(getattr(workflow, "strategy", None), "_recommendations", None) or []:
-            recommendations.setdefault(rec.ticker, rec)
-        watch = runtime.disclosure_watch
+        recommendations = {
+            rec.ticker: rec
+            for rec in getattr(getattr(workflow, "strategy", None), "_recommendations", None) or []
+        }
         # 실시간 콜백이 쌓아 둔 당일 고점 — 궤적(15분 간격)에는 없는 봉우리가 여기 남는다
         peaks = {
             p.ticker: r.peak
@@ -736,15 +583,10 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
                     avg_price=p.avg_price,
                     current_price=p.current_price,
                     net_return=per_ticker[p.ticker],
-                    # 이월 포지션처럼 그날 추천이 아닌 종목은 아침 근거가 없다 — 빈 문자열로 둔다.
+                    # 이월 포지션처럼 그날 결정이 아닌 종목은 아침 근거가 없다 — 빈 문자열로 둔다.
                     outlook=rec.outlook if rec is not None else "",
                     reason=rec.reason if rec is not None else "",
-                    # 공시 감시가 아직 한 번도 돌지 않았으면 빈 목록이다 — 없는 것과 같이 다룬다
-                    headlines=watch.headlines_for(p.ticker) if watch is not None else [],
-                    new_headlines=(
-                        watch.new_headlines_for(p.ticker) if watch is not None else []
-                    ),
-                    # 이월 포지션은 그날 추천이 아니라 목표 매도가가 없다 — 0으로 둔다
+                    # 2호는 목표 매도가가 없다 — 0이면 프롬프트에 '없음'으로 실린다
                     target_sell_price=float(rec.target_sell_price or 0) if rec is not None else 0.0,
                     peak_return=peaks.get(p.ticker),
                 )
@@ -850,60 +692,6 @@ async def watch_ai_exit(runtime: Runtime, poll_seconds: float = AI_EXIT_POLL_SEC
         last_called_at = await maybe_run_ai_exit_cycle(runtime, datetime.now(), last_called_at)
 
 
-async def maybe_poll_disclosures(
-    runtime: Runtime, now: Optional[datetime] = None
-) -> List[Tuple[str, str]]:
-    """조건이 맞으면 장중 공시를 한 번 조회한다 (PRD 5.5-B '장중 공시').
-
-    보유 종목이 있는 거래일 장중에만 돈다 — 팔 것이 없으면 볼 이유가 없고, 장이 닫힌
-    시간에는 새 공시가 판단으로 이어질 곳이 없다. 새로 뜬 악재 공시를 돌려준다.
-
-    조회는 blocking HTTP라 별도 스레드로 넘긴다 — 이벤트 루프에서 그대로 기다리면 그동안
-    WebSocket PING 응답이 끊기고 실시간 손절 콜백도 멈춘다 (AI 매도 판단과 같은 이유).
-    """
-    now = now or datetime.now()
-    watch = runtime.disclosure_watch
-    if watch is None:
-        return []
-    if not is_market_hours(now):
-        return []
-
-    tickers = runtime.engine.open_tickers
-    if not tickers:
-        return []
-
-    try:
-        triggered = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: watch.poll(tickers, now)
-        )
-    except Exception:
-        # 공시를 못 봤다고 매매를 멈추지는 않는다 — 아침 수집(_apply_disclosures)과 같은 규약이다
-        logger.exception("장중 공시 조회에 실패했습니다. 이번 주기는 건너뜁니다.")
-        return []
-
-    for ticker, title in triggered:
-        logger.warning("장중 악재 공시: %s | %s — AI 매도 판단을 앞당깁니다.", ticker, title)
-        runtime.engine.notify(
-            f"[경고] 보유 종목 {ticker}에 장중 공시가 떴습니다: {title}. "
-            "AI 매도 판단을 호출 주기와 무관하게 곧바로 한 번 돌립니다."
-        )
-    return triggered
-
-
-async def watch_disclosures(
-    runtime: Runtime, poll_seconds: float = DISCLOSURE_POLL_SECONDS
-) -> None:
-    """장중 공시를 주기적으로 받아 캐시에 쌓는다 (PRD 5.5-B '장중 공시').
-
-    AI 매도 판단 사이클 안에서 조회하지 않고 따로 떼어 둔 이유는 두 가지다. 판단 주기가
-    60분이면 그만큼 반영이 늦고, 판단 경로에 HTTP 호출을 하나 더 넣게 된다. 여기서 미리
-    받아 두면 판단은 캐시만 읽는다.
-    """
-    while True:
-        await asyncio.sleep(poll_seconds)
-        await maybe_poll_disclosures(runtime, datetime.now())
-
-
 def adopt_carried_over_positions(runtime: Runtime) -> List[str]:
     """시작 시점에 남아 있는 보유 종목을 오늘의 매도 대상으로 편입한다.
 
@@ -944,7 +732,6 @@ async def run(runtime: Runtime) -> None:
     buy_result_watch = asyncio.create_task(watch_buy_result(runtime))
     cash_watch = asyncio.create_task(watch_cash_refresh(runtime))
     ai_exit_watch = asyncio.create_task(watch_ai_exit(runtime))
-    disclosure_watch = asyncio.create_task(watch_disclosures(runtime))
     try:
         await asyncio.gather(runtime.ws_client.connect(), runtime.scheduler.run())
     except asyncio.CancelledError:
@@ -956,7 +743,6 @@ async def run(runtime: Runtime) -> None:
         buy_result_watch.cancel()
         cash_watch.cancel()
         ai_exit_watch.cancel()
-        disclosure_watch.cancel()
         request_stop(runtime)
         await runtime.ws_client.disconnect()
         logger.info("매매 런타임이 종료되었습니다.")

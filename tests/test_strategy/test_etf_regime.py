@@ -11,7 +11,7 @@ from src.strategy.etf_regime import (
     regime_signal,
     traded_today,
 )
-from src.llm.recommender import StockRecommendation
+from src.strategy.base import StockRecommendation
 
 TODAY = date(2026, 10, 23)
 

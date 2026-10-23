@@ -1,6 +1,6 @@
-"""AI 매도 판단 주기 워처 (PRD 5.5-B 'AI 매도 판단').
+"""AI 매도 판단 워처 (PRD 5.5-C '매도 판단').
 
-익절 자동 청산이 빠진 자리를 대신하는 워처라, "부르지 않아야 할 때 안 부르는지"와
+순손익률이 ±1%p 단계를 새로 넘을 때 부르는 워처라, "부르지 않아야 할 때 안 부르는지"와
 "불렀을 때 정확히 옳은 사유로 매도(또는 보유)하는지"를 각각 확인한다.
 
 게이트(`ai_exit_due`)와 실행(`run_ai_exit_cycle`)을 분리해 각각 가짜 런타임으로 한
@@ -22,13 +22,8 @@ from src.core.exit_drawdown import DrawdownTracker
 from src.core.etf_exit_trigger import StepTrigger
 from src.core.exit_trace import ExitTrace
 from src.core.runtime import (
-    AI_EXIT_END_TIME,
-    AI_EXIT_START_DELAY_MINUTES,
-    ai_exit_call_limit,
-    ai_exit_due,
-    ai_exit_window_open,
+    ETF_TAX_RATIO,
     maybe_run_ai_exit_cycle,
-    risk_tax_ratio,
     run_ai_exit_cycle,
     watch_ai_exit,
 )
@@ -36,18 +31,11 @@ from src.llm.exit_advisor import ExitDecision, PositionExit
 
 from tests.test_core.test_portfolio_exit import make_engine, two_holdings
 
-# 2026-09-09는 수요일(거래일). 매수 시각 09:08로 두면 + 15분 = 09:23이 창의 시작이다.
+# 2026-09-09는 수요일(거래일). 호출 창은 개장 ~ AI_EXIT_END_TIME(15:00)이다.
 BUY_TIME = dt_time(9, 8)
 IN_WINDOW = datetime(2026, 9, 9, 10, 0)
-WINDOW_START = datetime(2026, 9, 9, 9, 23)
-WINDOW_END = datetime(2026, 9, 9, 15, 0)
-BEFORE_WINDOW = datetime(2026, 9, 9, 9, 20)
 AFTER_WINDOW = datetime(2026, 9, 9, 15, 5)
 SATURDAY = datetime(2026, 9, 12, 10, 0)  # 창 시간대이지만 거래일이 아니다
-
-DEFAULT_INTERVAL_MINUTES = 15
-# buy_time 09:08(+15분=09:23) ~ 15:00, 15분 주기 → (900-563)//15 + 1 = 23
-DEFAULT_CALL_LIMIT = 23
 
 
 def holding(ticker="005930", name="삼성전자", quantity=10, avg_price=1000.0, current_price=1010.0):
@@ -156,9 +144,7 @@ def make_runtime(
     ai_exit_calls=0,
     portfolio_return=0.01,
     buy_time=BUY_TIME,
-    interval_minutes=DEFAULT_INTERVAL_MINUTES,
     decide_result=None,
-    disclosure_watch=None,
     drawdown_ratio=0.0,
 ):
     engine = FakeEngine(
@@ -169,29 +155,15 @@ def make_runtime(
         portfolio_return=portfolio_return,
         drawdown_ratio=drawdown_ratio,
     )
-    settings = SimpleNamespace(buy_time=buy_time, ai_exit_interval_minutes=interval_minutes)
+    settings = SimpleNamespace(buy_time=buy_time)
     advisor = SpyAdvisor(result=decide_result)
     runtime = SimpleNamespace(
         settings=settings,
         engine=engine,
         exit_advisor=advisor,
-        disclosure_watch=disclosure_watch,
+        etf_exit_trigger=StepTrigger(),
     )
     return runtime, engine, advisor
-
-
-# ── 순수 함수: 호출 창 / 하루 상한 ──────────────────────────────
-def test_ai_exit_window_boundaries():
-    settings = SimpleNamespace(buy_time=BUY_TIME, ai_exit_interval_minutes=DEFAULT_INTERVAL_MINUTES)
-    assert ai_exit_window_open(settings, BEFORE_WINDOW) is False
-    assert ai_exit_window_open(settings, WINDOW_START) is True
-    assert ai_exit_window_open(settings, WINDOW_END) is True  # 끝 시각 포함
-    assert ai_exit_window_open(settings, AFTER_WINDOW) is False
-
-
-def test_ai_exit_call_limit_is_window_over_interval_plus_one():
-    settings = SimpleNamespace(buy_time=BUY_TIME, ai_exit_interval_minutes=DEFAULT_INTERVAL_MINUTES)
-    assert ai_exit_call_limit(settings) == DEFAULT_CALL_LIMIT
 
 
 # ── 게이트: 호출하지 않아야 할 사이클 (advisor 호출 자체를 확인) ──────
@@ -209,10 +181,8 @@ def test_no_call_when_ai_exit_disabled():
 
 
 def etf_runtime(net_return, ai_exit_enabled=True):
-    """2호 전략 런타임 — 주기 대신 순손익률 단계 트리거로 묻는다 (PRD 5.5-C '매도 판단')."""
+    """순손익률을 정해 둔 런타임 — 단계 트리거가 그 값으로 판정한다 (PRD 5.5-C '매도 판단')."""
     runtime, engine, advisor = make_runtime(holdings=[holding()], ai_exit_enabled=ai_exit_enabled)
-    runtime.settings.strategy_mode = "etf_regime"
-    runtime.etf_exit_trigger = StepTrigger()
     state = {"ret": net_return}
     engine.position_net_return = lambda position: state["ret"]
     return runtime, engine, advisor, state
@@ -275,53 +245,16 @@ def test_etf_strategy_passes_the_morning_decision_to_the_prompt():
     assert view.reason == rec.reason and view.outlook == rec.outlook
 
 
-def test_stop_loss_tax_is_zero_only_for_etf_strategy():
-    """ETF는 증권거래세 면제라 2호 전략의 손절 판정에서 세금을 빼지 않는다 (PRD 5.5-C)."""
-    assert risk_tax_ratio(SimpleNamespace(strategy_mode="etf_regime", tax_ratio=0.002)) == 0.0
-    assert risk_tax_ratio(SimpleNamespace(strategy_mode="llm", tax_ratio=0.002)) == 0.002
-
-
-def test_no_call_before_window_opens():
-    runtime, engine, advisor = make_runtime(holdings=[holding()])
-    asyncio.run(maybe_run_ai_exit_cycle(runtime, BEFORE_WINDOW, None))
-    assert advisor.calls == []
-
-
-def test_no_call_after_window_closes():
-    runtime, engine, advisor = make_runtime(holdings=[holding()])
-    asyncio.run(maybe_run_ai_exit_cycle(runtime, AFTER_WINDOW, None))
-    assert advisor.calls == []
-
-
 def test_no_call_on_a_non_trading_day():
-    """창 시간대(10:00)라도 거래일이 아니면 부르지 않는다."""
-    runtime, engine, advisor = make_runtime(holdings=[holding()])
+    """창 시간대(10:00)이고 단계를 넘었어도 거래일이 아니면 부르지 않는다."""
+    runtime, engine, advisor, _ = etf_runtime(0.03)
     asyncio.run(maybe_run_ai_exit_cycle(runtime, SATURDAY, None))
     assert advisor.calls == []
 
 
-def test_no_call_before_the_interval_elapses():
-    runtime, engine, advisor = make_runtime(holdings=[holding()])
-    last_called_at = IN_WINDOW - timedelta(minutes=5)  # 주기(15분) 미만 경과
-    asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW, last_called_at))
-    assert advisor.calls == []
-
-
-def test_no_call_over_the_daily_cap():
-    runtime, engine, advisor = make_runtime(holdings=[holding()], ai_exit_calls=DEFAULT_CALL_LIMIT)
-    asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW, None))
-    assert advisor.calls == []
-
-
-def test_call_happens_once_every_condition_is_satisfied():
-    """양성 대조군 — 위 게이트 테스트들이 우연히 통과한 게 아님을 확인한다."""
-    runtime, engine, advisor = make_runtime(
-        holdings=[holding()], decide_result=ExitDecision(decisions=[PositionExit(ticker="005930", sell=False, reason="관망")])
-    )
-    last_called_at = IN_WINDOW - timedelta(minutes=DEFAULT_INTERVAL_MINUTES)  # 정확히 주기만큼 경과
-    result = asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW, last_called_at))
-    assert len(advisor.calls) == 1
-    assert result == IN_WINDOW
+def test_stop_loss_tax_is_zero_for_the_etf_strategy():
+    """ETF는 증권거래세 면제라 손절 판정에서 세금을 빼지 않는다 (PRD 5.5-C)."""
+    assert ETF_TAX_RATIO == 0.0
 
 
 # ── 한 사이클의 동작 (게이트를 통과했다고 가정하고 run_ai_exit_cycle을 직접 돈다) ──

@@ -38,11 +38,9 @@ from PyQt6.QtWidgets import (
 from dotenv import load_dotenv
 
 from config.settings import (
-    AI_EXIT_INTERVAL_CHOICES,
     DEFAULT_BUY_TIME_HHMM,
     DEFAULT_RECOMMEND_TIME_HHMM,
     Settings,
-    TUNE_SKIP_MONTHLY_RETURN_CHOICES,
     parse_flag,
 )
 from src.core.daily_workflow import (
@@ -51,8 +49,6 @@ from src.core.daily_workflow import (
     BUY_PENDING_STATUS,
 )
 from src.core.runtime import ACTION_LABELS, CONFIRM_ACTIONS, MANUAL_ACTIONS, ORDER_ACTIONS
-from src.llm.prompt_store import PromptStore
-from src.llm.recommender import PROMPT_TEMPLATE_VERSION
 from src.ui.engine_thread import EngineThread
 from src.ui.env_store import load_env, save_env
 
@@ -89,8 +85,8 @@ AI_EXIT_VIEW_HEIGHT = 128
 # 오늘 매수할 종목과 진행 상태 (DailyWorkflow.buy_plan_snapshot) — 로그만으로는 매수
 # 절차가 어디까지 갔는지 알 수 없어 따로 보여준다 (PRD 5.10 "매수 예정 표")
 # 0번 열은 '선택 삭제' 대상 체크 — 보유 종목 표와 같은 방식이다 (HOLDINGS_CHECK_COLUMN 참고).
-# 현재가는 엔진이 받아둔 마지막 시세로, 지정가가 체결될 자리인지 보고 뺄 종목을 고르는 데 쓴다.
-BUY_PLAN_COLUMNS = ("선택", "종목", "상태", "수량", "매수지정가", "현재가", "비고")
+# 현재가는 엔진이 받아둔 마지막 시세다. 매수는 시장가라 '기준가'는 결정 시점 현재가(체결 뒤에는 체결가)다.
+BUY_PLAN_COLUMNS = ("선택", "종목", "상태", "수량", "기준가", "현재가", "비고")
 BUY_PLAN_CHECK_COLUMN = 0
 # 매수가 확정된 상태만 강조한다 — 나머지(대기·건너뜀·실패·취소)는 기본색/흐린색이다.
 # '체결'은 표에서 아예 빠지지만(보유 종목 표로 넘어간다) 부분체결 표기를 위해 남겨둔다.
@@ -98,11 +94,7 @@ BUY_PLAN_DONE_STATUSES = ("체결", "부분체결")
 
 
 def _gap_color(plan) -> str:
-    """현재가가 매수지정가보다 위면 빨강, 아래면 파랑 — 지정가가 체결될 자리인지 보여준다.
-
-    매수 시각에 현재가가 목표가보다 설정 폭 넘게 높으면 그 종목은 건너뛴다
-    (`DailyWorkflow.buy_price_tolerance_ratio`) — 빨간 종목이 그 후보다.
-    """
+    """현재가가 기준가보다 위면 빨강, 아래면 파랑 — 결정(또는 체결) 뒤 얼마나 움직였는지 보여준다."""
     if not plan.current_price or not plan.buy_price:
         return COLOR_TEXT
     if plan.current_price > plan.buy_price:
@@ -208,8 +200,6 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(880, 640)
         self.resize(1020, 900)
         self._engine_thread: Optional[EngineThread] = None
-        # 추천 프롬프트 버전을 읽기만 한다 — 엔진이 꺼져 있어도 파일은 그대로 있다
-        self._prompt_store = PromptStore()
         # 실행 중인 엔진이 읽어간 설정값 — 저장 시 실제로 바뀐 게 있는지 비교해,
         # 값이 그대로면 굳이 재시작하지 않는다 (재시작 사이에는 손절·AI 매도 판단 감시가 멈춘다).
         self._applied_env: Optional[dict] = None
@@ -229,8 +219,7 @@ class MainWindow(QMainWindow):
         self._checked_plans: set[str] = set()
         # 즉시 실행 버튼이 마지막으로 지시받은 활성 상태 (_set_actions_enabled 참고)
         self._actions_enabled = False
-        # 즉시 실행 버튼 레지스트리. 운영 탭에서 만들기 전에 설정 탭의 '프롬프트 강제 갱신'이
-        # 먼저 등록하므로(설정 탭을 먼저 짓는다 — _build_ui 주석 참고) 여기서 비워 둔다.
+        # 즉시 실행 버튼 레지스트리 — 운영 탭을 지을 때 채운다.
         self._action_buttons: dict[str, QPushButton] = {}
         self._action_accent: dict[str, bool] = {}
         self._setup_style()
@@ -466,20 +455,16 @@ class MainWindow(QMainWindow):
         self._app_secret.setEchoMode(QLineEdit.EchoMode.Password)
         self._account = QLineEdit()
         self._account.setPlaceholderText("계좌번호 (예: 1234567890)")
-        # Anthropic·DART는 키움과 다른 기관의 키다 — 같은 그룹에 두되 라벨로 출처를 구분한다.
-        # 둘 다 App Secret처럼 가려서 표시한다.
+        # Anthropic은 키움과 다른 기관의 키다 — 같은 그룹에 두되 라벨로 출처를 구분한다.
+        # App Secret처럼 가려서 표시한다.
         self._anthropic_key = QLineEdit()
-        self._anthropic_key.setPlaceholderText("console.anthropic.com 발급 — 없으면 추천이 실패한다")
+        self._anthropic_key.setPlaceholderText("console.anthropic.com 발급 — 없으면 AI 매도 판단이 실패한다")
         self._anthropic_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self._dart_key = QLineEdit()
-        self._dart_key.setPlaceholderText("opendart.fss.or.kr 발급 — 비우면 공시 없이 추천")
-        self._dart_key.setEchoMode(QLineEdit.EchoMode.Password)
 
         api_form.addRow("Kiwoom App Key", self._app_key)
         api_form.addRow("Kiwoom App Secret", self._app_secret)
         api_form.addRow("Kiwoom 계좌번호", self._account)
         api_form.addRow("Anthropic Key", self._anthropic_key)
-        api_form.addRow("DART Key", self._dart_key)
         root.addWidget(api_box)
 
         # 매매 모드
@@ -511,18 +496,17 @@ class MainWindow(QMainWindow):
         root.addWidget(self._mode_hint)
         self._update_mode_hint()
 
-        # 자금 배분 (1호 전략) · 리스크 관리 (손절) — 한 줄에 나란히 배치
+        # 전략 (2호 — 지수 ETF 국면 추종) · 리스크 관리 (손절) — 한 줄에 나란히 배치
         fund_risk_row = QHBoxLayout()
         fund_risk_row.setSpacing(10)
 
-        fund_box = QGroupBox("1호 전략 (추천 · 자금 배분)")
+        fund_box = QGroupBox("2호 전략 (지수 ETF · 자금 배분)")
         fund_form = QFormLayout(fund_box)
         fund_form.setSpacing(8)
         fund_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # 추천·매수 시각은 `.env`로만 바꾼다 — 여기서는 현재 값을 보여주기만 한다
-        # (확정 2026-08-20, PRD 5.5-B '추천·매수 시각 설정'). 고를 수 있게 두면 개장 전이나
-        # 추천보다 앞선 매수처럼 성립하지 않는 조합이 UI에서 만들어진다.
+        # 결정·매수 안전망 시각은 `.env`로만 바꾼다 — 여기서는 현재 값을 보여주기만 한다.
+        # 고를 수 있게 두면 개장 전 결정처럼 성립하지 않는 조합이 UI에서 만들어진다.
         self._schedule_times = QLabel()
         self._schedule_times.setWordWrap(True)
 
@@ -532,55 +516,19 @@ class MainWindow(QMainWindow):
         self._investable_ratio.setCurrentIndex(self._investable_ratio.findData(50))
         self._investable_ratio.currentIndexChanged.connect(self._refresh_investable_amount)
 
-        self._target_stock_count = _NoScrollComboBox()
-        for count in range(1, 11):
-            self._target_stock_count.addItem(f"{count}", count)
-        self._target_stock_count.setCurrentIndex(self._target_stock_count.findData(3))
-        self._target_stock_count.currentIndexChanged.connect(self._refresh_investable_amount)
-
-        # 15:35 자동 수정 에이전트가 고친 날짜가 그대로 버전이다 (PRD 5.13) — 오늘 추천이
-        # 어느 프롬프트로 나갔는지 화면에서 바로 확인할 수 있어야 한다
-        self._prompt_version = QLabel()
-        self._prompt_version.setWordWrap(True)
-
         fund_form.addRow("매매 시각", self._schedule_times)
-        fund_form.addRow("추천 프롬프트", self._prompt_version)
-        self._refresh_prompt_version()
 
-        # 이번 달 순수익이 이 값 이상이면 15:35 프롬프트 자동 수정(추천·매도)을 건너뛴다
-        # (스펙 2026-09-22 4-A). `.env`에 저장하는 값이라 바뀌면 엔진이 재시작된다.
-        self._tune_skip_return = _NoScrollComboBox()
-        for percent in TUNE_SKIP_MONTHLY_RETURN_CHOICES:
-            self._tune_skip_return.addItem(f"월 순수익 {percent:.1f}% 이상이면 중지", percent)
-        self._tune_skip_return.setToolTip(
-            "이번 달 순수익률이 이 값 이상이면 장 마감 뒤 추천·매도 프롬프트를 자동으로 고치지 않습니다. "
-            "검증 메일은 그대로 나갑니다."
+        # 무엇을 사는지가 화면 어디에도 없으면 '추천'이 사라진 이유를 알 수 없다 (PRD 5.5-C)
+        strategy_hint = QLabel(
+            "직전 20거래일 KODEX 200 장중 평균이 +0.2% 이상이면 KODEX 200, -0.2% 이하이면 "
+            "KODEX 인버스를 결정 시각에 시장가로 삽니다. 그 사이면 그날은 쉽니다. "
+            "ETF 매매 누적 순수익률이 -ETF_KILL_LOSS_PERCENT에 닿으면 매수가 자동으로 멈춥니다(.env)."
         )
-        fund_form.addRow("프롬프트 자동 수정", self._tune_skip_return)
-
-        # 15:35를 기다리지 않고 지금 고치게 한다. 위 설정(월 순수익 게이트)만 건너뛰므로
-        # 바로 아래 줄에 둔다 — 그 설정을 끄는 버튼이라는 관계가 보여야 한다.
-        tune_force_row = QHBoxLayout()
-        tune_force_row.setSpacing(8)
-        tune_force_row.addWidget(self._make_action_button("tune_prompt_force"))
-        tune_force_row.addWidget(self._make_action_button("tune_exit_prompt_force"))
-        fund_form.addRow("", tune_force_row)
-
-        # 고치지 않는 날이 정상이라(PRD 5.13) "눌렀는데 아무 일도 없다"를 고장으로 읽기 쉽다
-        tune_force_hint = QLabel(
-            "15:35를 기다리지 않고 지금 프롬프트 자동 수정을 돌립니다. 위의 월 순수익 기준은 "
-            "무시하지만, 검증 표본이 모자라면(추천 검증 0건 / 매도 검증 10건 미만) 그대로 "
-            "건너뜁니다.\n"
-            "AI가 고칠 것이 없다고 판단하면 아무 일도 일어나지 않습니다 — 정상입니다. "
-            "실제로 고친 경우에만 메일이 나가며, 진행 상황은 운영 탭의 실행 로그에서 봅니다. "
-            "엔진이 실행 중일 때만 누를 수 있습니다."
-        )
-        tune_force_hint.setWordWrap(True)
-        tune_force_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
-        fund_form.addRow(tune_force_hint)
+        strategy_hint.setWordWrap(True)
+        strategy_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
+        fund_form.addRow(strategy_hint)
 
         fund_form.addRow("예수금 투입 비율 (%)", self._investable_ratio)
-        fund_form.addRow("추천 종목 수 (개)", self._target_stock_count)
 
         # 실제 예수금 기준 — 엔진이 꺼져 있으면 숨긴다 (계좌를 아직 모른다)
         self._investable_amount = QLabel()
@@ -590,7 +538,7 @@ class MainWindow(QMainWindow):
         fund_form.addRow("총 매수가능 금액", self._investable_amount)
         fund_risk_row.addWidget(fund_box, 1)
 
-        risk_box = QGroupBox("리스크 관리 (손절 / 갭 허용치)")  # 갭은 상승·하락 두 값이다
+        risk_box = QGroupBox("리스크 관리 (손절 / AI 매도 판단)")
         risk_form = QFormLayout(risk_box)
         risk_form.setSpacing(8)
         risk_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -604,14 +552,6 @@ class MainWindow(QMainWindow):
         self._exit_percent = QLineEdit()
         self._exit_percent.setPlaceholderText("예: 5 (순손익 -5%에 닿은 종목을 자동 매도)")
         self._exit_percent.setValidator(QDoubleValidator(0.0, 100.0, 2))
-        # 매수 시각의 현재가가 목표 매수가보다 이만큼 넘게 높으면 그 종목을 건너뛴다
-        self._buy_price_tolerance = QLineEdit()
-        self._buy_price_tolerance.setPlaceholderText("예: 2 (목표가 +2% 초과 시 매수 안 함)")
-        self._buy_price_tolerance.setValidator(QDoubleValidator(0.0, 100.0, 2))
-        # 매수 시각의 현재가가 추천 시점 가격보다 이만큼 넘게 낮으면 건너뛴다. 위와 달리 0이 '끔'이다
-        self._gap_down_tolerance = QLineEdit()
-        self._gap_down_tolerance.setPlaceholderText("예: 1 (전일 종가 -1% 미만 시 매수 안 함, 0=끔)")
-        self._gap_down_tolerance.setValidator(QDoubleValidator(0.0, 100.0, 2))
 
         # 적용 여부 체크박스 — 끄면 그 경로는 동작하지 않는다. 켜고 끌 때마다 `.env`에
         # 저장해 다시 시작해도 마지막 상태가 이어지지만(확정 2026-09-09), 저장했다고 엔진을
@@ -624,24 +564,14 @@ class MainWindow(QMainWindow):
         self._stop_loss_enabled = QCheckBox("손절")
         self._stop_loss_enabled.setChecked(True)
         self._ai_exit_enabled.setToolTip(
-            "호출 주기마다 보유 종목을 하나씩 AI가 보고 종목마다 매도할지 정합니다 — "
-            "판정된 종목만 팔립니다. 끄면 이익 실현 쪽 청산이 통째로 없어져 15:15 강제청산까지 갑니다."
+            "보유 종목 순손익률이 +1%·+2%… 또는 -1%·-2%… 단계를 새로 넘을 때마다 AI가 보고 "
+            "매도할지 정합니다 — 판정된 종목만 팔립니다. 끄면 손절과 15:15 강제청산만 남습니다."
         )
         self._stop_loss_enabled.setToolTip(
             "보유 종목 중 순손익률이 -입력값(%)에 닿은 종목을 실시간으로 매도합니다."
         )
         self._ai_exit_enabled.toggled.connect(self._on_exit_flag_toggled)
         self._stop_loss_enabled.toggled.connect(self._on_exit_flag_toggled)
-
-        # AI 호출 주기 — 하루 호출 수가 여기서 갈리므로 비용도 함께 갈린다.
-        # `.env`에 저장하는 값이라 바뀌면 엔진이 재시작된다 (체크박스와 다른 점이다).
-        self._ai_exit_interval = _NoScrollComboBox()
-        for minutes in AI_EXIT_INTERVAL_CHOICES:
-            label = f"{minutes // 60}시간" if minutes >= 60 else f"{minutes}분"
-            self._ai_exit_interval.addItem(label, minutes)
-        self._ai_exit_interval.setToolTip(
-            "AI 매도 판단을 얼마나 자주 부를지. 짧을수록 되돌림을 빨리 잡지만 호출 비용이 늘어납니다."
-        )
 
         risk_form.addRow(
             "손절 (%)",
@@ -651,45 +581,16 @@ class MainWindow(QMainWindow):
                 self._stop_loss_enabled,
             ),
         )
-        risk_form.addRow("AI 호출 주기", self._ai_exit_interval)
-
-        # 종목별 판정이라는 점을 입력란 바로 아래에서 알려야 한다 — 한 종목이 손절선에
-        # 닿으면 다른 종목과 무관하게 그 종목만 매도된다 (2026-09-18부터 — 그 전에는
-        # 보유 종목 합산 판정이었다)
+        # 종목별 판정이라는 점과 AI 판단을 언제 부르는지를 입력란 바로 아래에서 알린다
         exit_hint = QLabel(
-            "손절선입니다. 보유 종목 중 순손익률이 이 값에 닿은 종목을 실시간으로 시장가 매도합니다 "
-            "(2026-09-18부터 종목별 판정 — 그 전에는 보유 종목 합산이었습니다). 순손익률은 "
-            "수수료·세금·슬리피지를 뺀 값이라 화면의 평가손익률보다 낮습니다.\n"
-            "이익 실현은 자동선이 없고 AI 매도 판단이 맡습니다 — 그쪽은 보유 종목을 하나씩 보고 "
-            "종목마다 판단해, 팔기로 정한 종목만 매도합니다."
+            "손절선입니다. 순손익률이 이 값에 닿으면 실시간으로 시장가 매도합니다. 순손익률은 "
+            "수수료·슬리피지를 뺀 값이라 화면의 평가손익률보다 낮습니다(ETF는 거래세 면제).\n"
+            "AI 매도 판단은 주기가 아니라 순손익률이 ±1%p 단계를 새로 넘을 때마다 불러, "
+            "팔기로 정한 경우에만 매도합니다. 나머지는 15:15에 강제청산됩니다."
         )
         exit_hint.setWordWrap(True)
         exit_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
         risk_form.addRow(exit_hint)
-
-        risk_form.addRow("갭 허용치 (%)", self._buy_price_tolerance)
-
-        # 이름만으로는 무엇에 대한 허용치인지 알 수 없다 — 손절과 달리 '팔 때'가 아니라
-        # '사기 전'을 보는 값이라는 점이 특히 드러나야 한다
-        gap_hint = QLabel(
-            "(매수 시각의 현재가가 목표 매수가보다 이 비율을 넘게 높으면 갭 상승으로 보고 "
-            "그 종목은 매수하지 않습니다)"
-        )
-        gap_hint.setWordWrap(True)
-        gap_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
-        risk_form.addRow(gap_hint)
-
-        risk_form.addRow("갭 하락 허용치 (%)", self._gap_down_tolerance)
-
-        # 위 '갭 허용치'와 기준이 다르다(목표가가 아니라 전일 종가). 0의 의미도 반대라서
-        # 둘 다 적어 두지 않으면 같은 규약으로 읽는다 (PRD 5.5-B)
-        gap_down_hint = QLabel(
-            "(매수 시각의 현재가가 추천 시점 가격보다 이 비율을 넘게 낮으면 갭 하락으로 보고 "
-            "그 종목은 매수하지 않습니다. 0을 넣으면 이 판정을 끕니다)"
-        )
-        gap_down_hint.setWordWrap(True)
-        gap_down_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
-        risk_form.addRow(gap_down_hint)
         fund_risk_row.addWidget(risk_box, 1)
 
         root.addLayout(fund_risk_row)
@@ -734,13 +635,12 @@ class MainWindow(QMainWindow):
         run_layout.setSpacing(8)
 
         run_hint = QLabel(
-            "스케줄(추천 시각 / 매수 시각 / 10:10 / 15:15 / 15:35)과 무관하게 지금 바로 실행합니다. "
+            "스케줄(결정 시각 / 매수 안전망 / 10:10 / 15:15 / 15:35)과 무관하게 지금 바로 실행합니다. "
             "엔진이 실행 중일 때만 동작하며, 장 시간 외에는 주문이 거부될 수 있습니다.\n"
-            "일괄 수행은 ①② (추천→지정가 매수)만 돌립니다. 매수 후에는 순손익 기준 손절이 "
-            "종목별로 자동 감시되며, "
-            "미체결 취소·매수 결과 메일(10:10), 청산(15:15), 리포트(15:35)는 스케줄에 맡깁니다.\n"
-            "엔진을 10:10 이후에 켠 날은 그 취소가 스케줄에서 빠지므로 ③을 직접 눌러야 합니다 "
-            "(누르지 않아도 15:15 청산 직전에 한 번 더 거둡니다)."
+            "①과 일괄 수행은 같습니다 — 오늘 살 ETF(KODEX 200 / 인버스)를 정하고 곧바로 시장가로 "
+            "삽니다. 오늘 이미 주문했으면 다시 사지 않습니다. 매수 후에는 손절과 ±1%p 단계마다의 "
+            "AI 매도 판단이 자동으로 돌고, 매수 결과 메일(10:10), 청산(15:15), 리포트(15:35)는 "
+            "스케줄에 맡깁니다."
         )
         run_hint.setWordWrap(True)
         run_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
@@ -850,9 +750,6 @@ class MainWindow(QMainWindow):
         self._holdings_timer = QTimer(self)
         self._holdings_timer.setInterval(HOLDINGS_REFRESH_MS)
         self._holdings_timer.timeout.connect(self._refresh_holdings)
-        # 프롬프트 버전도 같은 타이머로 다시 읽는다 — 15:35 자동 수정이 장중에 값을 바꾸는데,
-        # 그것 하나 때문에 타이머를 따로 두기에는 파일 한 줄 읽기라 값이 싸다
-        self._holdings_timer.timeout.connect(self._refresh_prompt_version)
 
         self._refresh_holdings()
         return box
@@ -993,24 +890,10 @@ class MainWindow(QMainWindow):
             f'<span style="color:{COLOR_TEXT};"> — {escape(reason)}</span>'
         )
 
-    def _refresh_prompt_version(self) -> None:
-        """추천 프롬프트 버전(= 고쳐진 날짜)을 라벨에 쓴다.
-
-        `data/prompt/version` 한 줄을 읽을 뿐이라 API 호출도 엔진도 필요 없다. 코드
-        기본값과 같으면 아직 한 번도 자동 수정되지 않은 것이므로 그 사실을 함께 적는다 —
-        고치지 않는 날이 정상이라(PRD 5.13) 값만으로는 "돌긴 도는 건가"를 알 수 없다.
-        """
-        version = self._prompt_store.load_version()
-        note = " (코드 기본값 — 자동 수정 이력 없음)" if version == PROMPT_TEMPLATE_VERSION else ""
-        self._prompt_version.setText(f"{version}{note}")
-
     def _refresh_investable_amount(self) -> None:
-        """예수금 캐시 × 투입 비율로 총 매수가능 금액과 종목당 배정액을 표시한다 (API 호출 없음).
+        """예수금 캐시 × 투입 비율로 총 매수가능 금액을 표시한다 (API 호출 없음).
 
-        종목당 배정액은 추천 개수가 아니라 **추천 종목 수 설정**으로 나눈다 — 매수 실행과 같은
-        식이다(`LLMMomentumStrategy.build_buy_plans`). 추천이 설정 개수보다 적게 나온 날은 모자란
-        몫이 현금으로 남을 뿐, 남은 종목에 더 실리지 않는다.
-
+        2호 전략은 이 금액 전부를 오늘의 ETF 1종목에 쓴다 (`ETFRegimeStrategy.build_buy_plans`).
         엔진이 꺼져 있으면 계좌를 아직 모르므로 라벨 자체를 숨긴다.
         """
         thread = self._engine_thread
@@ -1025,10 +908,8 @@ class MainWindow(QMainWindow):
 
         ratio = self._investable_ratio.currentData() / 100
         amount = cash * ratio
-        count = self._target_stock_count.currentData()
         self._investable_amount.setText(
-            f"{amount:,.0f}원 (예수금 {cash:,.0f}원 × {ratio * 100:.0f}%)"
-            f"  ·  종목당 {amount / count:,.0f}원 × {count}종목"
+            f"{amount:,.0f}원 (예수금 {cash:,.0f}원 × {ratio * 100:.0f}%) — 오늘의 ETF 1종목에 투입"
         )
 
     def _holdings_summary(self, rows: list) -> str:
@@ -1190,7 +1071,7 @@ class MainWindow(QMainWindow):
         if not rows:
             # 추천 전과 '전부 체결돼서 빠진' 상태를 표는 구분하지 못한다 — 둘 다 맞는 문구를 쓴다
             return (
-                "매수 예정 종목이 없습니다 — 추천 시각에 채워지고, 체결된 종목은 "
+                "매수 예정 종목이 없습니다 — 결정 시각에 채워지고, 체결된 종목은 "
                 "아래 '보유 종목' 표로 옮겨갑니다."
             )
 
@@ -1287,12 +1168,11 @@ class MainWindow(QMainWindow):
             self._syncing_exit_flags = False
 
     def _sync_exit_flag_widgets(self) -> None:
-        """체크박스 상태에 딸린 화면 요소를 맞춘다 (AI 호출 주기 활성 여부·해제 경고 문구).
+        """체크박스 상태에 딸린 화면 요소(해제 경고 문구)를 맞춘다.
 
         손절 폭 입력란은 늘 열어 둔다 — AI 매도 판단을 꺼도 잠그면 손절 폭을 못 고치게
         된다.
         """
-        self._ai_exit_interval.setEnabled(self._ai_exit_enabled.isChecked())
         self._refresh_exit_flag_hint()
 
     def _on_exit_flag_toggled(self) -> None:
@@ -1336,25 +1216,12 @@ class MainWindow(QMainWindow):
         else:
             logger.warning("청산 조건 변경 — %s. 해제된 쪽은 동작하지 않습니다.", state)
 
-    def _gap_down_text(self) -> str:
-        """매수 확인 팝업에 넣을 갭 하락 안내 — 0(꺼짐)이면 꺼져 있다고 알린다."""
-        raw = self._gap_down_tolerance.text().strip() or "1"
-        try:
-            percent = float(raw)
-        except ValueError:  # 검증기를 지나쳐 온 값 — 매수를 막지 않고 안내만 생략한다
-            return ""
-        if percent <= 0:
-            return "갭 하락 판정은 꺼져 있습니다 (전일 종가보다 얼마나 낮게 시작하든 매수합니다)."
-        return f"전일 종가보다 {percent:g}% 넘게 낮게 시작한 종목도 건너뜁니다."
-
     def _exit_watch_text(self) -> str:
         """매수 확인 팝업에 넣을 청산 안내 — 두 경로의 성격을 갈라 적는다.
 
-        손절은 종목별 순손익이 선에 닿는 순간 그 종목만 실시간으로 팔리는 자동선이고
-        (2026-09-18부터 — 그 전에는 보유 종목 합산이었다), AI 매도 판단은 주기마다
-        종목마다 판단해 매도로 정한 종목만 파는 판단이라 가격 기준선이 없다(2026-09-19부터
-        종목별 — 그 전에는 보유 종목 전체를 한 번에 정리할지 판단했다) — 이 구분이 흐려지면
-        없는 보호를 있다고 믿게 된다.
+        손절은 순손익이 선에 닿는 순간 그 종목만 실시간으로 팔리는 자동선이고, AI 매도
+        판단은 ±1%p 단계마다 묻는 판단이라 가격 기준선이 없다 — 이 구분이 흐려지면 없는
+        보호를 있다고 믿게 된다.
         """
         percent = self._exit_percent.text().strip() or "2"
         ai_exit = self._ai_exit_enabled.isChecked()
@@ -1376,9 +1243,9 @@ class MainWindow(QMainWindow):
 
         if ai_exit:
             lines.append(
-                f"AI 매도 판단 — {self._ai_exit_interval.currentText()}마다 보유 종목을 하나씩 보고 "
-                "종목마다 매도할지 정해 판정된 종목만 팝니다. 가격 기준선 없이 판단하므로 특정 "
-                "값에 닿는다고 자동으로 팔리지 않습니다."
+                "AI 매도 판단 — 순손익률이 +1%·+2%… 또는 -1%·-2%… 단계를 새로 넘을 때마다 "
+                "AI가 보고 매도할지 정해 판정된 경우에만 팝니다. 특정 값에 닿는다고 자동으로 "
+                "팔리지 않습니다."
             )
         else:
             lines.append("⚠ AI 매도 판단이 꺼져 있어 이익 실현 쪽 실시간 청산이 없습니다.")
@@ -1415,26 +1282,10 @@ class MainWindow(QMainWindow):
         self._app_secret.setText(env.get("KIWOOM_APP_SECRET", ""))
         self._account.setText(env.get("KIWOOM_ACCOUNT", ""))
         self._anthropic_key.setText(env.get("ANTHROPIC_API_KEY", ""))
-        self._dart_key.setText(env.get("DART_API_KEY", ""))
         self._email_from.setText(env.get("EMAIL_FROM", ""))
         self._email_to.setText(env.get("EMAIL_TO", ""))
         self._exit_percent.setText(env.get("STOP_LOSS_PERCENT", "2"))
-        self._buy_price_tolerance.setText(env.get("BUY_PRICE_TOLERANCE_PERCENT", "2"))
-        self._gap_down_tolerance.setText(env.get("GAP_DOWN_TOLERANCE_PERCENT", "1"))
         self._select_combo_value(self._investable_ratio, env.get("INVESTABLE_RATIO_PERCENT"), default=50)
-        self._select_combo_value(self._target_stock_count, env.get("TARGET_STOCK_COUNT"), default=3)
-        self._select_combo_value(
-            self._ai_exit_interval, env.get("AI_EXIT_INTERVAL_MINUTES"), default=15
-        )
-        # 콤보 값이 실수라 _select_combo_value(정수 전용)를 쓰지 않는다
-        try:
-            skip = float(env.get("TUNE_SKIP_MONTHLY_RETURN_PERCENT") or 5)
-        except ValueError:
-            skip = 5.0
-        index = self._tune_skip_return.findData(skip)
-        self._tune_skip_return.setCurrentIndex(
-            index if index >= 0 else self._tune_skip_return.findData(5.0)
-        )
         # 청산 체크박스는 마지막으로 켜고 끈 상태를 그대로 되살린다. 복원하는 동안에는
         # toggled 처리를 막는다 — 방금 읽은 값을 다시 저장할 이유가 없고, 이 시점에는
         # 엔진도 아직 없다. 값이 없거나 깨져 있으면 `parse_flag`가 켬으로 떨어뜨린다.
@@ -1445,10 +1296,10 @@ class MainWindow(QMainWindow):
         finally:
             self._syncing_exit_flags = False
         self._schedule_times.setText(
-            f"추천 {env.get('RECOMMEND_TIME', DEFAULT_RECOMMEND_TIME_HHMM)}"
-            f" → 매수 {env.get('BUY_TIME', DEFAULT_BUY_TIME_HHMM)}"
-            "  ·  미체결 취소 10:10  ·  청산 15:15"
-            "  —  추천·매수 시각은 .env에서 바꾸고 다시 시작해야 반영됩니다"
+            f"결정·시장가 매수 {env.get('RECOMMEND_TIME', DEFAULT_RECOMMEND_TIME_HHMM)}"
+            f" (안전망 {env.get('BUY_TIME', DEFAULT_BUY_TIME_HHMM)})"
+            "  ·  매수 결과 메일 10:10  ·  청산 15:15"
+            "  —  시각은 .env에서 바꾸고 다시 시작해야 반영됩니다"
         )
         mode = env.get("TRADE_MODE", "paper")
         if mode == "live":
@@ -1481,22 +1332,13 @@ class MainWindow(QMainWindow):
             "KIWOOM_ACCOUNT": self._account.text().strip(),
             # LLM 모델명(LLM_MODEL)은 UI에서 다루지 않는다 — 키만 화면에서 채운다
             "ANTHROPIC_API_KEY": self._anthropic_key.text().strip(),
-            # 비워두면 공시 수집·악재 배제 없이 추천이 진행된다 (PRD 5.5-B '공시 수집과 악재 배제')
-            "DART_API_KEY": self._dart_key.text().strip(),
             # SMTP 서버/포트/비밀번호는 UI에서 다루지 않으므로 저장 대상에서 제외한다
             # (save_env는 전달된 키만 갱신하므로 .env의 기존 값은 그대로 보존된다)
             "SMTP_USER": self._email_from.text().strip(),  # 로그인 계정 = 발송 주소
             "EMAIL_FROM": self._email_from.text().strip(),
             "EMAIL_TO": self._email_to.text().strip(),
             "STOP_LOSS_PERCENT": self._exit_percent.text().strip() or "2",
-            "BUY_PRICE_TOLERANCE_PERCENT": self._buy_price_tolerance.text().strip() or "2",
-            "GAP_DOWN_TOLERANCE_PERCENT": self._gap_down_tolerance.text().strip() or "1",
-            # AI 매도 판단 호출 주기 — 체크박스와 달리 이 저장 경로를 타므로 바뀌면 재시작한다
-            "AI_EXIT_INTERVAL_MINUTES": str(self._ai_exit_interval.currentData()),
-            # 프롬프트 자동 수정 중지 기준 — 이 저장 경로를 타므로 바뀌면 재시작한다
-            "TUNE_SKIP_MONTHLY_RETURN_PERCENT": f"{self._tune_skip_return.currentData():g}",
             "INVESTABLE_RATIO_PERCENT": str(self._investable_ratio.currentData()),
-            "TARGET_STOCK_COUNT": str(self._target_stock_count.currentData()),
         }
         if mode == "live":
             values["LIVE_TRADE_CONFIRMED"] = "YES_I_UNDERSTAND"
@@ -1702,12 +1544,18 @@ class MainWindow(QMainWindow):
             self._statusbar.showMessage(f"즉시 실행 요청: {MANUAL_ACTIONS[action]}")
 
     def _confirm_action(self, action: str, tickers: tuple = ()) -> bool:
+        decide_and_buy = (
+            "직전 20거래일 장중 흐름으로 오늘 살 ETF(KODEX 200 / KODEX 인버스)를 정하고, "
+            "곧바로 시장가로 매수합니다. 신호가 약하면 그날은 쉽니다.\n"
+            "오늘 이미 매수 주문을 냈으면 다시 사지 않습니다.\n"
+            f"{self._exit_watch_text()}\n"
+            "청산(15:15)과 최종 리포트(15:35)는 지금 실행하지 않고 예정 시각에 맡깁니다."
+        )
         detail = {
+            "recommend": decide_and_buy,
             "buy": (
-                "추천 종목을 목표 매수가에 지정가로 매수합니다.\n"
-                f"현재가가 목표가보다 {self._buy_price_tolerance.text().strip() or '2'}% 넘게 "
-                "높은 종목은 건너뜁니다.\n"
-                f"{self._gap_down_text()}"
+                "오늘 정한 ETF를 시장가로 매수합니다. 아직 정하지 않았으면 먼저 정합니다.\n"
+                "오늘 이미 매수 주문을 냈으면 다시 사지 않습니다."
             ),
             "cancel_unfilled": (
                 "아직 체결되지 않은 매수 주문을 취소하고 매수 결과 메일을 보냅니다.\n"
@@ -1723,24 +1571,9 @@ class MainWindow(QMainWindow):
                 f"선택한 {len(tickers)}종목을 오늘 매수 대상에서 뺍니다.\n"
                 f"{self._plan_labels(tickers)}\n\n"
                 f"{self._drop_plan_effect(tickers)}\n"
-                "뺀 종목의 배정액은 남은 종목에 더해지지 않고 현금으로 남습니다. "
-                "되돌리려면 ① LLM 추천을 다시 실행해야 합니다."
+                "뺀 종목은 오늘 다시 사지 않고 현금으로 남습니다."
             ),
-            "full": (
-                "LLM 추천 + 메일 → 목표가 지정가 매수를 순서대로 실행합니다.\n"
-                f"{self._exit_watch_text()}\n"
-                "청산(15:15)과 최종 리포트(15:35)는 지금 실행하지 않고 예정 시각에 맡깁니다."
-            ),
-            "tune_prompt_force": (
-                "최근 추천 검증 결과를 AI에 넘겨 추천 프롬프트의 판단·서술 지침을 고칩니다.\n"
-                "이번 달 순수익이 기준 이상이어도 건너뛰지 않습니다.\n"
-                "사람 승인 절차가 없어 고쳐진 내용이 다음 추천부터 바로 쓰입니다."
-            ),
-            "tune_exit_prompt_force": (
-                "최근 매도 판단 검증 결과를 AI에 넘겨 매도 프롬프트의 편집 가능한 절을 고칩니다.\n"
-                "이번 달 순수익이 기준 이상이어도 건너뛰지 않습니다.\n"
-                "사람 승인 절차가 없어 고쳐진 내용이 다음 AI 매도 판단부터 바로 쓰입니다."
-            ),
+            "full": decide_and_buy,
         }[action]
         # 주문이 나가지 않는 액션(선택 삭제)에는 실전 계좌 경고를 붙이지 않는다 — 매번 같은
         # 경고가 뜨면 정작 주문이 나가는 팝업의 경고를 흘려보게 된다
@@ -1763,7 +1596,7 @@ class MainWindow(QMainWindow):
         return box.exec() == QMessageBox.StandardButton.Yes
 
     def _on_action_started(self, action: str) -> None:
-        # 스케줄 실행도 이 시그널을 쏘므로, 09:05 추천이 도는 동안에도 버튼이 잠긴다 —
+        # 스케줄 실행도 이 시그널을 쏘므로, 결정·매수가 도는 동안에도 버튼이 잠긴다 —
         # 자동 실행과 겹쳐 누르는 것을 막는다 (버튼 경로의 잠금은 _run_action에도 있다)
         self._set_actions_enabled(False)
         self._statusbar.showMessage(f"실행 중: {ACTION_LABELS.get(action, action)} …")

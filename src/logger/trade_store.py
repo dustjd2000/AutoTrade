@@ -1,16 +1,12 @@
-import json
 import logging
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from src.core.events import FillRecord, OrderResult, OrderSide, OrderStatus, format_stock
-# 순환 참조 없음 — recommender는 config.settings와 src.data.collector만 본다.
-from src.llm.news_verifier import NewsVerdict
-from src.llm.recommender import StockRecommendation
 
 logger = logging.getLogger(__name__)
 
@@ -45,43 +41,6 @@ MIGRATIONS = (
     ("exit_reason", "ALTER TABLE trades ADD COLUMN exit_reason TEXT"),
 )
 
-# 추천 기록 — 추천 시각에 앞부분을 넣고, 15:35 검증이 뒷부분(actual_*, *_hit, review)을 채운다.
-# trades와 달리 체결이 아니라 '무엇을 추천했고 실제로 어떻게 움직였나'를 남기는 표다.
-# 미체결로 사지 못한 종목도 여기에는 남아, "목표 매수가가 현실적이었나"를 되짚는 표본이 된다.
-RECOMMENDATION_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS recommendations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    day TEXT NOT NULL,
-    ticker TEXT NOT NULL,
-    name TEXT,
-    prompt_version TEXT,
-    recommend_price REAL,
-    target_price INTEGER,
-    target_sell_price INTEGER,
-    setup TEXT,
-    reason TEXT,
-    outlook TEXT,
-    actual_high REAL,
-    actual_low REAL,
-    actual_close REAL,
-    actual_change_rate REAL,
-    buy_target_hit INTEGER,
-    sell_target_hit INTEGER,
-    review TEXT,
-    news_checked INTEGER,
-    news_blocking INTEGER,
-    news_reason TEXT,
-    UNIQUE (day, ticker)
-);
-"""
-
-# 이미 만들어진 DB에 뒤늦게 추가된 컬럼 — 2026-10-01 뉴스 검증 (PRD 5.5-B)
-RECOMMENDATION_MIGRATIONS: Tuple[Tuple[str, str], ...] = (
-    ("news_checked", "ALTER TABLE recommendations ADD COLUMN news_checked INTEGER"),
-    ("news_blocking", "ALTER TABLE recommendations ADD COLUMN news_blocking INTEGER"),
-    ("news_reason", "ALTER TABLE recommendations ADD COLUMN news_reason TEXT"),
-)
-
 # AI 매도 판단 한 건(종목 하나)마다 한 줄 (스펙 2026-09-22 2.1). 판단은 메모리와 로그 텍스트에만
 # 남았어서 엔진이 재시작되면 사라졌다 — 15:35 매도 판단 검증의 원천이다.
 AI_EXIT_DECISION_SCHEMA_SQL = """
@@ -111,40 +70,6 @@ CREATE TABLE IF NOT EXISTS position_peaks (
     peak_at TEXT,
     peak_price REAL,
     UNIQUE (day, ticker)
-);
-"""
-
-# 15:35 매도 판단 검증 결과 — 종목당 한 줄 (스펙 3.4). 매도 프롬프트 튜너의 입력이다.
-EXIT_REVIEW_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS exit_reviews (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    day TEXT NOT NULL,
-    ticker TEXT NOT NULL,
-    name TEXT,
-    exit_prompt_version TEXT,
-    net_pnl REAL,
-    net_return REAL,
-    peak_return REAL,
-    outcome TEXT NOT NULL,
-    exit_reason TEXT,
-    decision_count INTEGER NOT NULL DEFAULT 0,
-    review TEXT,
-    UNIQUE (day, ticker)
-);
-"""
-
-# 장중 투자자별 순매수 잠정치 (ka10064, 2026-10-08). 15:35에 그날 매도한 종목만 받아 둔다 —
-# AI 매도 판단에 수급을 넣을 가치가 있는지 매도 결과와 대조해 보려는 관찰 기록이고, 아직
-# 어떤 판단에도 쓰지 않는다. raw_json에 투신·연기금 등 세부 구분까지 그대로 남긴다.
-INVESTOR_FLOW_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS investor_flow (
-    day TEXT NOT NULL,
-    ticker TEXT NOT NULL,
-    tm TEXT NOT NULL,
-    foreign_net INTEGER NOT NULL,
-    institution_net INTEGER NOT NULL,
-    raw_json TEXT,
-    UNIQUE (day, ticker, tm)
 );
 """
 
@@ -259,40 +184,6 @@ class DailyPoint:
 
 
 @dataclass
-class RecommendationRow:
-    """추천 한 건과 그날의 실제 결과 (PRD 5.5-B '추천 검증').
-
-    actual_* 와 *_hit 이 None이면 아직 검증 전이거나 당일 봉 조회에 실패한 종목이다.
-    review가 ""면 LLM 평가를 받지 못한 것이며, 둘 다 메일에서 해당 줄이 빠진다.
-    """
-
-    day: date
-    ticker: str
-    name: str
-    prompt_version: str
-    recommend_price: float
-    target_price: int
-    target_sell_price: int
-    setup: str
-    reason: str
-    outlook: str
-    actual_high: Optional[float] = None
-    actual_low: Optional[float] = None
-    actual_close: Optional[float] = None
-    actual_change_rate: Optional[float] = None
-    buy_target_hit: Optional[bool] = None
-    sell_target_hit: Optional[bool] = None
-    review: str = ""
-    news_checked: Optional[bool] = None
-    news_blocking: Optional[bool] = None
-    news_reason: str = ""
-
-    @property
-    def label(self) -> str:
-        return format_stock(self.ticker, self.name)
-
-
-@dataclass
 class AIExitDecisionRow:
     """AI 매도 판단 한 건 — 종목 하나에 대한 판정과 그 시점의 수치 (스펙 2026-09-22 2.1).
 
@@ -312,31 +203,6 @@ class AIExitDecisionRow:
     exit_prompt_version: str
 
 
-@dataclass
-class ExitReviewRow:
-    """매도 판단 검증 한 줄 — 그날 매도한 종목 하나의 순손익과 분류 (스펙 2026-09-22 3.2).
-
-    outcome은 `captured`/`missed`/`no_chance`/`unknown` 중 하나다 (`src.core.exit_review`).
-    net_*가 None이면 평단을 몰라 순손익을 계산하지 못한 종목이다.
-    """
-
-    day: date
-    ticker: str
-    name: str
-    exit_prompt_version: str
-    net_pnl: Optional[float]
-    net_return: Optional[float]
-    peak_return: Optional[float]
-    outcome: str
-    exit_reason: str
-    decision_count: int
-    review: str = ""
-
-    @property
-    def label(self) -> str:
-        return format_stock(self.ticker, self.name)
-
-
 class TradeStore:
     """매수/매도 체결 내역을 SQLite에 영속 저장한다.
 
@@ -351,14 +217,12 @@ class TradeStore:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as conn:
+            # 1호 전략의 추천·검증·수급 테이블(recommendations, exit_reviews, investor_flow)은
+            # 2026-10-23 폐지와 함께 더 만들지 않는다 — 기존 DB에 있는 표와 데이터는 그대로 남는다
             conn.execute(SCHEMA)
-            conn.execute(RECOMMENDATION_SCHEMA_SQL)
             conn.execute(AI_EXIT_DECISION_SCHEMA_SQL)
             conn.execute(POSITION_PEAK_SCHEMA_SQL)
-            conn.execute(EXIT_REVIEW_SCHEMA_SQL)
-            conn.execute(INVESTOR_FLOW_SCHEMA_SQL)
             self._migrate(conn, "trades", MIGRATIONS)
-            self._migrate(conn, "recommendations", RECOMMENDATION_MIGRATIONS)
             conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
@@ -375,156 +239,6 @@ class TradeStore:
             if column not in existing:
                 conn.execute(ddl)
                 logger.info("%s 테이블에 %s 컬럼을 추가했습니다.", table, column)
-
-    # ── 추천 기록 (PRD 5.5-B '추천 검증') ────────────────────
-    def save_recommendations(
-        self,
-        day: date,
-        recommendations: List[StockRecommendation],
-        prompt_version: str,
-        verdicts: Optional[Dict[str, NewsVerdict]] = None,
-    ) -> None:
-        """그날 추천 메일에 실린 종목을 남긴다.
-
-        (day, ticker) UNIQUE로 UPSERT해 겹치는 종목은 나중 추천이 앞선 추천을 덮어쓴다.
-        그것만으로는 부족하다 — UI ① 버튼을 다시 눌러 LLM이 **다른** 종목을 고르면, 이전
-        실행에만 있던 종목의 행이 UPSERT 대상이 아니라 그대로 남아 그날 행 집합이 여러 번의
-        실행을 합친 합집합이 되어버린다. 그래서 UPSERT에 앞서 그날 행 중 **이번 실행에
-        없는 종목**을 먼저 지워, 재실행 후 남는 집합이 항상 최신 실행과 같아지게 만든다.
-        단, 이미 검증까지 끝난 행(actual_close IS NOT NULL)은 지우지 않는다 — 그건 완결된
-        기록이라 나중 실행이 건드리면 안 된다. recommendations가 빈 리스트면(오늘은
-        `recommend_and_notify`가 그 전에 걸러 호출하지 않는 경우) 지울 기준도 없으므로
-        아무것도 하지 않는다 — 빈 값 하나 때문에 그날 미검증 행을 통째로 날리는 것을 막는다.
-        덮어쓸 때 검증 칸(actual_*, *_hit, review)은 건드리지 않는다 — 추천을 다시 돌린
-        시점에는 아직 채워져 있지 않고, 채워져 있다면 그것이 더 나중 정보다.
-
-        `verdicts`는 종목코드 → `NewsVerdict` (PRD 5.5-B '뉴스 검증'). 기본값 None이라
-        기존 호출부는 그대로 동작하고, 이 경우 세 열 모두 NULL(검증 안 함)로 들어간다 —
-        0/False(악재 없음, 검증은 했음)과 구분해야 하므로 `int(verdict.checked)`처럼
-        명시적으로 변환하되 verdict 자체가 없으면 None을 그대로 둔다.
-        """
-        with closing(self._connect()) as conn:
-            if recommendations:
-                tickers = [r.ticker for r in recommendations]
-                placeholders = ",".join("?" * len(tickers))
-                conn.execute(
-                    f"""DELETE FROM recommendations
-                        WHERE day = ? AND actual_close IS NULL
-                          AND ticker NOT IN ({placeholders})""",
-                    (day.isoformat(), *tickers),
-                )
-            conn.executemany(
-                """INSERT INTO recommendations
-                   (day, ticker, name, prompt_version, recommend_price, target_price,
-                    target_sell_price, setup, reason, outlook,
-                    news_checked, news_blocking, news_reason)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(day, ticker) DO UPDATE SET
-                       name = excluded.name,
-                       prompt_version = excluded.prompt_version,
-                       recommend_price = excluded.recommend_price,
-                       target_price = excluded.target_price,
-                       target_sell_price = excluded.target_sell_price,
-                       setup = excluded.setup,
-                       reason = excluded.reason,
-                       outlook = excluded.outlook,
-                       news_checked = excluded.news_checked,
-                       news_blocking = excluded.news_blocking,
-                       news_reason = excluded.news_reason""",
-                [
-                    (
-                        day.isoformat(),
-                        r.ticker,
-                        r.name,
-                        prompt_version,
-                        r.recommend_price,
-                        r.target_price,
-                        r.target_sell_price,
-                        r.setup,
-                        r.reason,
-                        r.outlook,
-                        *_news_verdict_columns((verdicts or {}).get(r.ticker)),
-                    )
-                    for r in recommendations
-                ],
-            )
-            conn.commit()
-
-    def recommendations_for(self, day: date) -> List[RecommendationRow]:
-        """그날 추천 목록. 추천이 없었으면 빈 리스트."""
-        with closing(self._connect()) as conn:
-            rows = conn.execute(
-                "SELECT * FROM recommendations WHERE day = ? ORDER BY id",
-                (day.isoformat(),),
-            ).fetchall()
-        return [_recommendation_row(row) for row in rows]
-
-    def recent_recommendations(self, day_count: int = 10) -> List[RecommendationRow]:
-        """최근 `day_count` 거래일의 **검증이 끝난** 추천 (오래된 날부터).
-
-        프롬프트 자동 수정 에이전트의 입력이다 (PRD '프롬프트 자동 수정'). 검증 전 행은
-        대조할 실제값이 없어 제외한다 — 오늘 추천은 15:35 검증 뒤에야 여기에 들어온다.
-
-        `recommendations` 테이블에는 거래일만 들어가므로 '최근 N개의 서로 다른 날짜'가
-        곧 최근 N거래일이다.
-        """
-        with closing(self._connect()) as conn:
-            rows = conn.execute(
-                """SELECT * FROM recommendations
-                   WHERE actual_close IS NOT NULL
-                     AND day IN (
-                         SELECT DISTINCT day FROM recommendations
-                         WHERE actual_close IS NOT NULL
-                         ORDER BY day DESC LIMIT ?
-                     )
-                   ORDER BY day, id""",
-                (day_count,),
-            ).fetchall()
-        return [_recommendation_row(row) for row in rows]
-
-    def save_recommendation_outcome(
-        self,
-        day: date,
-        ticker: str,
-        actual_high: float,
-        actual_low: float,
-        actual_close: float,
-        actual_change_rate: float,
-        buy_target_hit: bool,
-        sell_target_hit: Optional[bool],
-    ) -> None:
-        """장 마감 후 실제 움직임을 같은 행에 채운다.
-
-        sell_target_hit이 None인 것은 목표 매도가가 산출되지 않아(0) 판정할 것이 없는
-        경우다 — 0/1이 아니라 NULL로 남겨 '도달 못함'과 구분한다.
-        """
-        with closing(self._connect()) as conn:
-            conn.execute(
-                """UPDATE recommendations
-                   SET actual_high = ?, actual_low = ?, actual_close = ?,
-                       actual_change_rate = ?, buy_target_hit = ?, sell_target_hit = ?
-                   WHERE day = ? AND ticker = ?""",
-                (
-                    actual_high,
-                    actual_low,
-                    actual_close,
-                    actual_change_rate,
-                    int(buy_target_hit),
-                    None if sell_target_hit is None else int(sell_target_hit),
-                    day.isoformat(),
-                    ticker,
-                ),
-            )
-            conn.commit()
-
-    def save_recommendation_review(self, day: date, ticker: str, review: str) -> None:
-        """LLM 평가문을 같은 행에 채운다. 평가를 받지 못한 종목은 부르지 않는다."""
-        with closing(self._connect()) as conn:
-            conn.execute(
-                "UPDATE recommendations SET review = ? WHERE day = ? AND ticker = ?",
-                (review, day.isoformat(), ticker),
-            )
-            conn.commit()
 
     def record_fill(
         self,
@@ -698,30 +412,6 @@ class TradeStore:
             )
             conn.commit()
 
-    def ai_exit_decisions_for(self, day: date) -> List[AIExitDecisionRow]:
-        """그날 판정 전부 (시각순)."""
-        with closing(self._connect()) as conn:
-            rows = conn.execute(
-                "SELECT * FROM ai_exit_decisions WHERE day = ? ORDER BY at, id",
-                (day.isoformat(),),
-            ).fetchall()
-        return [
-            AIExitDecisionRow(
-                day=date.fromisoformat(row["day"]),
-                at=datetime.fromisoformat(row["at"]),
-                ticker=row["ticker"],
-                name=row["name"] or "",
-                sell=bool(row["sell"]),
-                ok=bool(row["ok"]),
-                reason=row["reason"] or "",
-                net_return=row["net_return"] or 0.0,
-                peak_return=row["peak_return"],
-                current_price=row["current_price"] or 0.0,
-                exit_prompt_version=row["exit_prompt_version"] or "",
-            )
-            for row in rows
-        ]
-
     def save_position_peak(
         self,
         day: date,
@@ -756,142 +446,6 @@ class TradeStore:
                 (day.isoformat(),),
             ).fetchall()
         return {row["ticker"]: row["peak_return"] for row in rows}
-
-    def save_investor_flow(self, day: date, ticker: str, points) -> None:
-        """장중 투자자 잠정치를 남긴다. 같은 시각은 덮어쓴다 (15:35를 다시 돌려도 한 벌)."""
-        with closing(self._connect()) as conn:
-            conn.executemany(
-                """INSERT INTO investor_flow
-                   (day, ticker, tm, foreign_net, institution_net, raw_json)
-                   VALUES (?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(day, ticker, tm) DO UPDATE SET
-                       foreign_net = excluded.foreign_net,
-                       institution_net = excluded.institution_net,
-                       raw_json = excluded.raw_json""",
-                [
-                    (
-                        day.isoformat(),
-                        ticker,
-                        point.tm,
-                        point.foreign,
-                        point.institution,
-                        json.dumps(point.raw, ensure_ascii=False),
-                    )
-                    for point in points
-                ],
-            )
-            conn.commit()
-
-    def investor_flow_for(self, day: date, ticker: str) -> List[Tuple[str, int, int]]:
-        """그날 그 종목의 (시각, 외국인, 기관) 순매수 잠정치, 시각 오름차순."""
-        with closing(self._connect()) as conn:
-            rows = conn.execute(
-                """SELECT tm, foreign_net, institution_net FROM investor_flow
-                   WHERE day = ? AND ticker = ? ORDER BY tm""",
-                (day.isoformat(), ticker),
-            ).fetchall()
-        return [(row["tm"], row["foreign_net"], row["institution_net"]) for row in rows]
-
-    def tickers_with_unknown_pnl(self, day: date) -> Set[str]:
-        """그날 체결된 매도 중 `realized_pnl`을 모르는(NULL) 종목코드 (F2, 2026-09-22 최종 리뷰).
-
-        `_pair_by_ticker`는 종목의 매도가 여러 건일 때 **알려진** `realized_pnl`만 합산한다 —
-        일부만 모르는 종목도 나머지 합계가 그대로 나와 '알고 있다'로 보인다. 15:35 매도 판단
-        검증은 순손익이 부분적으로라도 불명이면 그 종목 전체를 "순손익 모름"으로 다뤄야
-        하므로(스펙 3.2), 그 판정에 쓸 종목 목록을 따로 조회한다.
-        """
-        start, end = _day_range(day)
-        placeholders = ", ".join("?" for _ in FILLED_STATUSES)
-        with closing(self._connect()) as conn:
-            rows = conn.execute(
-                f"""SELECT DISTINCT ticker FROM trades
-                    WHERE side = ? AND status IN ({placeholders})
-                          AND realized_pnl IS NULL
-                          AND timestamp BETWEEN ? AND ?""",
-                (OrderSide.SELL.value, *FILLED_STATUSES, start, end),
-            ).fetchall()
-        return {row["ticker"] for row in rows}
-
-    def last_exit_reasons(self, day: date) -> Dict[str, str]:
-        """그날 종목별 **마지막** 체결 매도의 청산 사유 (없으면 빈 문자열)."""
-        start, end = _day_range(day)
-        placeholders = ", ".join("?" for _ in FILLED_STATUSES)
-        with closing(self._connect()) as conn:
-            rows = conn.execute(
-                f"""SELECT ticker, exit_reason FROM trades
-                    WHERE side = ? AND status IN ({placeholders})
-                          AND timestamp BETWEEN ? AND ?
-                    ORDER BY timestamp, id""",
-                (OrderSide.SELL.value, *FILLED_STATUSES, start, end),
-            ).fetchall()
-        reasons: Dict[str, str] = {}
-        for row in rows:
-            reasons[row["ticker"]] = row["exit_reason"] or ""
-        return reasons
-
-    def save_exit_review(self, row: ExitReviewRow) -> None:
-        """검증 한 줄을 남긴다. 같은 날 같은 종목은 덮어쓴다 (검증을 다시 돌려도 한 줄)."""
-        with closing(self._connect()) as conn:
-            conn.execute(
-                """INSERT INTO exit_reviews
-                   (day, ticker, name, exit_prompt_version, net_pnl, net_return, peak_return,
-                    outcome, exit_reason, decision_count, review)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(day, ticker) DO UPDATE SET
-                       name = excluded.name,
-                       exit_prompt_version = excluded.exit_prompt_version,
-                       net_pnl = excluded.net_pnl,
-                       net_return = excluded.net_return,
-                       peak_return = excluded.peak_return,
-                       outcome = excluded.outcome,
-                       exit_reason = excluded.exit_reason,
-                       decision_count = excluded.decision_count,
-                       review = excluded.review""",
-                (
-                    row.day.isoformat(),
-                    row.ticker,
-                    row.name,
-                    row.exit_prompt_version,
-                    row.net_pnl,
-                    row.net_return,
-                    row.peak_return,
-                    row.outcome,
-                    row.exit_reason,
-                    row.decision_count,
-                    row.review,
-                ),
-            )
-            conn.commit()
-
-    def exit_reviews_for(self, day: date) -> List[ExitReviewRow]:
-        with closing(self._connect()) as conn:
-            rows = conn.execute(
-                "SELECT * FROM exit_reviews WHERE day = ? ORDER BY id", (day.isoformat(),)
-            ).fetchall()
-        return [_exit_review_row(row) for row in rows]
-
-    def recent_exit_reviews(self, day_count: int = 10) -> List[ExitReviewRow]:
-        """최근 `day_count` 거래일의 검증 (오래된 날부터) — 매도 프롬프트 튜너의 입력이다."""
-        with closing(self._connect()) as conn:
-            rows = conn.execute(
-                """SELECT * FROM exit_reviews
-                   WHERE day IN (
-                       SELECT DISTINCT day FROM exit_reviews ORDER BY day DESC LIMIT ?
-                   )
-                   ORDER BY day, id""",
-                (day_count,),
-            ).fetchall()
-        return [_exit_review_row(row) for row in rows]
-
-    def count_exit_reviews(self, exit_prompt_version: str) -> int:
-        """그 버전으로 검증이 끝난 종목 수 — 판정 불가(unknown)는 세지 않는다 (표본 게이트)."""
-        with closing(self._connect()) as conn:
-            row = conn.execute(
-                """SELECT COUNT(*) FROM exit_reviews
-                   WHERE exit_prompt_version = ? AND outcome != 'unknown'""",
-                (exit_prompt_version,),
-            ).fetchone()
-        return int(row[0])
 
     def daily_summary(self, day: date) -> DailySummary:
         start, end = _day_range(day)
@@ -1199,63 +753,3 @@ def _weighted_average(pairs: List[Tuple[Optional[float], Optional[int]]]) -> flo
     return sum((p or 0.0) * (q or 0) for p, q in pairs) / total_qty
 
 
-def _news_verdict_columns(
-    verdict: Optional[NewsVerdict],
-) -> Tuple[Optional[int], Optional[int], Optional[str]]:
-    """`NewsVerdict` 하나를 (news_checked, news_blocking, news_reason) 컬럼 값으로.
-
-    판정이 없는 종목(verdict=None)은 세 값 모두 None — '검증 안 함'이다. bool을 그냥
-    저장하면 SQLite가 0/1로 알아서 바꿔 주지만, None까지 함께 다루는 삼항 분기를 한
-    곳에 모아 둬야 save_recommendations의 INSERT 쪽 코드가 번잡해지지 않는다.
-    """
-    if verdict is None:
-        return None, None, None
-    return int(verdict.checked), int(verdict.blocking), verdict.reason
-
-
-def _optional_bool(value) -> Optional[bool]:
-    """SQLite의 0/1/NULL을 bool/None으로. NULL은 '판정하지 않음'이라 False와 구분해야 한다."""
-    return None if value is None else bool(value)
-
-
-def _recommendation_row(row) -> RecommendationRow:
-    """`recommendations` 한 행을 dataclass로. 두 조회가 공유한다."""
-    return RecommendationRow(
-        day=date.fromisoformat(row["day"]),
-        ticker=row["ticker"],
-        name=row["name"] or "",
-        prompt_version=row["prompt_version"] or "",
-        recommend_price=row["recommend_price"] or 0.0,
-        target_price=row["target_price"] or 0,
-        target_sell_price=row["target_sell_price"] or 0,
-        setup=row["setup"] or "",
-        reason=row["reason"] or "",
-        outlook=row["outlook"] or "",
-        actual_high=row["actual_high"],
-        actual_low=row["actual_low"],
-        actual_close=row["actual_close"],
-        actual_change_rate=row["actual_change_rate"],
-        buy_target_hit=_optional_bool(row["buy_target_hit"]),
-        sell_target_hit=_optional_bool(row["sell_target_hit"]),
-        review=row["review"] or "",
-        news_checked=_optional_bool(row["news_checked"]),
-        news_blocking=_optional_bool(row["news_blocking"]),
-        news_reason=row["news_reason"] or "",
-    )
-
-
-def _exit_review_row(row) -> ExitReviewRow:
-    """`exit_reviews` 한 행을 dataclass로."""
-    return ExitReviewRow(
-        day=date.fromisoformat(row["day"]),
-        ticker=row["ticker"],
-        name=row["name"] or "",
-        exit_prompt_version=row["exit_prompt_version"] or "",
-        net_pnl=row["net_pnl"],
-        net_return=row["net_return"],
-        peak_return=row["peak_return"],
-        outcome=row["outcome"],
-        exit_reason=row["exit_reason"] or "",
-        decision_count=row["decision_count"] or 0,
-        review=row["review"] or "",
-    )

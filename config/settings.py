@@ -7,57 +7,14 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# 1호 전략의 추천·매수 시각 기본값 — 둘 다 `.env`로만 바꾼다 (확정 2026-08-20, UI에서는
-# 값을 보여주기만 한다). 개장(09:00)보다 앞서면 당일 지표가 오지 않아 후보 선정이 성립하지
-# 않는다. 2026-08-14 이전 추천 시각은 08:45였다 — 장 전이라 당일 지표가 존재하지 않았다
-# (PRD 10절 "개장 후 추천으로 이동").
+# 결정 시각(`RECOMMEND_TIME`)과 매수 안전망 시각(`BUY_TIME`) 기본값 — 둘 다 `.env`로만 바꾼다
+# (UI에서는 값을 보여주기만 한다). 결정 시각에 당일 거래 여부(휴장 판정)를 보므로 개장 뒤여야
+# 하고, 결정 직후 시장가 매수가 같은 실행에서 나간다 (PRD 5.5-C). 매수 시각은 그 사이 엔진이
+# 재시작돼 결정이 사라진 날의 안전망이라, 결정보다 `MIN_RECOMMEND_TO_BUY_MINUTES`분 이상 뒤다.
 DEFAULT_RECOMMEND_TIME_HHMM = "09:05"
-# 매수는 추천보다 최소 `MIN_RECOMMEND_TO_BUY_MINUTES`분 뒤여야 한다 — 수집 약 40초 +
-# LLM 타임아웃 상한 120초라, 그보다 앞당기면 추천이 아직 없는 채로 매수가 돌아 그날이
-# 통째로 빈다. 간격을 넓히면 그만큼 추천 시점 가격과 주문 시점 가격이 벌어져 갭 판정에
-# 걸리기 쉬워진다 (PRD 10절 "매수 타이밍 조정").
-# 2026-10-01에 09:05 → 09:10. 추천 뒤 뉴스 검증(30초)과 탈락 시 재추천 1회가 들어갈
-# 자리를 만든 것이다. 2026-08-20·21에 09:10 → 09:08 → 09:05로 당겨온 것을 되돌리는
-# 셈이라, 진입 지연이 되돌림 구간을 놓치게 하는지 지켜봐야 한다 (PRD 10절).
 DEFAULT_BUY_TIME_HHMM = "09:10"
 MIN_RECOMMEND_TO_BUY_MINUTES = 3
 MARKET_OPEN_HHMM = "09:00"
-
-
-# 전략 선택 (PRD 5.5-C) — 한 번에 하나만 돈다. 기본값은 1호라 값을 바꾸기 전까지 동작이 그대로다.
-STRATEGY_LLM = "llm"
-STRATEGY_ETF_REGIME = "etf_regime"
-STRATEGY_MODES = (STRATEGY_LLM, STRATEGY_ETF_REGIME)
-
-# AI 매도 판단 호출 주기로 고를 수 있는 값 (분) — UI 콤보와 validate()가 함께 쓴다.
-AI_EXIT_INTERVAL_CHOICES = (15, 30, 60)
-
-# 이번 달 순수익률이 이 값(%) 이상이면 15:35 추천·매도 프롬프트 자동 수정을 둘 다 건너뛴다
-# (스펙 2026-09-22 4-A). UI 콤보가 주는 값만 허용한다 — 1~10%, 0.5 단위.
-TUNE_SKIP_MONTHLY_RETURN_CHOICES = tuple(step / 2 for step in range(2, 21))
-DEFAULT_TUNE_SKIP_MONTHLY_RETURN_PERCENT = 5.0
-
-
-def _parse_tune_skip_percent(raw: Optional[str]) -> float:
-    """월 순수익 게이트 값을 읽는다. 비었거나 목록 밖 값이면 경고 후 기본값(5)으로 돌린다.
-
-    validate()로 막지 않는 것은 의도한 것이다 (2026-09-22) — 튜닝에만 쓰이는 값 하나가
-    틀렸다고 엔진이 뜨지 않으면 그날 매매 전체가 멈춘다. `_parse_hhmm`과 같은 이유다.
-    """
-    if raw is None or not raw.strip():
-        return DEFAULT_TUNE_SKIP_MONTHLY_RETURN_PERCENT
-    try:
-        value = float(raw)
-    except ValueError:
-        value = None
-    if value not in TUNE_SKIP_MONTHLY_RETURN_CHOICES:
-        logger.warning(
-            "TUNE_SKIP_MONTHLY_RETURN_PERCENT 값이 올바르지 않아(1~10, 0.5 단위) 기본값 %s를 사용합니다: %r",
-            DEFAULT_TUNE_SKIP_MONTHLY_RETURN_PERCENT,
-            raw,
-        )
-        return DEFAULT_TUNE_SKIP_MONTHLY_RETURN_PERCENT
-    return value
 
 
 def _parse_hhmm(raw: str, default: str, name: str) -> dt_time:
@@ -138,14 +95,10 @@ class Settings:
     # 장애 대응: 장중 예외 발생 시 동작 방식 ("close_all" | "hold") — 6절
     emergency_action: str = field(default_factory=lambda: os.getenv("EMERGENCY_ACTION", "hold"))
 
-    # LLM 연동 (1호 전략 — Anthropic Claude API로 확정).
+    # LLM 연동 — AI 매도 판단 (PRD 5.5-C '매도 판단'). Anthropic Claude API.
     # 키는 UI "계좌 / API 설정"의 'Anthropic Key' 칸에서 다룬다(2026-08-25). 모델명은 .env 전용이다.
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
     llm_model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "claude-sonnet-5"))
-
-    # DART 전자공시 — 공시 수집용. UI "계좌 / API 설정"의 'DART Key' 칸에서 다룬다(2026-08-25).
-    # 비어 있으면 공시 없이 추천이 진행된다 (PRD 5.5-B '공시 수집과 악재 배제')
-    dart_api_key: str = field(default_factory=lambda: os.getenv("DART_API_KEY", ""))
 
     # 리스크 설정
     max_position_ratio: float = 0.1
@@ -155,22 +108,16 @@ class Settings:
     # "전략 버그로 과도하게 매수되는 경우"만 걸러내는 상위 안전장치라는 검사 로직 자체는 유지.
     max_total_exposure_ratio: float = 1.0
 
-    # 1호 전략 자금 배분 — 예수금 중 매매에 투입할 비율(%)과 추천받을 종목 수
-    # UI 콤보박스 선택 범위: 비율 10~100(10 단위), 종목 수 1~10(1 단위) — 확정 2026-08-03
+    # 자금 배분 — 예수금 중 매매에 투입할 비율(%). UI 콤보박스 선택 범위 10~100(10 단위).
+    # 2호 전략은 이 금액 전부를 오늘의 ETF 1종목에 쓴다 (PRD 5.5-C)
     investable_ratio_percent: int = field(default_factory=lambda: int(os.getenv("INVESTABLE_RATIO_PERCENT", "50")))
-    target_stock_count: int = field(default_factory=lambda: int(os.getenv("TARGET_STOCK_COUNT", "3")))
 
     @property
     def investable_ratio(self) -> float:
         return self.investable_ratio_percent / 100
 
-    # 1호 전략의 추천·매수 시각 — .env에는 "HH:MM" 문자열로 두고, 스케줄러가 쓰는
-    # datetime.time은 프로퍼티로 환산한다 (확정 2026-08-04, 매수 시각 추가 2026-08-20)
-    # AI 매도 판단 호출 주기 (분). UI 콤보가 주는 셋만 허용한다 — 그 밖의 값은 validate()가
-    # 막는다 (PRD 5.5-B 'AI 매도 판단'). 비용이 여기서 갈린다: 하루 호출 수가 주기에 반비례한다.
-    ai_exit_interval_minutes: int = field(
-        default_factory=lambda: int(os.getenv("AI_EXIT_INTERVAL_MINUTES", "15"))
-    )
+    # 결정·매수 안전망 시각 — .env에는 "HH:MM" 문자열로 두고, 스케줄러가 쓰는
+    # datetime.time은 프로퍼티로 환산한다
     recommend_time_hhmm: str = field(
         default_factory=lambda: os.getenv("RECOMMEND_TIME", DEFAULT_RECOMMEND_TIME_HHMM)
     )
@@ -180,22 +127,21 @@ class Settings:
 
     @property
     def recommend_time(self) -> dt_time:
-        """스케줄러에 넘길 추천 시각 (데이터 수집 → LLM 추천 → 추천 메일)."""
+        """스케줄러에 넘길 결정 시각 (ETF 국면 신호 → 결정 메일 → 곧바로 시장가 매수)."""
         return _parse_hhmm(
             self.recommend_time_hhmm, DEFAULT_RECOMMEND_TIME_HHMM, "RECOMMEND_TIME"
         )
 
     @property
     def buy_time(self) -> dt_time:
-        """스케줄러에 넘길 매수 시각 (자금 산정 → 목표 매수가 지정가 주문)."""
+        """스케줄러에 넘길 매수 안전망 시각 — 오늘 아직 주문하지 않았으면 결정부터 다시 해서 산다."""
         return _parse_hhmm(self.buy_time_hhmm, DEFAULT_BUY_TIME_HHMM, "BUY_TIME")
 
     # 손절 라인 — UI/환경변수에는 %(예: 2)로 저장, 내부 계산은 비율(0.02)로 환산.
     # 수수료·세금·슬리피지를 뺀 순손익률 기준이다 (PRD 5.5-B).
     stop_loss_percent: float = field(default_factory=lambda: float(os.getenv("STOP_LOSS_PERCENT", "2")))
-    # 종목 순손익률이 당일 고점 대비 이만큼(%p) 밀리면 호출 주기를 기다리지 않고 AI 매도
-    # 판단을 앞당긴다 (PRD 5.5-B "이익 반납 감시"). 0을 넣으면 이 감시를 끈다. UI에는
-    # 노출하지 않는다 — 실전 표본이 쌓이기 전까지는 `.env`로만 조정한다.
+    # AI 매도 판단 프롬프트에 '고점 대비 반납' 수치를 실을 최소 고점(%) — 이보다 낮은 고점은
+    # 노이즈라 반납 수치를 주지 않는다 (`exit_advisor._peak_text`). `.env` 전용.
     ai_exit_drawdown_percent: float = field(
         default_factory=lambda: float(os.getenv("AI_EXIT_DRAWDOWN_PERCENT", "1"))
     )
@@ -220,50 +166,6 @@ class Settings:
         default_factory=lambda: parse_flag(os.getenv("STOP_LOSS_ENABLED"), True)
     )
 
-    # 추천 직후 웹검색으로 악재를 확인할지 (PRD 5.5-B '뉴스 검증'). 끄면 추천이 곧바로
-    # 매수 대상이 된다 — 2026-10-01 이전과 같은 동작이다. 매일 호출 비용이 나가고 아침
-    # 경로를 건드리는 기능이라 재배포 없이 끌 수 있어야 해서 `.env`로 뺐다.
-    news_verify_enabled: bool = field(
-        default_factory=lambda: parse_flag(os.getenv("NEWS_VERIFY_ENABLED"), True)
-    )
-
-    # 09:00 매수 직전 현재가가 목표 매수가보다 이 비율을 넘게 높으면 그 종목을 건너뛴다.
-    # 추천은 전일 종가 기준이라 갭 상승한 날에는 목표가가 이미 의미를 잃는데, 지정가는
-    # 시장가보다 낮게 걸리므로 그대로 두면 종일 미체결로 남거나 고가에 물린다 (PRD 5.5-B).
-    buy_price_tolerance_percent: float = field(
-        default_factory=lambda: float(os.getenv("BUY_PRICE_TOLERANCE_PERCENT", "2"))
-    )
-
-    @property
-    def buy_price_tolerance_ratio(self) -> float:
-        return self.buy_price_tolerance_percent / 100
-
-    # 09:00 매수 직전 현재가가 전일 종가보다 이 비율을 넘게 낮으면 그 종목을 건너뛴다.
-    # 목표 매수가는 눌림을 노려 전일 종가보다 낮게 잡히는 값이라, 위 갭 상승 판정처럼
-    # 목표가를 기준으로 하한을 두면 얼마나 낮게 출발했는지를 잡지 못한다 (PRD 5.5-B).
-    # 위와 달리 0이 '끔'이다 — 임계값 근거가 아직 약해 꺼둘 수 있어야 한다.
-    gap_down_tolerance_percent: float = field(
-        default_factory=lambda: float(os.getenv("GAP_DOWN_TOLERANCE_PERCENT", "1"))
-    )
-
-    @property
-    def gap_down_tolerance_ratio(self) -> float:
-        return self.gap_down_tolerance_percent / 100
-
-    # 월 순수익 게이트 (스펙 2026-09-22 4-A) — 잘 되고 있을 때는 프롬프트를 건드리지 않는다.
-    # 추천 프롬프트 수정(tune_prompt)과 매도 프롬프트 수정(tune_exit_prompt)에 함께 걸린다.
-    tune_skip_monthly_return_percent: float = field(
-        default_factory=lambda: _parse_tune_skip_percent(os.getenv("TUNE_SKIP_MONTHLY_RETURN_PERCENT"))
-    )
-
-    @property
-    def tune_skip_monthly_return_ratio(self) -> float:
-        return self.tune_skip_monthly_return_percent / 100
-
-    # 2호 전략 (PRD 5.5-C) — `.env` 전용. 바꾸면 엔진을 다시 시작해야 한다.
-    strategy_mode: str = field(
-        default_factory=lambda: os.getenv("STRATEGY_MODE", STRATEGY_LLM).strip().lower()
-    )
     # 2호 ETF 매매의 건별 순수익률 누적합이 -이 값(%) 이하가 되면 매수를 멈춘다 (자동 중단 장치).
     # 누적은 `etf_start_date`부터 센다 — 비우면 처음부터. 풀려면 사람이 둘 중 하나를 바꾼다.
     etf_kill_loss_percent: float = field(
@@ -305,18 +207,11 @@ class Settings:
                 f"BUY_TIME은 RECOMMEND_TIME보다 {MIN_RECOMMEND_TO_BUY_MINUTES}분 이상 뒤여야 "
                 f"합니다: 추천 {self.recommend_time_hhmm} / 매수 {self.buy_time_hhmm}"
             )
-        if self.strategy_mode not in STRATEGY_MODES:
-            raise ValueError(f"STRATEGY_MODE는 {STRATEGY_MODES} 중 하나여야 합니다: {self.strategy_mode}")
         if self.etf_start_date:
             try:
                 date.fromisoformat(self.etf_start_date)
             except ValueError:
                 raise ValueError(f"ETF_START_DATE는 YYYY-MM-DD 형식이어야 합니다: {self.etf_start_date}")
-        if self.ai_exit_interval_minutes not in AI_EXIT_INTERVAL_CHOICES:
-            raise ValueError(
-                f"AI_EXIT_INTERVAL_MINUTES는 {AI_EXIT_INTERVAL_CHOICES} 중 하나여야 합니다: "
-                f"{self.ai_exit_interval_minutes}"
-            )
         if not self.app_key or not self.app_secret:
             raise ValueError("KIWOOM_APP_KEY and KIWOOM_APP_SECRET must be set")
         if self.mode == "live":

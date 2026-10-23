@@ -167,8 +167,6 @@ class FakeEmail:
 def make_workflow(unsettled_sells=False):
     email = FakeEmail()
     workflow = DailyWorkflow(
-        collector=SimpleNamespace(collect=lambda: []),
-        recommender=SimpleNamespace(recommend=lambda d: []),
         strategy=SimpleNamespace(),
         engine=SimpleNamespace(
             order_client=SimpleNamespace(get_today_fills=lambda: []),

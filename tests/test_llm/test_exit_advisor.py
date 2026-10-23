@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -567,10 +567,13 @@ def test_exit_store_defaults(tmp_path):
 
 def test_advisor_reads_the_store_on_every_call(tmp_path):
     """파일을 고치면 엔진 재시작 없이 다음 판단에 반영된다."""
-    store = make_exit_prompt_store(tmp_path / "exit_prompt")
+    folder = tmp_path / "exit_prompt"
+    store = make_exit_prompt_store(folder)
     advisor = ExitAdvisor.__new__(ExitAdvisor)
     advisor.prompt_store = store
-    store.save({"time": "## 시간\n" + "새 시간 지침 " * 10}, reason="시험", today=date(2026, 9, 29))
+    folder.mkdir()
+    (folder / "time.md").write_text("## 시간\n" + "새 시간 지침 " * 10, encoding="utf-8")
+    (folder / "version").write_text("20260929", encoding="utf-8")
 
     assert advisor.prompt_version == "20260929"
     assert "새 시간 지침" in build_exit_system_prompt(advisor.prompt_store.load_sections())

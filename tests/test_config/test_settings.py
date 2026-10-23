@@ -3,12 +3,8 @@ from datetime import time as dt_time
 import pytest
 
 from config.settings import (
-    AI_EXIT_INTERVAL_CHOICES,
     DEFAULT_RECOMMEND_TIME_HHMM,
-    STRATEGY_ETF_REGIME,
-    STRATEGY_LLM,
     Settings,
-    TUNE_SKIP_MONTHLY_RETURN_CHOICES,
     parse_flag,
 )
 
@@ -24,28 +20,9 @@ def _strategy_settings(monkeypatch, **env):
     monkeypatch.setenv("KIWOOM_APP_KEY", "k")
     monkeypatch.setenv("KIWOOM_APP_SECRET", "s")
     monkeypatch.setenv("TRADE_MODE", "paper")
-    monkeypatch.delenv("AI_EXIT_INTERVAL_MINUTES", raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     return Settings()
-
-
-def test_strategy_mode_defaults_to_llm(monkeypatch):
-    """기본값이 1호라 STRATEGY_MODE를 쓰지 않은 기존 .env는 동작이 그대로다 (PRD 5.5-C)."""
-    monkeypatch.delenv("STRATEGY_MODE", raising=False)
-    assert Settings().strategy_mode == STRATEGY_LLM
-
-
-def test_strategy_mode_accepts_etf_regime(monkeypatch):
-    settings = _strategy_settings(monkeypatch, STRATEGY_MODE=" ETF_Regime ")
-    settings.validate()
-    assert settings.strategy_mode == STRATEGY_ETF_REGIME
-
-
-def test_unknown_strategy_mode_blocks_engine_start(monkeypatch):
-    """모르는 값을 1호로 읽어 조용히 돌면 사용자가 고른 전략과 실제가 갈린다."""
-    with pytest.raises(ValueError, match="STRATEGY_MODE"):
-        _strategy_settings(monkeypatch, STRATEGY_MODE="etf").validate()
 
 
 def test_broken_etf_start_date_blocks_engine_start(monkeypatch):
@@ -100,20 +77,6 @@ def test_default_constant_matches_property_fallback():
     hour, minute = (int(part) for part in DEFAULT_RECOMMEND_TIME_HHMM.split(":"))
 
     assert Settings().recommend_time == dt_time(hour, minute)
-
-
-# ── 갭 하락 허용치 (PRD 5.5-B, 확정 2026-08-11) ──────────────
-def test_gap_down_tolerance_defaults_to_one_percent(monkeypatch):
-    monkeypatch.delenv("GAP_DOWN_TOLERANCE_PERCENT", raising=False)
-
-    assert Settings().gap_down_tolerance_ratio == 0.01
-
-
-def test_gap_down_tolerance_zero_means_off(monkeypatch):
-    """갭 상승 쪽(0 = 가장 엄격)과 반대 규약이라 값이 그대로 0으로 와야 한다."""
-    monkeypatch.setenv("GAP_DOWN_TOLERANCE_PERCENT", "0")
-
-    assert Settings().gap_down_tolerance_ratio == 0.0
 
 
 def test_recommend_time_is_between_market_open_and_buy():
@@ -217,30 +180,6 @@ def test_commission_defaults_to_the_measured_rate(monkeypatch):
     assert Settings().commission_ratio == 0.00015
 
 
-# ── AI 매도 판단 호출 주기 ─────────────────────────
-def test_ai_exit_interval_defaults_to_15(monkeypatch):
-    monkeypatch.delenv("AI_EXIT_INTERVAL_MINUTES", raising=False)
-    assert Settings().ai_exit_interval_minutes == 15
-
-
-def test_ai_exit_interval_reads_env(monkeypatch):
-    monkeypatch.setenv("AI_EXIT_INTERVAL_MINUTES", "60")
-    assert Settings().ai_exit_interval_minutes == 60
-
-
-def test_validate_accepts_every_ui_choice(monkeypatch):
-    for minutes in AI_EXIT_INTERVAL_CHOICES:
-        monkeypatch.setenv("AI_EXIT_INTERVAL_MINUTES", str(minutes))
-        _valid_settings(monkeypatch).validate()
-
-
-def test_validate_rejects_an_unsupported_interval(monkeypatch):
-    """UI 콤보에 없는 값이 .env로 들어오면 엔진 시작 단계에서 막는다."""
-    monkeypatch.setenv("AI_EXIT_INTERVAL_MINUTES", "7")
-    with pytest.raises(ValueError, match="AI_EXIT_INTERVAL_MINUTES"):
-        _valid_settings(monkeypatch).validate()
-
-
 
 # ── 청산 경로 적용 여부 (AI 매도 판단 / 손절) ─────────
 @pytest.fixture
@@ -297,48 +236,3 @@ def test_parse_flag_keeps_the_given_default_when_value_is_missing():
     assert parse_flag("0", True) is False
 
 
-# ── 뉴스 검증 킬 스위치 (2026-10-01, PRD 5.5-B '뉴스 검증') ──────────────
-def test_news_verify_is_on_by_default(monkeypatch):
-    monkeypatch.delenv("NEWS_VERIFY_ENABLED", raising=False)
-    assert Settings().news_verify_enabled is True
-
-
-def test_news_verify_can_be_turned_off(monkeypatch):
-    monkeypatch.setenv("NEWS_VERIFY_ENABLED", "0")
-    assert Settings().news_verify_enabled is False
-
-
-# ── 프롬프트 수정 중지 기준 (스펙 2026-09-22 4-A) ──────────────
-def test_tune_skip_defaults_to_5_percent(monkeypatch):
-    monkeypatch.delenv("TUNE_SKIP_MONTHLY_RETURN_PERCENT", raising=False)
-    settings = Settings()
-    assert settings.tune_skip_monthly_return_percent == 5.0
-    assert settings.tune_skip_monthly_return_ratio == 0.05
-
-
-def test_tune_skip_reads_env(monkeypatch):
-    monkeypatch.setenv("TUNE_SKIP_MONTHLY_RETURN_PERCENT", "7.5")
-    assert Settings().tune_skip_monthly_return_ratio == 0.075
-
-
-def test_tune_skip_choices_run_from_1_to_10_by_half():
-    assert TUNE_SKIP_MONTHLY_RETURN_CHOICES[0] == 1.0
-    assert TUNE_SKIP_MONTHLY_RETURN_CHOICES[-1] == 10.0
-    assert len(TUNE_SKIP_MONTHLY_RETURN_CHOICES) == 19
-
-
-@pytest.mark.parametrize("raw", ["0.5", "10.5", "3.3", "abc", " "])
-def test_bad_tune_skip_value_falls_back_to_5(monkeypatch, raw):
-    """튜닝 전용 값 하나 때문에 엔진이 뜨지 않으면 안 된다 — 경고 후 기본값 (2026-09-22)."""
-    monkeypatch.setenv("TUNE_SKIP_MONTHLY_RETURN_PERCENT", raw)
-    assert Settings().tune_skip_monthly_return_percent == 5.0
-
-
-def test_bad_tune_skip_value_does_not_stop_the_engine(monkeypatch):
-    """validate()가 이 값 때문에 실패하지 않는다 — 다른 검사는 그대로 돈다."""
-    monkeypatch.setenv("TUNE_SKIP_MONTHLY_RETURN_PERCENT", "7.3")
-    settings = Settings()
-    settings.app_key = settings.app_key or "k"
-    settings.app_secret = settings.app_secret or "s"
-    settings.mode = "paper"
-    settings.validate()

@@ -1,130 +1,36 @@
-from datetime import date
-from pathlib import Path
+from src.llm.prompt_store import PromptStore
 
-import pytest
-
-from src.llm.prompt_store import PromptStore, next_version
-from src.llm.recommender import (
-    DEFAULT_PROMPT_SECTIONS,
-    PROMPT_SECTION_ORDER,
-    PROMPT_TEMPLATE_VERSION,
-)
+ORDER = ("a", "b")
+DEFAULTS = {"a": "## A 기본", "b": "## B 기본"}
 
 
-def test_next_version_is_the_day_it_was_changed():
-    """버전은 일련번호가 아니라 고친 날짜다 (확정 2026-09-09) — UI도 이 값을 그대로 보여준다."""
-    assert next_version("20260903", date(2026, 9, 10)) == "20260910"
+def make_store(tmp_path):
+    return PromptStore(tmp_path / "prompt", ORDER, DEFAULTS, "v0", label="테스트")
 
 
-@pytest.mark.parametrize(
-    "current, expected",
-    [("20260910", "20260910-2"), ("20260910-2", "20260910-3")],
-)
-def test_next_version_tags_a_second_change_on_the_same_day(current, expected):
-    """이력이 `history/<version>/`에 쌓이므로 같은 날 이름이 겹치면 앞 이력을 덮어쓴다."""
-    assert next_version(current, date(2026, 9, 10)) == expected
-
-
-@pytest.mark.parametrize("current", ["v11", "쓰레기", "", "2026-09-10"])
-def test_next_version_ignores_old_or_broken_values(current):
-    """옛 표기나 깨진 값이 들어와도 멈추지 않는다 — 오늘 날짜가 언제나 올바른 답이다."""
-    assert next_version(current, date(2026, 9, 10)) == "20260910"
-
-
-def test_load_sections_without_files_returns_defaults(tmp_path):
-    store = PromptStore(tmp_path / "prompt")
-    assert store.load_sections() == DEFAULT_PROMPT_SECTIONS
-
-
-def test_load_version_without_file_returns_code_constant(tmp_path):
-    store = PromptStore(tmp_path / "prompt")
-    assert store.load_version() == PROMPT_TEMPLATE_VERSION
-
-
-def test_save_writes_files_archives_history_and_bumps_version(tmp_path):
-    store = PromptStore(tmp_path / "prompt")
-    new_version = store.save({"outlook": "## 오늘 전망 작성 지침\n새 내용"}, reason="시험", today=date(2026, 9, 10))
-
-    assert new_version == "20260910"
-    assert store.load_version() == new_version
-    sections = store.load_sections()
-    assert sections["outlook"] == "## 오늘 전망 작성 지침\n새 내용"
-    # 고치지 않은 절은 기본값 그대로 파일에 쓰인다
-    assert sections["reason"] == DEFAULT_PROMPT_SECTIONS["reason"]
-
-    history = tmp_path / "prompt" / "history" / PROMPT_TEMPLATE_VERSION
-    assert (history / "outlook.md").read_text(encoding="utf-8") == DEFAULT_PROMPT_SECTIONS["outlook"]
-    assert "시험" in (history / "why.md").read_text(encoding="utf-8")
-
-
-def test_second_save_archives_the_first_version(tmp_path):
-    store = PromptStore(tmp_path / "prompt")
-    v_first = store.save({"outlook": "## 오늘 전망 작성 지침\n첫 번째 수정본입니다"}, reason="1회")
-    store.save({"reason": "## 근거 작성 지침\n두 번째 수정본입니다"}, reason="2회")
-
-    archived = tmp_path / "prompt" / "history" / v_first / "outlook.md"
-    assert "첫 번째 수정본입니다" in archived.read_text(encoding="utf-8")
-
-
-def test_blank_file_falls_back_to_default(tmp_path):
-    store = PromptStore(tmp_path / "prompt")
-    store.save({"outlook": "## 오늘 전망 작성 지침\n새 내용"}, reason="시험")
-    (tmp_path / "prompt" / "outlook.md").write_text("   ", encoding="utf-8")
-
-    assert store.load_sections()["outlook"] == DEFAULT_PROMPT_SECTIONS["outlook"]
-
-
-def test_invalid_utf8_file_falls_back_to_default(tmp_path):
-    """섹션 파일이 깨진 인코딩이어도(쓰다가 죽어 반쪽 바이트가 남는 경우 포함) 그 절만
-    기본값으로 폴백하고, 나머지 절은 영향받지 않는다."""
-    store = PromptStore(tmp_path / "prompt")
-    store.save({"outlook": "## 오늘 전망 작성 지침\n새 내용"}, reason="시험")
-    (tmp_path / "prompt" / "outlook.md").write_bytes(b"\xff\xfe\xfa")
-
-    sections = store.load_sections()
-    assert sections["outlook"] == DEFAULT_PROMPT_SECTIONS["outlook"]
-    assert set(sections) == set(PROMPT_SECTION_ORDER)
-
-
-def test_load_sections_always_has_all_five_keys(tmp_path):
-    store = PromptStore(tmp_path / "prompt")
-    store.save({"outlook": "## 오늘 전망 작성 지침\n새 내용"}, reason="시험")
-    assert set(store.load_sections()) == set(PROMPT_SECTION_ORDER)
-
-
-# ── 일반화 (스펙 2026-09-22 4.1 — 매도 프롬프트도 같은 저장소를 쓴다) ──
-ORDER = ("alpha", "beta")
-DEFAULTS = {"alpha": "## A\n기본 A", "beta": "## B\n기본 B"}
-
-
-def custom_store(tmp_path):
-    return PromptStore(tmp_path / "other", ORDER, DEFAULTS, "x1", label="시험 프롬프트")
-
-
-def test_custom_store_falls_back_to_its_own_defaults(tmp_path):
-    store = custom_store(tmp_path)
+def test_falls_back_to_code_defaults_without_files(tmp_path):
+    store = make_store(tmp_path)
     assert store.load_sections() == DEFAULTS
-    assert store.load_version() == "x1"
+    assert store.load_version() == "v0"
 
 
-def test_custom_store_saves_only_its_own_sections(tmp_path):
-    store = custom_store(tmp_path)
-    store.save({"beta": "## B\n새 B"}, reason="시험", today=date(2026, 9, 29))
+def test_reads_sections_and_version_from_files(tmp_path):
+    folder = tmp_path / "prompt"
+    folder.mkdir()
+    (folder / "a.md").write_text("## A 파일", encoding="utf-8")
+    (folder / "version").write_text("20261001\n", encoding="utf-8")
 
-    assert store.load_sections() == {"alpha": "## A\n기본 A", "beta": "## B\n새 B"}
-    assert sorted(p.name for p in (tmp_path / "other").glob("*.md")) == ["alpha.md", "beta.md"]
-    assert (tmp_path / "other" / "history" / "x1" / "alpha.md").exists()
+    store = make_store(tmp_path)
 
-
-def test_why_history_lists_recent_reasons(tmp_path):
-    store = custom_store(tmp_path)
-    store.save({"beta": "## B\n1"}, reason="첫 이유", today=date(2026, 9, 29))
-    store.save({"beta": "## B\n2"}, reason="둘째 이유", today=date(2026, 9, 30))
-
-    text = store.why_history()
-    assert "- x1: 첫 이유" in text
-    assert "- 20260929: 둘째 이유" in text
+    assert store.load_sections() == {"a": "## A 파일", "b": "## B 기본"}
+    assert store.load_version() == "20261001"
 
 
-def test_why_history_is_empty_before_any_change(tmp_path):
-    assert custom_store(tmp_path).why_history() == ""
+def test_blank_or_broken_files_fall_back(tmp_path):
+    """손상 파일 하나가 매도 판단을 멈추면 안 된다 — 공백·디코딩 실패는 기본값으로 떨어진다."""
+    folder = tmp_path / "prompt"
+    folder.mkdir()
+    (folder / "a.md").write_text("   \n", encoding="utf-8")
+    (folder / "b.md").write_bytes(b"\xff\xfe\xfa")
+
+    assert make_store(tmp_path).load_sections() == DEFAULTS

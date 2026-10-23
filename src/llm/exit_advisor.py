@@ -9,8 +9,9 @@ import anthropic
 
 from config.settings import Settings
 from src.core.exit_trace import TracePoint
+from src.llm.common import MAX_TOKENS
+from src.llm.common import extract_json as _extract_json
 from src.llm.prompt_store import PromptStore
-from src.llm.recommender import MAX_TOKENS, _extract_json
 
 logger = logging.getLogger(__name__)
 

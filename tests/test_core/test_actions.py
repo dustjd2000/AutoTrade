@@ -21,16 +21,6 @@ def make_runtime(calls):
         send_daily_report=lambda: calls.append("report"),
         send_final_report=lambda: calls.append("final_report"),
         drop_buy_plans=lambda tickers: calls.append(f"drop_plan:{','.join(tickers)}"),
-        review_recommendations=lambda: calls.append("review_recommendations"),
-        # '강제 갱신' 버튼은 force=True로 부른다 — 어느 쪽으로 불렸는지 기록해야 버튼이
-        # 월 순수익 게이트를 건너뛰는지 검사할 수 있다 (스케줄 쪽은 검증 안에서 부른다)
-        tune_prompt=lambda force=False: calls.append(
-            "tune_prompt_force" if force else "tune_prompt"
-        ),
-        review_exits=lambda: calls.append("review_exits"),
-        tune_exit_prompt=lambda force=False: calls.append(
-            "tune_exit_prompt_force" if force else "tune_exit_prompt"
-        ),
     )
     engine = SimpleNamespace(
         force_close_all_positions=lambda reason="day_end": calls.append(f"sell_all:{reason}"),
@@ -88,69 +78,6 @@ def test_daily_report_runs_off_the_loop():
     assert [s.touches_orders for s in manual_steps(runtime, "daily_report")] == [False]
 
 
-def test_review_recommendations_step_is_scheduled_only():
-    assert "review_recommendations" in SCHEDULED_ACTIONS
-    assert "review_recommendations" not in MANUAL_ACTIONS
-    assert "review_recommendations" not in ORDER_ACTIONS
-
-
-def test_review_recommendations_step_runs_off_the_loop_thread():
-    runtime = make_runtime([])
-    steps = manual_steps(runtime, "review_recommendations")
-    assert len(steps) == 1
-    assert steps[0].touches_orders is False
-
-
-@pytest.mark.parametrize("action", ["tune_prompt", "tune_exit_prompt"])
-def test_tuning_is_not_a_separate_scheduled_step(action):
-    """자동 수정은 각 검증 안에서 돈다 — 수정 여부를 검증 메일에 싣기 위해서다 (2026-10-01)."""
-    assert action not in SCHEDULED_ACTIONS
-    assert action not in MANUAL_ACTIONS
-
-
-@pytest.mark.parametrize("action", ["review_recommendations", "review_exits"])
-def test_exit_review_steps_are_scheduled_only_and_off_the_loop(action):
-    """LLM 호출이 걸리므로 루프 스레드를 쓰지 않는다. 주문을 내지 않는다 (스펙 2026-09-22 3.1)."""
-    assert action in SCHEDULED_ACTIONS
-    assert action not in MANUAL_ACTIONS
-    assert action not in ORDER_ACTIONS
-    calls = []
-    steps = manual_steps(make_runtime(calls), action)
-    assert [s.touches_orders for s in steps] == [False]
-    for step in steps:
-        step.run()
-    assert calls == [action]
-
-
-@pytest.mark.parametrize("action", ["tune_prompt_force", "tune_exit_prompt_force"])
-def test_force_tune_steps_are_buttons_that_do_not_order(action):
-    """설정 탭 버튼이므로 MANUAL이되, 주문을 내지 않으니 실전 계좌 경고는 붙지 않는다."""
-    assert action in MANUAL_ACTIONS
-    assert action not in SCHEDULED_ACTIONS
-    assert action not in ORDER_ACTIONS
-    assert action in CONFIRM_ACTIONS
-
-
-@pytest.mark.parametrize("action", ["tune_prompt_force", "tune_exit_prompt_force"])
-def test_force_tune_steps_run_off_the_loop_thread_with_force(action):
-    """LLM 호출이 걸려 루프를 막으면 안 되고, 월 순수익 게이트를 건너뛰어야 한다."""
-    calls = []
-    steps = manual_steps(make_runtime(calls), action)
-    assert [s.touches_orders for s in steps] == [False]
-    for step in steps:
-        step.run()
-    assert calls == [action]
-
-
-def test_force_tune_is_a_separate_action_from_the_schedule():
-    """같은 액션이면 15:35 스케줄과 겹쳐 누를 때 중복 방지에 막힌다."""
-    calls = []
-    runner = ActionRunner(make_runtime(calls))
-
-    assert drain(runner, ["review_recommendations", "tune_prompt_force"]) == [True, True]
-    assert calls == ["review_recommendations", "tune_prompt_force"]
-
-
 def test_every_action_has_a_label_and_steps():
     runtime = make_runtime([])
     for action in ACTION_LABELS:
@@ -192,7 +119,9 @@ def test_queued_actions_run_in_order():
     runner = ActionRunner(make_runtime(calls))
 
     assert drain(runner, ["recommend", "buy"]) == [True, True]
-    assert calls == ["recommend", "buy"]
+    # ①은 결정 직후 매수까지 한다 — 매수 시각의 'buy'는 안전망으로 한 번 더 돈다
+    # (실제 workflow는 이미 주문했으면 건너뛴다)
+    assert calls == ["recommend", "buy", "buy"]
 
 
 def test_duplicate_submit_is_refused():
@@ -318,7 +247,8 @@ def test_submitting_every_scheduled_key_runs_the_daily_flow():
     assert calls == [
         "daily_reset",
         "recommend",
-        "buy",
+        "buy",   # 결정 직후 시장가 매수 (①의 두 번째 단계)
+        "buy",   # 매수 시각 안전망
         "cancel_unfilled",
         "cancel_unfilled",
         "sell_all:day_end",

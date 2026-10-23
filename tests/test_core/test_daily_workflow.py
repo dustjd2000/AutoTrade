@@ -1,10 +1,8 @@
 from datetime import date
-from datetime import time as dt_time
 from types import SimpleNamespace
 
 import pytest
 
-from src.api.market_data import TodayMetrics
 from src.core import daily_workflow
 from src.core.daily_workflow import DailyWorkflow
 from src.core.events import (
@@ -13,15 +11,10 @@ from src.core.events import (
     OrderResult,
     OrderSide,
     OrderStatus,
-    OrderType,
 )
-from src.data.collector import DailyStockData
-from src.llm.news_verifier import NewsVerdict
-from src.llm.prompt_store import PromptStore
-from src.llm.recommender import PROMPT_TEMPLATE_VERSION, StockRecommendation
-from src.logger.trade_store import DailySummary, MonthlySummary, RecommendationRow, TradeRow, TradeStore
-from src.risk.manager import exit_trigger_price
-from src.strategy.llm_momentum import LLMMomentumStrategy
+from src.logger.trade_store import DailySummary, MonthlySummary, TradeRow
+from src.strategy.base import StockRecommendation
+from src.strategy.etf_regime import ETFRegimeStrategy
 
 
 @pytest.fixture(autouse=True)
@@ -38,19 +31,6 @@ def buy_records_file(tmp_path, monkeypatch):
     path = tmp_path / "buy_records.json"
     monkeypatch.setattr(daily_workflow, "DEFAULT_BUY_RECORDS_PATH", path)
     return path
-
-
-@pytest.fixture(autouse=True)
-def news_verify_always_has_time(monkeypatch):
-    """`_verify_news`의 시간 가드(`MIN_NEWS_VERIFY_SECONDS`)가 벽시계에 의존하지 않게 한다.
-
-    가드는 "매수 시각까지 실제로 남은 시간"을 보므로, 테스트를 언제 돌리느냐에 따라
-    검증이 조용히 건너뛰어질 수 있다 — 그러면 "검증이 안 돌았는데 통과한 것처럼 보이는"
-    거짓 통과가 난다. 기본값을 터무니없이 낮춰 둬서 `remaining`이 얼마든 항상 가드를
-    통과하게 만든다. "시간이 없으면 건너뛴다" 자체를 확인하는 테스트만 자기 안에서
-    반대로(터무니없이 높게) 덮어써 건너뛰는 쪽을 확정적으로 재현한다.
-    """
-    monkeypatch.setattr(daily_workflow, "MIN_NEWS_VERIFY_SECONDS", -10**9)
 
 
 class FakeEmail:
@@ -87,28 +67,19 @@ class FakeOrderClient:
         return True
 
 
-def make_workflow(recommendations=None, collected=True, cash=12_000_000):
-    strategy = LLMMomentumStrategy()
+def make_workflow(recommendations=None, cash=12_000_000):
+    """오늘 결정이 끝난 상태의 워크플로 — `recommendations`가 그날 살 종목이다.
+
+    결정 단계(KODEX 200 일봉 조회)는 `test_etf_workflow.py`가 본다. 여기서는 결정을 마친
+    것으로 표시해(`_etf_decided_on`) 매수·취소·메일·표 같은 공용 흐름만 본다. 투입 비율
+    1/6은 예수금 1,200만 원 → 배정 200만 원 → 현재가 1,000원 × 2,000주가 되게 고른 값이다.
+    """
+    strategy = ETFRegimeStrategy(investable_ratio=1 / 6)
+    if recommendations:
+        strategy.set_recommendations(recommendations)
     email = FakeEmail()
     order_client = FakeOrderClient()
     notifications = []
-
-    daily_data = (
-        [
-            DailyStockData(
-                ticker="005930",
-                name="삼성전자",
-                prev_close=1000.0,
-                prev_high=1020.0,
-                prev_low=980.0,
-                prev_change_rate=1.0,
-                prev_volume=100,
-                volume_surge=2.0,
-            )
-        ]
-        if collected
-        else []
-    )
 
     engine = SimpleNamespace(
         market_data=SimpleNamespace(
@@ -132,10 +103,6 @@ def make_workflow(recommendations=None, collected=True, cash=12_000_000):
     )
 
     workflow = DailyWorkflow(
-        collector=SimpleNamespace(collect=lambda: daily_data),
-        recommender=SimpleNamespace(
-            recommend=lambda d: recommendations, prompt_version=PROMPT_TEMPLATE_VERSION
-        ),
         strategy=strategy,
         engine=engine,
         account=SimpleNamespace(
@@ -143,46 +110,23 @@ def make_workflow(recommendations=None, collected=True, cash=12_000_000):
             get_positions=lambda: {},
             get_balance_snapshot=lambda: SimpleNamespace(total_asset=cash, cash=cash),
         ),
-        trade_store=SimpleNamespace(
-            record_fill=lambda *a, **kw: None,
-            save_recommendations=lambda *a, **kw: None,
-        ),
+        trade_store=SimpleNamespace(record_fill=lambda *a, **kw: None),
         email=email,
     )
+    workflow._etf_decided_on = date.today()
     return workflow, email, order_client, notifications, strategy
 
 
-def test_recommendation_email_sent_on_success():
-    recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="외국인 순매수")]
-    workflow, email, _, _, strategy = make_workflow(recommendations=recs)
-
-    workflow.recommend_and_notify(today=date(2026, 7, 27))
-
-    assert len(email.sent) == 1
-    subject, body, _ = email.sent[0]
-    assert "2026-07-27" in subject
-    assert "005930" in body
-    assert "외국인 순매수" in body
-    assert strategy._recommendations == recs
+def set_price(workflow, price: float) -> None:
+    """매수 직전 현재가를 정한다 — 시장가 수량이 이 값으로 정해진다."""
+    workflow.engine.market_data = SimpleNamespace(
+        get_current_price=lambda t: MarketData(ticker=t, price=price, volume=100)
+    )
 
 
-def test_llm_failure_skips_buys_and_notifies():
-    workflow, email, _, notifications, strategy = make_workflow(recommendations=None)
-
-    workflow.recommend_and_notify(today=date(2026, 7, 27))
-
-    assert email.sent == []
-    assert any("LLM 추천 실패" in n for n in notifications)
-    assert strategy._recommendations == []
-
-
-def test_data_collection_failure_skips_recommendation():
-    workflow, email, _, notifications, _ = make_workflow(recommendations=[], collected=False)
-
-    workflow.recommend_and_notify(today=date(2026, 7, 27))
-
-    assert email.sent == []
-    assert any("데이터 수집 실패" in n for n in notifications)
+def fill_board(workflow, recommendations, day) -> None:
+    """결정 직후의 '매수 예정' 표를 채운다 — 결정 단계(일봉 조회) 없이 표만 본다."""
+    workflow._set_buy_board(day, workflow._board_from_recommendations(recommendations))
 
 
 # ── 일일 리포트 ─────────────────────────────────────────────
@@ -259,38 +203,6 @@ def test_daily_report_is_sent_even_when_fill_sync_fails():
     assert "체결 내역 조회에 실패" in body
 
 
-def test_execute_buys_sends_orders_with_fixed_one_sixth_amount():
-    recs = [
-        StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a"),
-        StockRecommendation(ticker="000660", name="SK하이닉스", target_price=1000, reason="b"),
-        StockRecommendation(ticker="035420", name="NAVER", target_price=1000, reason="c"),
-    ]
-    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
-    strategy.set_recommendations(recs)
-
-    workflow.execute_buys()
-
-    # 예수금 1200만 → 매수가능 600만 → 종목당 200만 → 주당 1000원이므로 2000주씩
-    assert len(order_client.orders) == 3
-    assert all(o.quantity == 2000 for o in order_client.orders)
-    assert all(o.side == OrderSide.BUY for o in order_client.orders)
-
-
-def test_execute_buys_with_two_recommendations_keeps_amount_fixed():
-    recs = [
-        StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a"),
-        StockRecommendation(ticker="000660", name="SK하이닉스", target_price=1000, reason="b"),
-    ]
-    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
-    strategy.set_recommendations(recs)
-
-    workflow.execute_buys()
-
-    # 2종목만 추천돼도 종목당 200만원(=예수금 1/6) 고정, 나머지는 현금 유지
-    assert len(order_client.orders) == 2
-    assert all(o.quantity == 2000 for o in order_client.orders)
-
-
 def test_execute_buys_does_nothing_without_recommendations():
     workflow, _, order_client, _, _ = make_workflow(recommendations=[])
 
@@ -324,7 +236,6 @@ def test_rejected_buy_is_not_treated_as_ordered():
 
     assert subscribed == []  # 거부된 종목은 실시간 구독하지 않는다
     assert any("매수 거부" in n and "CB 발동중" in n for n in notifications)
-    assert any("한 건도 접수되지 않았습니다" in n for n in notifications)
 
 
 def test_buy_resets_final_report_flag(report_mark):
@@ -370,269 +281,6 @@ def test_note_open_position_is_called_for_ordered_stock():
     workflow.execute_buys()
 
     assert noted == ["005930"]
-
-
-def test_execute_buys_sends_limit_orders_at_target_price():
-    """시장가로 사면 개장 직후 고가를 그대로 따라간다 — 목표가 지정가로 낸다 (확정 2026-08-06)."""
-    recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1200, reason="a")]
-    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
-    strategy.set_recommendations(recs)
-
-    workflow.execute_buys()
-
-    order = order_client.orders[0]
-    assert order.order_type == OrderType.LIMIT
-    assert order.price == 1200
-    assert order.quantity == 1666  # 종목당 200만 ÷ 1,200원
-
-
-def test_quantity_is_sized_by_target_price_not_current_price():
-    """현재가는 갭 판정에만 쓴다 — 수량은 목표가 기준이다."""
-    recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a")]
-    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
-    strategy.set_recommendations(recs)
-    # 현재가가 목표가보다 낮아도(=갭 하락) 수량 산정 기준은 목표가다
-    workflow.engine.market_data = SimpleNamespace(
-        get_current_price=lambda t: MarketData(ticker=t, price=500.0, volume=100)
-    )
-
-    workflow.execute_buys()
-
-    assert order_client.orders[0].price == 1000
-    assert order_client.orders[0].quantity == 2000  # 종목당 200만 ÷ 1,000원
-
-
-def test_buy_is_skipped_when_the_open_gaps_above_the_target():
-    """전일 종가로 잡은 목표가가 갭 상승으로 무의미해진 날은 참여하지 않는다."""
-    recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a")]
-    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
-    strategy.set_recommendations(recs)
-    workflow.engine.market_data = SimpleNamespace(  # 허용치 2% → 1,020원 초과면 스킵
-        get_current_price=lambda t: MarketData(ticker=t, price=1021.0, volume=100)
-    )
-
-    workflow.execute_buys()
-
-    assert order_client.orders == []
-
-
-def test_buy_proceeds_inside_the_gap_tolerance():
-    recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a")]
-    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
-    strategy.set_recommendations(recs)
-    workflow.engine.market_data = SimpleNamespace(
-        get_current_price=lambda t: MarketData(ticker=t, price=1020.0, volume=100)
-    )
-
-    workflow.execute_buys()
-
-    assert len(order_client.orders) == 1
-
-
-# ── 범위 지정 주문가 (PRD 5.5-B '주문 방식', 확정 2026-08-26) ────────────────────
-def band_setup(current_price, target_price=1000, tolerance=0.02):
-    """현재가만 바꿔 가며 주문가를 보는 공용 셋업 — 갭 하락 판정은 끄고 위쪽만 본다."""
-    recs = [
-        StockRecommendation(
-            ticker="005930", name="삼성전자", target_price=target_price, reason="a"
-        )
-    ]
-    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
-    strategy.set_recommendations(recs)
-    workflow.buy_price_tolerance_ratio = tolerance
-    workflow.gap_down_tolerance_ratio = 0.0
-    workflow.engine.market_data = SimpleNamespace(
-        get_current_price=lambda t: MarketData(ticker=t, price=current_price, volume=100)
-    )
-    return workflow, order_client
-
-
-def test_order_price_rises_to_the_band_top_when_the_price_is_above_the_target():
-    """밴드 안이면 반드시 체결돼야 한다 — 목표가 한 점에 걸면 되밀리지 않는 한 미체결이다."""
-    workflow, order_client = band_setup(current_price=1010.0)
-
-    workflow.execute_buys()
-
-    (order,) = order_client.orders
-    assert order.price == 1020  # 1,000 × 1.02, 호가 단위(5원) 내림
-    assert order.quantity == 1960  # 종목당 200만 ÷ 1,020원 — 수량도 주문가 기준이다
-
-
-def test_order_price_stays_at_the_target_when_the_price_is_below_it():
-    """아래쪽 절반은 목표가 지정가로도 이미 즉시 체결된다 — 올리면 수량만 준다."""
-    workflow, order_client = band_setup(current_price=990.0)
-
-    workflow.execute_buys()
-
-    (order,) = order_client.orders
-    assert order.price == 1000
-    assert order.quantity == 2000
-
-
-def test_order_price_stays_at_the_target_when_the_price_equals_it():
-    workflow, order_client = band_setup(current_price=1000.0)
-
-    workflow.execute_buys()
-
-    assert order_client.orders[0].price == 1000
-
-
-def test_order_price_never_falls_below_the_current_price_after_tick_flooring():
-    """호가 단위 내림이 현재가 아래로 떨어지면 다시 미체결이 된다 — 그때는 현재가로 낸다.
-
-    목표가 1,000원·허용치 0.6% → 상단 1,006원, 호가 단위(5원) 내림이면 1,005원이라
-    현재가 1,006원보다 낮아진다. 현재가는 체결된 값이라 이미 호가 단위에 맞는다.
-    """
-    workflow, order_client = band_setup(current_price=1006.0, tolerance=0.006)
-
-    workflow.execute_buys()
-
-    assert order_client.orders[0].price == 1006
-
-
-def test_order_price_falls_back_to_the_target_when_the_quote_fails():
-    """밴드를 확인할 수 없는 상태에서 상단에 거는 것은 근거 없이 비싸게 사는 것이다."""
-    workflow, order_client = band_setup(current_price=1010.0)
-
-    def boom(ticker):
-        raise RuntimeError("quote down")
-
-    workflow.engine.market_data = SimpleNamespace(get_current_price=boom)
-
-    workflow.execute_buys()
-
-    assert order_client.orders[0].price == 1000
-
-
-def test_korea_electric_power_regression_2026_08_26():
-    """2026-08-26 (015760)한국전력 회귀 — 밴드 안인데 종일 미체결로 투입 0원이던 사례.
-
-    목표가 33,200원, 09:05 현재가 33,400원, 상승 허용치 3% → 상한 34,196원.
-    갭 판정은 통과했는데 지정가가 33,200원이라 시장가 아래에 놓여 체결되지 않았다.
-    """
-    workflow, order_client = band_setup(
-        current_price=33_400.0, target_price=33_200, tolerance=0.03
-    )
-
-    workflow.execute_buys()
-
-    (order,) = order_client.orders
-    assert order.price == 34_150  # 34,196 → 호가 단위(50원) 내림
-    assert order.price > 33_400  # 현재가 위 = 접수 즉시 체결되는 지정가
-
-
-def test_gap_skip_is_reported_in_the_buy_result_email():
-    recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a")]
-    workflow, email, order_client, _, strategy = make_workflow(recommendations=recs)
-    strategy.set_recommendations(recs)
-    workflow.engine.market_data = SimpleNamespace(
-        get_current_price=lambda t: MarketData(ticker=t, price=1500.0, volume=100)
-    )
-
-    workflow.execute_buys()
-    workflow.cancel_unfilled_buys()
-
-    _, body, _ = email.sent[0]
-    assert "건너뜀" in body
-    assert "갭" in body
-
-
-# ── 갭 하락 판정 (PRD 5.5-B, 확정 2026-08-11, 기준값 변경 2026-08-14) ──────────────
-def gap_down_setup(current_price, recommend_price=1000.0, target_price=1000):
-    recs = [
-        StockRecommendation(
-            ticker="005930",
-            name="삼성전자",
-            target_price=target_price,
-            reason="a",
-            recommend_price=recommend_price,
-        )
-    ]
-    workflow, email, order_client, _, strategy = make_workflow(recommendations=recs)
-    strategy.set_recommendations(recs)
-    workflow.engine.market_data = SimpleNamespace(
-        get_current_price=lambda t: MarketData(ticker=t, price=current_price, volume=100)
-    )
-    return workflow, email, order_client
-
-
-def test_buy_is_skipped_when_the_price_gaps_below_the_recommend_price():
-    """추천한 뒤 무너진 종목은 사지 않는다 (허용치 1% → 990원 미만)."""
-    workflow, _, order_client = gap_down_setup(current_price=989.0)
-
-    workflow.execute_buys()
-
-    assert order_client.orders == []
-
-
-def test_buy_proceeds_inside_the_gap_down_tolerance():
-    workflow, _, order_client = gap_down_setup(current_price=990.0)
-
-    workflow.execute_buys()
-
-    assert len(order_client.orders) == 1
-
-
-def test_gap_down_is_measured_against_the_reference_not_the_target():
-    """2026-08-11 포스코퓨처엠 회귀 — 목표가 기준으로는 걸리지 않고 기준가로만 걸린다.
-
-    163,300원은 목표가 163,500원 대비 -0.12%라 목표가 기준 ±2% 밴드에는 안 걸리지만,
-    기준가 165,500원 대비로는 -1.33%다. 이 종목은 이날 158,800원까지 밀려 손절됐다.
-    목표 매수가 자체가 눌림을 노려 기준가보다 낮게 잡히므로 목표가는 기준이 될 수 없다.
-    """
-    workflow, _, order_client = gap_down_setup(
-        current_price=163_300.0, recommend_price=165_500.0, target_price=163_500
-    )
-
-    workflow.execute_buys()
-
-    assert order_client.orders == []
-
-
-def test_gap_down_check_is_off_when_the_tolerance_is_zero():
-    """임계값 근거가 약해 언제든 끌 수 있어야 한다 — 갭 상승 쪽(0 = 가장 엄격)과 반대 규약이다."""
-    workflow, _, order_client = gap_down_setup(current_price=800.0)
-    workflow.gap_down_tolerance_ratio = 0.0
-
-    workflow.execute_buys()
-
-    assert len(order_client.orders) == 1
-
-
-def test_gap_down_check_is_skipped_when_the_reference_price_is_unknown():
-    """기준가를 모르면 판정할 수 없다 — 시세 조회 실패와 같이 매수를 막지 않는다."""
-    workflow, _, order_client = gap_down_setup(current_price=800.0, recommend_price=0.0)
-
-    workflow.execute_buys()
-
-    assert len(order_client.orders) == 1
-
-
-def test_gap_down_skip_is_reported_in_the_buy_result_email():
-    workflow, email, _ = gap_down_setup(current_price=989.0)
-
-    workflow.execute_buys()
-    workflow.cancel_unfilled_buys()
-
-    _, body, _ = email.sent[0]
-    assert "건너뜀" in body
-    assert "갭 하락" in body
-
-
-def test_buy_proceeds_when_the_current_price_cannot_be_read():
-    """시세 조회가 실패해도 매수는 낸다 — 지정가라 목표가보다 비싸게 체결되지 않는다."""
-    recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a")]
-    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
-    strategy.set_recommendations(recs)
-
-    def boom(ticker):
-        raise RuntimeError("시세 조회 실패")
-
-    workflow.engine.market_data = SimpleNamespace(get_current_price=boom)
-
-    workflow.execute_buys()
-
-    assert len(order_client.orders) == 1
 
 
 # ── 09:30 미체결 취소 + 매수 결과 메일 ──────────────────────
@@ -810,26 +458,6 @@ def test_cancel_runs_even_without_in_memory_records():
     assert email.sent == []  # 알릴 매수 기록이 없으므로 메일은 보내지 않는다
 
 
-def test_buy_result_email_lists_ordered_stocks():
-    recs = [
-        StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a"),
-        StockRecommendation(ticker="000660", name="SK하이닉스", target_price=1000, reason="b"),
-    ]
-    email, _, _ = run_buys(recs)
-
-    assert len(email.sent) == 1
-    subject, body, html = email.sent[0]
-    assert "매수 실행 결과 2/2종목" in subject
-    assert "(005930)삼성전자" in body and "(000660)SK하이닉스" in body
-    assert "2,000" in body                    # 수량 2000주
-    assert "총 투입금액" in body
-    assert "4,000,000원" in body               # 2종목 × 200만
-    # 손절 라인은 순손익 설정값(기본 -2%) 기준이다
-    sl_price = exit_trigger_price(1000.0, -0.02, 0.00015, 0.0018, 0.001)
-    assert f"{sl_price:,.0f}" in body
-    assert "<table" in html
-
-
 def test_buy_result_email_shows_filled_price_when_fill_is_already_known():
     recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a")]
     fills = [
@@ -882,28 +510,6 @@ def test_buy_result_email_is_sent_even_when_fill_query_fails():
     assert any("미체결 매수 주문을 조회하지 못했습니다" in n for n in notifications)
 
 
-def test_buy_result_email_lists_stocks_that_were_not_bought():
-    recs = [StockRecommendation(ticker="005930", name="삼성전자", target_price=1000, reason="a")]
-    workflow, email, order_client, _, strategy = make_workflow(recommendations=recs)
-    strategy.set_recommendations(recs)
-    order_client.send_order = lambda request: OrderResult(
-        order_id="1",
-        ticker=request.ticker,
-        side=request.side,
-        status=OrderStatus.REJECTED,
-        quantity=request.quantity,
-        error_message="CB 발동중입니다. 취소주문만 가능합니다.",
-    )
-
-    workflow.execute_buys()
-    workflow.cancel_unfilled_buys()
-
-    subject, body, html = email.sent[0]
-    assert "매수 실행 결과 0/1종목" in subject
-    assert "매수하지 못한 종목" in body
-    assert "CB 발동중" in body and "CB 발동중" in html
-
-
 def test_buy_result_email_not_sent_without_buy_plans():
     """추천이 없어 매수 자체를 시도하지 않았으면 추천 스킵 알림으로 충분하다."""
     email, _, _ = run_buys([])
@@ -912,11 +518,11 @@ def test_buy_result_email_not_sent_without_buy_plans():
 
 
 def test_buy_skipped_when_one_share_exceeds_allocation():
-    """삼성바이오로직스처럼 1주 목표가가 종목당 배정액을 넘으면 주문하지 않는다.
+    """1주 현재가가 배정액을 넘으면 주문하지 않는다 (시장가라 수량은 현재가로 정한다).
 
-    건너뜀은 별도 알림 메일을 보내지 않고 매수 실행 결과 메일에만 싣는다.
+    건너뜀은 별도 알림 메일을 보내지 않고 매수 예정 표에만 남긴다.
     """
-    # 종목당 배정 = 2,000,000 × 1/6 ≈ 333,333원 < 1주 1,000,000원
+    # 배정 = 2,000,000 × 1/6 ≈ 333,333원 < 1주 1,000,000원
     recs = [
         StockRecommendation(
             ticker="207940", name="삼성바이오로직스", target_price=1_000_000, reason="a"
@@ -925,90 +531,12 @@ def test_buy_skipped_when_one_share_exceeds_allocation():
     workflow, email, order_client, notifications, strategy = make_workflow(
         recommendations=recs, cash=2_000_000
     )
-    strategy.set_recommendations(recs)
+    set_price(workflow, 1_000_000.0)
 
     workflow.execute_buys()
 
     assert order_client.orders == []
     assert not any("건너뜀" in n for n in notifications)
-
-
-# ── 고가주 1주 예외 (PRD 5.5-B, 확정 2026-09-14) ───────────────
-def make_today_workflow():
-    """2026-09-14 실제 상황 — 예수금 4,158,499원, 2종목, 한쪽이 1주 130만원대 고가주.
-
-    종목당 배정 1,039,625원 / 총 투입 한도 2,079,250원.
-    """
-    recs = [
-        StockRecommendation(
-            ticker="278470", name="에이피알", target_price=371_000,
-            recommend_price=373_000, reason="a",
-        ),
-        StockRecommendation(
-            ticker="003230", name="삼양식품", target_price=1_282_000,
-            recommend_price=1_288_000, reason="b",
-        ),
-    ]
-    workflow, email, order_client, notifications, strategy = make_workflow(
-        recommendations=recs, cash=4_158_499
-    )
-    strategy.target_stock_count = 2
-    strategy.set_recommendations(recs)
-    prices = {"278470": 374_500.0, "003230": 1_286_000.0}
-    workflow.engine.market_data = SimpleNamespace(
-        get_current_price=lambda t: MarketData(ticker=t, price=prices[t], volume=100)
-    )
-    return workflow, order_client, strategy
-
-
-def test_expensive_stock_buys_one_share_within_the_total_budget():
-    """1주 값이 배정액을 넘어도 총 투입 한도 안이면 산다.
-
-    종전에는 이 종목이 통째로 빠졌다 — 2026-09-14 삼양식품이 그렇게 빠졌고, 그날
-    목표 매도가(1,318,000원)까지 갔다.
-    """
-    workflow, order_client, _ = make_today_workflow()
-
-    workflow.execute_buys()
-
-    ordered = {o.ticker: o for o in order_client.orders}
-    assert set(ordered) == {"278470", "003230"}, "고가주가 빠졌다"
-    assert ordered["278470"].quantity == 2  # 1,039,625 // 378,000
-    assert ordered["003230"].quantity == 1  # 배정액 초과지만 총 한도 안
-
-
-def test_total_spend_stays_inside_the_budget():
-    """배정액을 넘겨 사도 그날 쓰기로 한 총액은 넘지 않는다."""
-    workflow, order_client, _ = make_today_workflow()
-
-    workflow.execute_buys()
-
-    spent = sum(o.price * o.quantity for o in order_client.orders)
-    assert spent <= 4_158_499 * 0.5, f"총 투입 한도를 넘겼다: {spent:,.0f}원"
-
-
-def test_expensive_stock_is_skipped_when_the_budget_is_gone():
-    """앞 종목이 한도를 다 쓰면 뒤의 고가주는 종전대로 건너뛴다."""
-    workflow, order_client, strategy = make_today_workflow()
-    # 배정액을 1종목분으로 줄여 총 한도를 에이피알이 거의 다 쓰게 만든다
-    strategy.target_stock_count = 4
-
-    workflow.execute_buys()
-
-    assert [o.ticker for o in order_client.orders] == ["278470"]
-    (plan,) = [p for p in workflow.buy_plan_snapshot() if p.ticker == "003230"]
-    assert plan.status == "건너뜀"
-
-
-def test_skipped_allocation_is_not_redistributed():
-    """건너뛴 몫은 남은 종목으로 넘어가지 않는다 — 현금으로 남긴다 (PRD 10절 2026-07-27)."""
-    workflow, order_client, strategy = make_today_workflow()
-    strategy.target_stock_count = 4  # 배정 519,812원 — 삼양식품은 한도 밖
-
-    workflow.execute_buys()
-
-    (order,) = order_client.orders
-    assert order.quantity == 1, "건너뛴 배정액이 에이피알 수량으로 넘어갔다"
 
 
 def test_pending_order_missing_from_fills_is_still_cancelled():
@@ -1037,21 +565,6 @@ def test_filled_order_present_in_fills_is_not_cancelled_again():
     assert order_client.cancelled == []
 
 
-def test_gap_down_ignores_the_previous_close():
-    """전일 종가 대비 판정은 09:05 후보 선정이 맡는다 — 주문 직전은 추천 시점만 본다.
-
-    전일 종가 10,000 / 추천 시점 10,500 / 현재가 10,300이면 전일 종가 기준으로는 +3%라
-    통과하지만, 추천 시점 기준으로는 -1.9%라 걸러야 한다.
-    """
-    workflow, _, order_client = gap_down_setup(
-        current_price=10_300.0, recommend_price=10_500.0, target_price=10_400
-    )
-
-    workflow.execute_buys()
-
-    assert order_client.orders == []
-
-
 # ── UI '매수 예정' 표 (PRD 5.10) ────────────────────────────
 BOARD_DAY = date(2026, 8, 24)
 
@@ -1066,17 +579,6 @@ def board_recs():
             target_sell_price=1100,
         )
     ]
-
-
-def test_buy_plan_snapshot_is_filled_at_recommendation_time():
-    workflow, _, _, _, _ = make_workflow(recommendations=board_recs())
-
-    workflow.recommend_and_notify(today=BOARD_DAY)
-
-    (plan,) = workflow.buy_plan_snapshot(today=BOARD_DAY)
-    assert plan.status == daily_workflow.BUY_PENDING_STATUS
-    assert plan.buy_price == 1000
-    assert plan.quantity == 0  # 아직 주문 전이라 수량을 모른다
 
 
 # 매도예상가(BuyPlanView.sell_price, 익절선을 역산한 값)는 2026-09-18에 걷어냈다 —
@@ -1126,7 +628,7 @@ def test_buy_plan_snapshot_carries_the_live_price():
     workflow, _, _, _, _ = make_workflow(recommendations=board_recs())
     workflow.engine.last_price = lambda ticker: 1_050.0 if ticker == "005930" else 0.0
 
-    workflow.recommend_and_notify(today=BOARD_DAY)
+    fill_board(workflow, board_recs(), BOARD_DAY)
 
     (plan,) = workflow.buy_plan_snapshot(today=BOARD_DAY)
     assert plan.current_price == 1_050.0
@@ -1135,23 +637,10 @@ def test_buy_plan_snapshot_carries_the_live_price():
 def test_buy_plan_current_price_is_blank_before_the_first_tick():
     workflow, _, _, _, _ = make_workflow(recommendations=board_recs())
 
-    workflow.recommend_and_notify(today=BOARD_DAY)
+    fill_board(workflow, board_recs(), BOARD_DAY)
 
     (plan,) = workflow.buy_plan_snapshot(today=BOARD_DAY)
     assert plan.current_price == 0.0
-
-
-def test_recommendation_subscribes_the_recommended_tickers():
-    """아직 보유가 아니라 아무도 구독하지 않는다 — 추천 시점에 걸어야 현재가가 들어온다."""
-    workflow, _, _, _, _ = make_workflow(recommendations=board_recs())
-    subscribed = []
-    workflow.ws_client = SimpleNamespace(
-        subscribe=subscribed.append, is_connected=True
-    )
-
-    workflow.recommend_and_notify(today=BOARD_DAY)
-
-    assert subscribed == [["005930"]]
 
 
 def test_filled_rows_leave_the_buy_plan_board():
@@ -1203,31 +692,13 @@ def test_dropping_a_plan_removes_it_from_today_s_orders():
     """표에서 지운 종목은 매수 시각에 주문이 나가면 안 된다."""
     recs = board_recs()
     workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
-    workflow.recommend_and_notify(today=BOARD_DAY)
+    fill_board(workflow, recs, BOARD_DAY)
 
     workflow.drop_buy_plans(["005930"], today=BOARD_DAY)
 
     assert workflow.buy_plan_snapshot(today=BOARD_DAY) == []
     workflow.execute_buys()
     assert order_client.orders == []
-
-
-def test_dropping_keeps_the_other_stocks_and_their_allocation():
-    """남은 종목의 배정액은 그대로다 — 지운 몫은 현금으로 남는다 (PRD 10절 2026-07-27)."""
-    recs = board_recs() + [
-        StockRecommendation(ticker="035720", name="카카오", target_price=1000, reason="b")
-    ]
-    workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
-    workflow.recommend_and_notify(today=BOARD_DAY)
-
-    workflow.drop_buy_plans(["005930"], today=BOARD_DAY)
-
-    (plan,) = workflow.buy_plan_snapshot(today=BOARD_DAY)
-    assert plan.ticker == "035720"
-    workflow.execute_buys()
-    (order,) = order_client.orders
-    assert order.ticker == "035720"
-    assert order.quantity == 2000, "종목당 배정액은 지운 종목 수와 무관하게 고정이다"
 
 
 # ── 체결 반영 시차를 잔고로 메움 (PRD 5.10, 확정 2026-08-26) ──────────────────
@@ -1420,7 +891,7 @@ def test_dropping_ignores_rows_with_no_live_order():
         StockRecommendation(ticker="005930", name="삼성전자", target_price=9_000_000, reason="a")
     ]
     workflow, _, order_client, _, strategy = make_workflow(recommendations=recs)
-    strategy.set_recommendations(recs)
+    set_price(workflow, 9_000_000.0)
     workflow.execute_buys()  # 1주 가격이 배정액을 넘어 '건너뜀'
     (plan,) = workflow.buy_plan_snapshot()
     assert plan.status == "건너뜀"
@@ -1429,932 +900,3 @@ def test_dropping_ignores_rows_with_no_live_order():
 
     assert order_client.cancelled == []
 
-
-def _recommendation(
-    ticker="005930",
-    name="삼성전자",
-    target_price=70_000,
-    target_sell_price=71_400,
-    outlook="오전 중 회복 시도",
-):
-    return StockRecommendation(
-        ticker=ticker,
-        name=name,
-        target_price=target_price,
-        target_sell_price=target_sell_price,
-        reason="전일 등락률 +2.15%",
-        setup="rebound",
-        outlook=outlook,
-        recommend_price=70_500.0,
-    )
-
-
-class FakeMarketData:
-    """collector가 들고 있는 시세 클라이언트의 가짜 — 15:35 검증의 당일 봉 조회 대상."""
-
-    def __init__(self):
-        self.today_metrics = {}
-        self.investor_flow = {}
-        # 이 집합에 든 종목코드는 today_metrics를 보지 않고 조회 자체가 터진 것처럼 군다
-        # (candle-lookup exception path — None을 돌려주는 것과는 다른 분기다).
-        self.raise_for = set()
-
-    def get_today_metrics(self, ticker, today=None):
-        if ticker in self.raise_for:
-            raise RuntimeError("candle lookup failed")
-        return self.today_metrics.get(ticker)
-
-    def get_intraday_investor_flow(self, ticker):
-        if ticker in self.raise_for:
-            raise RuntimeError("investor flow lookup failed")
-        return self.investor_flow.get(ticker, [])
-
-
-class FakeReviewer:
-    """LLM 검증 평가 모듈의 가짜 — review 호출 인자를 기록하고 미리 정한 결과를 돌려준다."""
-
-    def __init__(self):
-        self.result = None
-        self.calls = []
-
-    def review(self, items, timeout_seconds=120.0):
-        self.calls.append(items)
-        return self.result
-
-
-class FakeTuner:
-    """PromptTuner 대역 — result를 그대로 돌려주고 호출 여부를 calls에 남긴다."""
-
-    def __init__(self):
-        self.result = None
-        self.calls = []
-
-    def tune(self, stats, rows, sections, locked_text, why_history="", timeout_seconds=120.0):
-        self.calls.append(rows)
-        return self.result
-
-
-class FakeRecommender:
-    """재추천(최대 1회, 뉴스 검증 탈락분 제외)을 검증하기 위한 가짜.
-
-    `results`는 호출될 때마다 하나씩 꺼내 쓰는 큐다 — 1차 추천과 재추천이 서로 다른
-    목록을 돌려줘야 재추천 로직(탈락분 제외 → 한 번 더 추천)을 검증할 수 있다.
-    `calls`에는 매 호출이 받은 키워드 인자를 쌓는다 — `exclude_tickers`·`already_picked`가
-    실제로 넘어갔는지 보는 용도다.
-
-    큐가 바닥났는데 `recommend`가 또 불리면 **테스트를 실패시킨다** — 재추천은 최대
-    1회이므로(세 번째 호출은 설계 위반), 조용히 None을 돌려주면 버그가 "LLM 추천 실패"로
-    위장돼 테스트가 거짓 통과한다.
-    """
-
-    def __init__(self):
-        self.results = [[_recommendation()]]
-        self.calls = []
-        self.prompt_version = PROMPT_TEMPLATE_VERSION
-
-    def recommend(self, daily_data, **kwargs):
-        self.calls.append(kwargs)
-        if not self.results:
-            pytest.fail(
-                "FakeRecommender.results 큐가 바닥난 뒤 recommend()가 또 호출됐습니다 "
-                "— 재추천은 최대 1회여야 합니다."
-            )
-        return self.results.pop(0)
-
-
-def build_workflow(tmp_path):
-    """recommend_and_notify가 진짜 TradeStore에 저장하는지 보는 테스트 전용 조립.
-
-    make_workflow와 달리 trade_store는 SimpleNamespace가 아니라 실제 TradeStore다 —
-    save_recommendations로 남긴 값을 recommendations_for로 그대로 읽어 확인해야 한다.
-    """
-    strategy = LLMMomentumStrategy()
-    email = FakeEmail()
-    daily_data = [
-        DailyStockData(
-            ticker="005930",
-            name="삼성전자",
-            prev_close=1000.0,
-            prev_high=1020.0,
-            prev_low=980.0,
-            prev_change_rate=1.0,
-            prev_volume=100,
-            volume_surge=2.0,
-        )
-    ]
-    notifications = []
-    engine = SimpleNamespace(
-        market_data=SimpleNamespace(
-            get_current_price=lambda t: MarketData(ticker=t, price=1000.0, volume=100)
-        ),
-        order_client=FakeOrderClient(),
-        risk_manager=SimpleNamespace(
-            approve=lambda *a, **kw: True,
-            record_order=lambda *a, **kw: None,
-            stop_loss_ratio=0.02,
-            commission_rate=0.00015,
-            tax_rate=0.0018,
-            slippage_rate=0.001,
-        ),
-        note_open_position=lambda ticker: None,
-        last_price=lambda ticker: 0.0,
-        position_snapshot=lambda: [],
-        notify=notifications.append,
-        unsellable_snapshot=lambda: [],
-    )
-    return DailyWorkflow(
-        collector=SimpleNamespace(collect=lambda: daily_data, market_data=FakeMarketData()),
-        recommender=FakeRecommender(),
-        strategy=strategy,
-        engine=engine,
-        account=SimpleNamespace(
-            get_cash=lambda: 12_000_000,
-            get_positions=lambda: {},
-            get_balance_snapshot=lambda: SimpleNamespace(total_asset=12_000_000, cash=12_000_000),
-        ),
-        trade_store=TradeStore(db_path=tmp_path / "t.db"),
-        email=email,
-        reviewer=FakeReviewer(),
-        tuner=FakeTuner(),
-        prompt_store=PromptStore(tmp_path / "prompt"),
-        # 뉴스 검증은 기본적으로 꺼둔다(news_verifier=None) — 검증 동작은 아래 테스트들이
-        # workflow.news_verifier에 FakeVerifier를 끼워 넣어 개별적으로 켠다. buy_time은
-        # 반드시 줘야 한다 — None이면 `_verify_news`가 "예산을 모름"으로 보고 항상
-        # 건너뛰어, 검증 테스트들이 전부 거짓 통과한다.
-        news_verifier=None,
-        news_verify_enabled=True,
-        buy_time=dt_time(9, 8),
-    )
-
-
-def test_recommend_and_notify_saves_recommendations(tmp_path):
-    """추천 메일에 실린 것과 같은 목록이 DB에 남는다."""
-    workflow = build_workflow(tmp_path)
-    workflow.recommend_and_notify(date(2026, 9, 3))
-
-    rows = workflow.trade_store.recommendations_for(date(2026, 9, 3))
-    assert [row.ticker for row in rows] == ["005930"]
-    assert rows[0].prompt_version == PROMPT_TEMPLATE_VERSION
-    assert rows[0].outlook == "오전 중 회복 시도"
-
-
-def test_recommend_and_notify_survives_save_failure(tmp_path):
-    """기록 저장이 실패해도 추천 메일은 나가고 매수 흐름이 멈추지 않는다."""
-    workflow = build_workflow(tmp_path)
-
-    def boom(*args, **kwargs):
-        raise RuntimeError("disk full")
-
-    workflow.trade_store.save_recommendations = boom
-    workflow.recommend_and_notify(date(2026, 9, 3))
-
-    assert workflow.email.sent, "추천 메일이 나가야 한다"
-
-
-def test_recommend_and_notify_saves_the_file_prompt_version(tmp_path):
-    """저장되는 prompt_version은 코드 상수가 아니라 recommender가 실제로 쓴 버전이다."""
-    workflow = build_workflow(tmp_path)
-    workflow.recommender.prompt_version = "v99"
-
-    workflow.recommend_and_notify(date(2026, 9, 8))
-
-    rows = workflow.trade_store.recommendations_for(date(2026, 9, 8))
-    assert rows[0].prompt_version == "v99"
-
-
-def _metrics():
-    return TodayMetrics(
-        ticker="005930", high=72_000.0, low=69_500.0, close=71_000.0, change_rate=1.43
-    )
-
-
-def test_review_recommendations_saves_outcome_and_sends_mail(tmp_path):
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 3)
-    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
-    workflow.collector.market_data.today_metrics = {"005930": _metrics()}
-    workflow.reviewer.result = {"005930": "오전 회복 시도는 맞았습니다."}
-
-    workflow.review_recommendations(day)
-
-    row = workflow.trade_store.recommendations_for(day)[0]
-    assert row.actual_close == 71_000.0
-    assert row.buy_target_hit is True     # 저가 69,500 <= 목표 70,000
-    assert row.sell_target_hit is True    # 고가 72,000 >= 목표 71,400
-    assert row.review == "오전 회복 시도는 맞았습니다."
-    assert "추천 검증" in workflow.email.sent[-1][0]
-
-
-def test_review_recommendations_does_nothing_without_recommendations(tmp_path):
-    workflow = build_workflow(tmp_path)
-    workflow.review_recommendations(date(2026, 9, 3))
-    assert workflow.email.sent == []
-
-
-def test_review_recommendations_survives_candle_lookup_failure(tmp_path):
-    """당일 봉을 못 받은 종목은 실제값을 비워 두고 나머지 흐름은 계속한다."""
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 3)
-    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
-    workflow.collector.market_data.today_metrics = {}   # 전부 None
-
-    workflow.review_recommendations(day)
-
-    row = workflow.trade_store.recommendations_for(day)[0]
-    assert row.actual_close is None
-    assert "당일 봉 조회 실패" in workflow.email.sent[-1][1]
-
-
-def test_review_recommendations_sends_mail_when_llm_fails(tmp_path):
-    """평가 호출이 실패해도 수치까지는 저장하고 메일은 나간다."""
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 3)
-    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
-    workflow.collector.market_data.today_metrics = {"005930": _metrics()}
-    workflow.reviewer.result = None
-
-    workflow.review_recommendations(day)
-
-    row = workflow.trade_store.recommendations_for(day)[0]
-    assert row.actual_close == 71_000.0
-    assert row.review == ""
-    assert workflow.email.sent, "평가가 없어도 검증 메일은 나가야 한다"
-
-
-def test_review_recommendations_skips_llm_for_unverified_stock(tmp_path):
-    """실제값이 없는 종목은 대조할 것이 없으므로 평가 입력에서 빠진다."""
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 3)
-    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
-    workflow.collector.market_data.today_metrics = {}
-
-    workflow.review_recommendations(day)
-
-    assert workflow.reviewer.calls == [], "평가 호출 자체가 없어야 한다"
-
-
-def test_review_recommendations_survives_review_call_raising(tmp_path):
-    """평가 호출 자체가 예외로 죽어도(예: 포맷 문자열이 None을 만나 TypeError) 검증
-    메일은 나가야 한다 — LLMReviewer.review는 build_review_user_prompt를 try 밖에서
-    부르므로 그 안에서 던진 예외가 그대로 새어나올 수 있다."""
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 3)
-    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
-    workflow.collector.market_data.today_metrics = {"005930": _metrics()}
-
-    def boom(items, timeout_seconds=120.0):
-        raise TypeError("unsupported format string passed to NoneType.__format__")
-
-    workflow.reviewer.review = boom
-    workflow.review_recommendations(day)
-
-    assert workflow.email.sent, "평가 호출이 실패해도 검증 메일은 나가야 한다"
-
-
-def test_fill_reviews_skips_when_any_actual_field_missing(tmp_path):
-    """actual_close만 있고 나머지 실제값이 없는 행은 평가 입력에서 빠져야 한다 —
-    ReviewInput이 네 수치를 모두 쓰므로, 하나라도 없으면 build_review_user_prompt의
-    포맷 문자열이 TypeError로 죽는다."""
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 3)
-    row = RecommendationRow(
-        day=day,
-        ticker="005930",
-        name="삼성전자",
-        prompt_version="v11",
-        recommend_price=70_500.0,
-        target_price=70_000,
-        target_sell_price=71_400,
-        setup="rebound",
-        reason="전일 등락률 +2.15%",
-        outlook="오전 중 회복 시도",
-        actual_high=None,
-        actual_low=None,
-        actual_close=71_000.0,
-        actual_change_rate=None,
-    )
-
-    workflow._fill_reviews(day, [row])
-
-    assert workflow.reviewer.calls == [], "실제값이 일부만 있는 행은 평가 대상이 아니다"
-
-
-def test_review_recommendations_survives_candle_lookup_exception(tmp_path):
-    """한 종목의 일봉 조회가 예외로 터져도 나머지 종목의 검증은 계속된다.
-
-    today_metrics를 비워 None을 돌려주는 것(존재하는 다른 테스트)과는 다른 분기다 —
-    여기서는 get_today_metrics 자체가 raise한다.
-    """
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 3)
-    boom = _recommendation(ticker="000660", name="SK하이닉스")
-    ok = _recommendation(ticker="005930", name="삼성전자")
-    workflow.trade_store.save_recommendations(day, [boom, ok], "v11")
-    workflow.collector.market_data.today_metrics = {"005930": _metrics()}
-    workflow.collector.market_data.raise_for = {"000660"}
-
-    workflow.review_recommendations(day)
-
-    rows = {row.ticker: row for row in workflow.trade_store.recommendations_for(day)}
-    assert rows["000660"].actual_close is None
-    assert rows["005930"].actual_close == 71_000.0
-    assert workflow.email.sent, "조회 실패 종목이 있어도 메일은 나가야 한다"
-
-
-def test_review_recommendations_leaves_zero_close_unfilled(tmp_path):
-    """당일 봉 종가가 0으로 온 경우도 조회 실패와 같이 취급해 값을 채우지 않는다."""
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 3)
-    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
-    workflow.collector.market_data.today_metrics = {
-        "005930": TodayMetrics(ticker="005930", high=72_000.0, low=69_500.0, close=0.0, change_rate=0.0)
-    }
-
-    workflow.review_recommendations(day)
-
-    row = workflow.trade_store.recommendations_for(day)[0]
-    assert row.actual_close is None
-
-
-def test_review_recommendations_leaves_blank_high_or_low_unfilled(tmp_path):
-    """고가·저가가 빈 응답(0.0)으로 와도 종가가 멀쩡하면 그 0.0을 실제 저가처럼 저장해서는
-    안 된다 — market_data.to_float("")가 0.0을 돌려주는 것과 조회 실패를 구분하지 못하면
-    '미도달 (매수 무산)'이 사실인 것처럼 메일에 찍힌다."""
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 3)
-    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
-    workflow.collector.market_data.today_metrics = {
-        "005930": TodayMetrics(ticker="005930", high=0.0, low=69_500.0, close=71_000.0, change_rate=1.43)
-    }
-
-    workflow.review_recommendations(day)
-
-    row = workflow.trade_store.recommendations_for(day)[0]
-    assert row.actual_close is None
-
-
-def test_review_recommendations_survives_outcome_save_failure(tmp_path):
-    """실제 움직임 저장이 실패해도 흐름이 멈추지 않고 메일은 나간다."""
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 3)
-    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
-    workflow.collector.market_data.today_metrics = {"005930": _metrics()}
-
-    def boom(*args, **kwargs):
-        raise RuntimeError("disk full")
-
-    workflow.trade_store.save_recommendation_outcome = boom
-    workflow.review_recommendations(day)
-
-    assert workflow.email.sent, "저장이 실패해도 검증 메일은 나가야 한다"
-
-
-def test_review_recommendations_survives_review_save_failure(tmp_path):
-    """평가문 저장이 실패해도 흐름이 멈추지 않고 메일은 나간다."""
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 3)
-    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
-    workflow.collector.market_data.today_metrics = {"005930": _metrics()}
-    workflow.reviewer.result = {"005930": "오전 회복 시도는 맞았습니다."}
-
-    def boom(*args, **kwargs):
-        raise RuntimeError("disk full")
-
-    workflow.trade_store.save_recommendation_review = boom
-    workflow.review_recommendations(day)
-
-    assert workflow.email.sent, "평가문 저장이 실패해도 검증 메일은 나가야 한다"
-
-
-def test_review_recommendations_without_reviewer_saves_numbers_and_sends_mail(tmp_path):
-    """reviewer가 None이면 LLM을 부르지 않고도 수치는 저장하고 메일은 나간다."""
-    workflow = build_workflow(tmp_path)
-    workflow.reviewer = None
-    day = date(2026, 9, 3)
-    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
-    workflow.collector.market_data.today_metrics = {"005930": _metrics()}
-
-    workflow.review_recommendations(day)
-
-    row = workflow.trade_store.recommendations_for(day)[0]
-    assert row.actual_close == 71_000.0
-    assert row.review == ""
-    assert workflow.email.sent, "reviewer가 없어도 검증 메일은 나가야 한다"
-
-
-def test_review_recommendations_leaves_unmatched_ticker_review_blank(tmp_path):
-    """reviewer가 일부 종목만 평가해 돌려주면, 나머지 종목의 review는 빈 채로 남는다."""
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 3)
-    first = _recommendation(ticker="005930", name="삼성전자")
-    second = _recommendation(ticker="000660", name="SK하이닉스", target_price=100_000, target_sell_price=102_000)
-    workflow.trade_store.save_recommendations(day, [first, second], "v11")
-    workflow.collector.market_data.today_metrics = {
-        "005930": _metrics(),
-        "000660": TodayMetrics(ticker="000660", high=103_000.0, low=99_000.0, close=101_000.0, change_rate=1.0),
-    }
-    workflow.reviewer.result = {"005930": "오전 회복 시도는 맞았습니다."}  # 000660은 빠져 있다
-
-    original_save_review = workflow.trade_store.save_recommendation_review
-    saved_tickers = []
-
-    def spy_save_review(day, ticker, review):
-        saved_tickers.append(ticker)
-        original_save_review(day, ticker, review)
-
-    workflow.trade_store.save_recommendation_review = spy_save_review
-
-    workflow.review_recommendations(day)
-
-    rows = {row.ticker: row for row in workflow.trade_store.recommendations_for(day)}
-    assert rows["005930"].review == "오전 회복 시도는 맞았습니다."
-    assert rows["000660"].review == ""
-    assert saved_tickers == ["005930"], "평가를 받지 못한 종목은 저장을 부르지 않는다"
-
-
-# ── tune_prompt (프롬프트 자동 수정) ─────────────────────
-LONG_OUTLOOK = "## 오늘 전망 작성 지침\n" + ("가" * 80)
-
-
-def _verified_recommendation(workflow, day):
-    """검증까지 끝난 추천 한 건을 DB에 넣는다 — tune_prompt의 입력 조건이다."""
-    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
-    workflow.trade_store.save_recommendation_outcome(
-        day,
-        "005930",
-        actual_high=72_000.0,
-        actual_low=69_500.0,
-        actual_close=71_000.0,
-        actual_change_rate=1.43,
-        buy_target_hit=True,
-        sell_target_hit=False,
-    )
-
-
-def test_tune_prompt_applies_change_and_sends_mail(tmp_path):
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 8)
-    _verified_recommendation(workflow, day)
-    workflow.tuner.result = SimpleNamespace(
-        change=True, reason="근거", sections={"outlook": LONG_OUTLOOK}
-    )
-
-    workflow.tune_prompt(day)
-
-    assert workflow.prompt_store.load_sections()["outlook"] == LONG_OUTLOOK
-    # 버전은 그날 검증 결과를 보고 고쳤다는 뜻으로 **거래일** 날짜를 그대로 쓴다
-    assert workflow.prompt_store.load_version() == "20260908"
-    assert "추천 프롬프트 수정" in workflow.email.sent[-1][0]
-
-
-def test_tune_prompt_does_nothing_when_change_is_false(tmp_path):
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 8)
-    _verified_recommendation(workflow, day)
-    workflow.tuner.result = SimpleNamespace(change=False, reason="표본이 얇다", sections={})
-
-    workflow.tune_prompt(day)
-
-    assert workflow.prompt_store.load_version() == PROMPT_TEMPLATE_VERSION
-    assert workflow.email.sent == []
-
-
-def test_tune_prompt_skips_when_nothing_verified(tmp_path):
-    """검증된 추천이 없으면 LLM을 부르지도 않는다."""
-    workflow = build_workflow(tmp_path)
-    workflow.tune_prompt(date(2026, 9, 8))
-    assert workflow.tuner.calls == []
-    assert workflow.email.sent == []
-
-
-def test_tune_prompt_discards_a_change_that_fails_sanitizing(tmp_path):
-    """안전장치에 전부 걸리면 change=True여도 아무것도 바뀌지 않고 메일도 안 나간다."""
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 8)
-    _verified_recommendation(workflow, day)
-    workflow.tuner.result = SimpleNamespace(
-        change=True, reason="근거", sections={"역할": LONG_OUTLOOK}
-    )
-
-    workflow.tune_prompt(day)
-
-    assert workflow.prompt_store.load_version() == PROMPT_TEMPLATE_VERSION
-    assert workflow.email.sent == []
-
-
-def test_tune_prompt_survives_llm_failure(tmp_path):
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 8)
-    _verified_recommendation(workflow, day)
-    workflow.tuner.result = None
-
-    workflow.tune_prompt(day)
-
-    assert workflow.prompt_store.load_version() == PROMPT_TEMPLATE_VERSION
-    assert workflow.email.sent == []
-
-
-def test_tune_prompt_survives_file_write_failure(tmp_path):
-    """파일 쓰기가 실패해도 예외가 새지 않고 메일도 나가지 않는다."""
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 8)
-    _verified_recommendation(workflow, day)
-    workflow.tuner.result = SimpleNamespace(
-        change=True, reason="근거", sections={"outlook": LONG_OUTLOOK}
-    )
-
-    def boom(*args, **kwargs):
-        raise OSError("disk full")
-
-    workflow.prompt_store.save = boom
-    workflow.tune_prompt(day)
-
-    assert workflow.email.sent == []
-
-
-def test_tune_prompt_skips_without_a_tuner(tmp_path):
-    """tuner가 없으면 단계 자체를 건너뛴다 — DB도 읽지 않는다."""
-    workflow = build_workflow(tmp_path)
-    workflow.tuner = None
-    _verified_recommendation(workflow, date(2026, 9, 8))
-
-    workflow.tune_prompt(date(2026, 9, 8))
-
-    assert workflow.email.sent == []
-    assert workflow.prompt_store.load_version() == PROMPT_TEMPLATE_VERSION
-
-
-def test_tune_prompt_is_skipped_when_the_month_is_good(tmp_path):
-    """월 순수익 게이트는 추천 프롬프트 수정에도 걸린다 (스펙 2026-09-22 4-A)."""
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 8)
-    _verified_recommendation(workflow, day)
-    workflow.trade_store.monthly_summary = lambda year, month, up_to: MonthlySummary(
-        realized_pnl=600_000.0, fees=0.0
-    )
-
-    workflow.tune_prompt(day)
-
-    assert workflow.tuner.calls == []
-
-
-# ── 검증 메일에 자동 수정 결과를 싣는다 (2026-10-01) ─────────
-def _review_day(workflow, day):
-    """오늘 추천 한 건 + 당일 봉 — review_recommendations가 검증 메일을 보내는 조건."""
-    workflow.trade_store.save_recommendations(day, [_recommendation()], "v11")
-    workflow.collector.market_data.today_metrics = {"005930": _metrics()}
-
-
-def _review_mail(workflow):
-    [mail] = [m for m in workflow.email.sent if "추천 검증" in m[0]]
-    return mail[1]
-
-
-def test_review_mail_reports_the_prompt_change(tmp_path):
-    """검증 메일은 자동 수정이 끝난 **뒤**에 나가, 그 결과를 함께 싣는다."""
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 8)
-    _review_day(workflow, day)
-    workflow.tuner.result = SimpleNamespace(
-        change=True, reason="목표가 미도달 반복", sections={"outlook": LONG_OUTLOOK}
-    )
-
-    workflow.review_recommendations(day)
-
-    assert len(workflow.tuner.calls) == 1, "검증이 자동 수정을 직접 부른다"
-    body = _review_mail(workflow)
-    assert f"수정함 ({PROMPT_TEMPLATE_VERSION} → 20260908)" in body
-    assert "목표가 미도달 반복" in body
-    # 전후 비교가 담긴 수정 메일은 종전대로 따로 나간다
-    assert any("추천 프롬프트 수정" in m[0] for m in workflow.email.sent)
-
-
-def test_review_mail_reports_the_tuners_reason_for_no_change(tmp_path):
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 8)
-    _review_day(workflow, day)
-    workflow.tuner.result = SimpleNamespace(change=False, reason="표본이 얇다", sections={})
-
-    workflow.review_recommendations(day)
-
-    assert "수정 안 함 — 표본이 얇다" in _review_mail(workflow)
-    assert len(workflow.email.sent) == 1, "고치지 않은 날은 수정 메일이 없다"
-
-
-def test_review_mail_reports_the_monthly_gate(tmp_path):
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 8)
-    _review_day(workflow, day)
-    workflow.trade_store.monthly_summary = lambda year, month, up_to: MonthlySummary(
-        realized_pnl=600_000.0, fees=0.0
-    )
-
-    workflow.review_recommendations(day)
-
-    assert workflow.tuner.calls == []
-    # 월초 자산 추정치 = 12,000,000 - 600,000 → 600,000 / 11,400,000 = +5.26%
-    assert "수정 안 함 — 이번 달 순수익 +5.26% ≥ 기준 5.0%" in _review_mail(workflow)
-
-
-def test_review_mail_reports_a_tuner_failure(tmp_path):
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 8)
-    _review_day(workflow, day)
-    workflow.tuner.result = None
-
-    workflow.review_recommendations(day)
-
-    assert "수정 안 함 — 판단 실패" in _review_mail(workflow)
-
-
-def test_review_mail_has_no_tuning_block_without_a_tuner(tmp_path):
-    workflow = build_workflow(tmp_path)
-    workflow.tuner = None
-    day = date(2026, 9, 8)
-    _review_day(workflow, day)
-
-    workflow.review_recommendations(day)
-
-    assert "프롬프트 자동 수정" not in _review_mail(workflow)
-
-
-def test_tuning_still_runs_on_a_day_without_recommendations(tmp_path):
-    """오늘 추천이 없어도 최근 10거래일 검증 결과로는 고칠 수 있다 — 종전 스케줄과 같다."""
-    workflow = build_workflow(tmp_path)
-    _verified_recommendation(workflow, date(2026, 9, 7))
-    workflow.tuner.result = SimpleNamespace(change=False, reason="r", sections={})
-
-    workflow.review_recommendations(date(2026, 9, 8))
-
-    assert len(workflow.tuner.calls) == 1
-    assert workflow.email.sent == [], "검증할 추천이 없으니 검증 메일은 없다"
-
-
-def test_review_mail_is_sent_even_if_tuning_raises(tmp_path):
-    """자동 수정에서 예상 못 한 예외가 나도 검증 메일은 나간다."""
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 8)
-    _review_day(workflow, day)
-
-    def boom(*args, **kwargs):
-        raise RuntimeError("tuner exploded")
-
-    workflow.tuner.tune = boom
-
-    workflow.review_recommendations(day)
-
-    assert "수정 안 함 — 판단 실패" in _review_mail(workflow)
-
-
-def test_force_runs_the_tuner_even_when_the_month_is_good(tmp_path):
-    """'강제 갱신' 버튼은 월 순수익 게이트를 건너뛴다."""
-    workflow = build_workflow(tmp_path)
-    day = date(2026, 9, 8)
-    _verified_recommendation(workflow, day)
-    workflow.trade_store.monthly_summary = lambda year, month, up_to: MonthlySummary(
-        realized_pnl=600_000.0, fees=0.0
-    )
-    workflow.tuner.result = SimpleNamespace(
-        change=True, reason="근거", sections={"outlook": LONG_OUTLOOK}
-    )
-
-    workflow.tune_prompt(day, force=True)
-
-    assert len(workflow.tuner.calls) == 1
-    assert workflow.prompt_store.load_version() == "20260908"
-
-
-def test_force_still_needs_a_verified_recommendation(tmp_path):
-    """표본 게이트는 강제로도 열리지 않는다 — 재료가 없으면 고칠 근거 자체가 없다."""
-    workflow = build_workflow(tmp_path)
-
-    workflow.tune_prompt(date(2026, 9, 8), force=True)
-
-    assert workflow.tuner.calls == []
-    assert workflow.email.sent == []
-
-
-# ── 뉴스 검증 재추천 (PRD 5.5-B '뉴스 검증') ─────────────────────────
-
-
-class FakeVerifier:
-    """NewsVerifier 대역 — 넘겨받은 종목코드를 calls에 쌓고, 미리 정한 판정만 돌려준다.
-
-    실제 NewsVerifier처럼 **판정이 난 종목만** dict에 담는다 — verdicts에 없는
-    종목코드는 '판정 없음(=통과)'을 그대로 흉내낸다.
-    """
-
-    def __init__(self):
-        self.calls = []
-        self.verdicts = {}
-
-    def verify(self, items, timeout_seconds):
-        self.calls.append([t for t, _ in items])
-        return {t: v for t, v in self.verdicts.items() if t in dict(items)}
-
-
-def test_clean_verdicts_do_not_trigger_a_second_recommendation(tmp_path):
-    """전원 통과면 재추천이 필요 없다 — 추천 호출은 한 번으로 끝난다."""
-    workflow = build_workflow(tmp_path)
-    workflow.news_verifier = FakeVerifier()
-    workflow.recommender.results = [[_recommendation("005930"), _recommendation("000660")]]
-
-    workflow.recommend_and_notify(date(2026, 10, 1))
-
-    assert len(workflow.recommender.calls) == 1
-    assert [r.ticker for r in workflow.strategy._recommendations] == ["005930", "000660"]
-
-
-def test_a_blocking_verdict_drops_the_stock_and_recommends_once_more(tmp_path):
-    """탈락 종목을 빼고 한 번 더 추천받아, 그 결과를 원래 추천에 더한다."""
-    workflow = build_workflow(tmp_path)
-    verifier = FakeVerifier()
-    verifier.verdicts = {
-        "005930": NewsVerdict("005930", checked=True, blocking=True, reason="유상증자")
-    }
-    workflow.news_verifier = verifier
-    workflow.recommender.results = [
-        [_recommendation("005930"), _recommendation("000660")],
-        [_recommendation("035420")],
-    ]
-
-    workflow.recommend_and_notify(date(2026, 10, 1))
-
-    assert len(workflow.recommender.calls) == 2
-    assert workflow.recommender.calls[1]["exclude_tickers"] == ("005930",)
-    # 생존 종목(000660)도 재추천 프롬프트에 알려야 한다 — 안 그러면 LLM이 그 종목을
-    # 다시 고르는 것이 "정상 동작"이 돼 같은 종목에 배정액이 두 번 들어간다 (Critical 1).
-    assert workflow.recommender.calls[1]["already_picked"] == ("000660",)
-    # 모자란 수만 요구한다 — 전체 수를 다시 요구하면 사고가 max_tokens를 다 쓴다 (2026-10-02)
-    assert workflow.recommender.calls[1]["count"] == (
-        workflow.strategy.target_stock_count - 1
-    )
-    assert sorted(r.ticker for r in workflow.strategy._recommendations) == ["000660", "035420"]
-
-
-def test_replacement_duplicating_a_kept_ticker_is_not_bought_twice(tmp_path):
-    """재추천이 '중복 추천 금지' 지시를 어기고 생존 종목을 다시 고르면 코드가 한 번 더 거른다.
-
-    `already_picked`는 LLM에게 거는 소프트 제약일 뿐이라 — 이 코드베이스가
-    drop_unknown_tickers·drop_other_setups로 프롬프트 제약을 코드로 한 번 더 자르는 것과
-    같은 이유로, 안 거르면 같은 종목(000660)에 배정액이 두 번 들어가 분산이 깨진다.
-    """
-    workflow = build_workflow(tmp_path)
-    verifier = FakeVerifier()
-    verifier.verdicts = {
-        "005930": NewsVerdict("005930", checked=True, blocking=True, reason="유상증자")
-    }
-    workflow.news_verifier = verifier
-    # 1차: 005930(탈락) + 000660(생존). 재추천이 지시를 어기고 000660을 또 고르면서
-    # 035420도 새로 고른다 — 실제로 관측 가능한 LLM의 "정상" 동작이다 (Critical 1).
-    workflow.recommender.results = [
-        [_recommendation("005930"), _recommendation("000660")],
-        [_recommendation("000660"), _recommendation("035420")],
-    ]
-
-    workflow.recommend_and_notify(date(2026, 10, 1))
-
-    tickers = [r.ticker for r in workflow.strategy._recommendations]
-    assert tickers == ["000660", "035420"]
-    assert len(tickers) == len(set(tickers)), "같은 종목이 두 번 들어가면 배정액이 2배가 된다"
-
-
-def test_replacement_repeating_a_blocked_ticker_is_dropped_even_if_reverification_fails(tmp_path):
-    """재추천이 1차 탈락 종목을 다시 고르면 코드가 거른다 — 재검증에 맡기지 않는다.
-
-    재검증은 실패하면 '통과'로 떨어지므로(검증은 관문이 아니다), 거기에 맡기면 한 번
-    악재로 판정된 종목이 2차 검증 실패 한 번으로 그대로 매수된다.
-    """
-    workflow = build_workflow(tmp_path)
-
-    class FirstRoundOnly:
-        """1차 호출에만 판정을 주고, 2차(재검증)는 실패한 것처럼 빈 결과를 낸다."""
-
-        def __init__(self):
-            self.calls = 0
-
-        def verify(self, items, timeout_seconds):
-            self.calls += 1
-            if self.calls == 1:
-                return {"005930": NewsVerdict("005930", checked=True, blocking=True, reason="유상증자")}
-            return {}
-
-    workflow.news_verifier = FirstRoundOnly()
-    workflow.recommender.results = [
-        [_recommendation("005930"), _recommendation("000660")],
-        [_recommendation("005930"), _recommendation("035420")],
-    ]
-
-    workflow.recommend_and_notify(date(2026, 10, 1))
-
-    assert [r.ticker for r in workflow.strategy._recommendations] == ["000660", "035420"]
-
-
-def test_merged_recommendations_are_capped_at_the_target_count(tmp_path):
-    """병합 결과가 목표 종목 수를 넘지 않고, 1차 생존분이 앞에 온다 (Important 2)."""
-    workflow = build_workflow(tmp_path)
-    workflow.strategy.target_stock_count = 2
-    verifier = FakeVerifier()
-    verifier.verdicts = {
-        "005930": NewsVerdict("005930", checked=True, blocking=True, reason="유상증자")
-    }
-    workflow.news_verifier = verifier
-    # 1차: 005930(탈락) + 000660(생존) → kept=[000660]. 재추천이 target_count(3)개를
-    # 꽉 채워 돌아오면 병합 결과(1 + 2 = 3)가 target_stock_count(2)를 넘는다.
-    workflow.recommender.results = [
-        [_recommendation("005930"), _recommendation("000660")],
-        [_recommendation("035420"), _recommendation("051910"), _recommendation("373220")],
-    ]
-
-    workflow.recommend_and_notify(date(2026, 10, 1))
-
-    tickers = [r.ticker for r in workflow.strategy._recommendations]
-    assert tickers == ["000660", "035420"]  # 생존분이 앞, 목표 수(2)로 잘림
-
-
-def test_the_second_round_is_the_last_one(tmp_path):
-    """재추천 결과가 또 탈락해도 세 번째는 없다 — 시간이 폭발한다."""
-    workflow = build_workflow(tmp_path)
-    verifier = FakeVerifier()
-    verifier.verdicts = {
-        "005930": NewsVerdict("005930", checked=True, blocking=True, reason="x"),
-        "035420": NewsVerdict("035420", checked=True, blocking=True, reason="y"),
-    }
-    workflow.news_verifier = verifier
-    workflow.recommender.results = [
-        [_recommendation("005930"), _recommendation("000660")],
-        [_recommendation("035420")],
-    ]
-
-    workflow.recommend_and_notify(date(2026, 10, 1))
-
-    assert len(workflow.recommender.calls) == 2
-    assert [r.ticker for r in workflow.strategy._recommendations] == ["000660"]
-
-
-def test_verification_failure_passes_everything_through(tmp_path):
-    """판정이 안 난 종목은 통과다 — 검증은 관문이 아니다."""
-    workflow = build_workflow(tmp_path)
-
-    class Boom:
-        def verify(self, items, timeout_seconds):
-            raise RuntimeError("API 실패")
-
-    workflow.news_verifier = Boom()
-    workflow.recommender.results = [[_recommendation("005930"), _recommendation("000660")]]
-
-    workflow.recommend_and_notify(date(2026, 10, 1))
-
-    assert len(workflow.recommender.calls) == 1
-    assert len(workflow.strategy._recommendations) == 2
-
-
-def test_verification_is_skipped_when_disabled(tmp_path):
-    """토글을 끄면 검증기를 아예 부르지 않는다."""
-    workflow = build_workflow(tmp_path)
-    verifier = FakeVerifier()
-    workflow.news_verifier = verifier
-    workflow.news_verify_enabled = False
-    workflow.recommender.results = [[_recommendation("005930")]]
-
-    workflow.recommend_and_notify(date(2026, 10, 1))
-
-    assert verifier.calls == []
-
-
-def test_all_blocked_skips_the_day(tmp_path):
-    """1차·2차 모두 전원 탈락이면 살 것이 없다 — 매수를 건너뛴다."""
-    workflow = build_workflow(tmp_path)
-    verifier = FakeVerifier()
-    verifier.verdicts = {
-        "005930": NewsVerdict("005930", checked=True, blocking=True, reason="x"),
-        "035420": NewsVerdict("035420", checked=True, blocking=True, reason="y"),
-    }
-    workflow.news_verifier = verifier
-    workflow.recommender.results = [[_recommendation("005930")], [_recommendation("035420")]]
-
-    workflow.recommend_and_notify(date(2026, 10, 1))
-
-    assert workflow.strategy._recommendations == []
-    # 전원 탈락이어도 1차·2차 탈락 종목의 판정 자체는 남아야 "그날 왜 안 샀나"를
-    # 되짚을 수 있다 (Important 3) — 빈 리스트를 저장하면 TradeStore가 아무것도 쓰지 않는다.
-    rows = workflow.trade_store.recommendations_for(date(2026, 10, 1))
-    assert sorted(row.ticker for row in rows) == ["005930", "035420"]
-    # engine.notify=notifications.append로 연결돼 있다 — 바운드 메서드의 __self__로 그
-    # 리스트 자체를 되찾는다 (build_workflow가 notifications를 따로 반환하지 않으므로).
-    notified = workflow.engine.notify.__self__
-    assert any("탈락" in message for message in notified)
-
-
-def test_verification_is_skipped_when_the_buy_time_is_too_close(tmp_path, monkeypatch):
-    """매수까지 시간이 없으면 반쯤 하다 마는 것보다 안 하는 것이 낫다."""
-    monkeypatch.setattr(daily_workflow, "MIN_NEWS_VERIFY_SECONDS", 10**9)
-    workflow = build_workflow(tmp_path)
-    verifier = FakeVerifier()
-    workflow.news_verifier = verifier
-    workflow.recommender.results = [[_recommendation("005930")]]
-
-    workflow.recommend_and_notify(date(2026, 10, 1))
-
-    assert verifier.calls == []
-    assert len(workflow.strategy._recommendations) == 1  # 건너뛰어도 매수는 간다

@@ -26,7 +26,8 @@ def make_runtime(calls):
 @pytest.mark.parametrize(
     "action,expected",
     [
-        ("recommend", ["recommend"]),
+        # ①은 결정 직후 같은 실행에서 시장가 매수까지 한다 (PRD 5.5-C '매수')
+        ("recommend", ["recommend", "buy"]),
         ("buy", ["buy"]),
         ("cancel_unfilled", ["cancel_unfilled"]),
         ("sell_all", ["sell_all:manual"]),

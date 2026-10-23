@@ -1,8 +1,9 @@
 """2호 전략 — 지수 ETF 국면 추종 당일 매매 (PRD 5.5-C, 실험 단계).
 
 직전 20거래일 KODEX 200의 장중 수익률(시가→종가) 평균이 +0.2% 이상이면 KODEX 200을,
--0.2% 이하이면 KODEX 인버스를 산다. 그 사이면 쉰다. 매수·손절·15:15 청산은 1호와 같은
-경로를 쓰고, 여기서는 오늘 무엇을 살지만 정한다.
+-0.2% 이하이면 KODEX 인버스를 산다. 그 사이면 쉰다. 여기서는 오늘 무엇을 살지만 정하고,
+매수·손절·AI 매도 판단·15:15 청산은 `DailyWorkflow`·엔진이 맡는다. 1호 전략(LLM 대형주 추천)은
+2026-10-23에 폐지됐다 (PRD 5.5-B).
 
 근거는 2024년 이후 국면뿐이다 — 1999~2026 장기로는 손실인 규칙이라(PRD 5.5-C '근거와
 한계') 자동 중단 장치(`DailyWorkflow._etf_kill_reason`)와 함께 돈다.
@@ -13,13 +14,16 @@ from statistics import mean
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from src.api.client import to_float
-from src.strategy.llm_momentum import LLMMomentumStrategy
+from src.core.events import MarketData, Signal
+from src.strategy.base import BaseStrategy, BuyPlan, StockRecommendation
 
 logger = logging.getLogger(__name__)
 
 LONG_ETF: Tuple[str, str] = ("069500", "KODEX 200")
 INVERSE_ETF: Tuple[str, str] = ("114800", "KODEX 인버스")
 ETF_TICKERS = (LONG_ETF[0], INVERSE_ETF[0])
+# 결정의 유형 표기 (`StockRecommendation.setup`)
+SETUP = "etf_regime"
 
 # 판단 구간과 문턱 — 둘 다 2026-10-22 검증에서 고른 값이다. 문턱이 없으면(매일 매매)
 # 2024~2026에서도 연 -4%였다 (PRD 5.5-C).
@@ -91,15 +95,45 @@ def traded_today(candles: Iterable[Dict], today: date) -> bool:
     return False
 
 
-class ETFRegimeStrategy(LLMMomentumStrategy):
-    """2호 전략. 매수 계획·선택 삭제는 1호와 같아 그대로 물려받고, 종목 수만 1로 고정한다.
+class ETFRegimeStrategy(BaseStrategy):
+    """2호 전략 — 오늘 살 ETF 1종목과 그 매수 계획을 들고 있는다.
 
-    오늘의 종목은 `DailyWorkflow`가 추천 시각에 `pick_etf`로 정해 `set_recommendations`로 넣는다.
+    오늘의 종목은 `DailyWorkflow`가 결정 시각에 `pick_etf`로 정해 `set_recommendations`로 넣는다.
+    실시간 시세로 진입하지 않는 시간 기반 전략이라 `generate_signal`은 언제나 HOLD다.
     """
 
+    # 종목 수는 하나로 고정 — UI '매수 예정' 표 등이 이 값으로 몇 줄을 보일지 정한다
+    target_stock_count = 1
+
     def __init__(self, investable_ratio: float = 0.5):
-        super().__init__(investable_ratio=investable_ratio, target_stock_count=1)
+        self.investable_ratio = investable_ratio
+        self._recommendations: List[StockRecommendation] = []
 
     @property
     def name(self) -> str:
         return "ETFRegimeStrategy"
+
+    def set_recommendations(self, recommendations: List[StockRecommendation]) -> None:
+        self._recommendations = list(recommendations)
+
+    def drop_recommendations(self, tickers: Iterable[str]) -> None:
+        """오늘 매수 대상에서 뺀다 — UI '매수 예정' 표의 선택 삭제 (PRD 5.10)."""
+        unwanted = set(tickers)
+        self._recommendations = [r for r in self._recommendations if r.ticker not in unwanted]
+
+    def build_buy_plans(self, cash: float) -> List[BuyPlan]:
+        """예수금 × 투입 비율 전액을 오늘의 1종목에 배정한다. 결정이 없으면 빈 목록."""
+        return [
+            BuyPlan(
+                ticker=r.ticker,
+                name=r.name,
+                amount=cash * self.investable_ratio,
+                target_price=r.target_price,
+                reason=r.reason,
+                recommend_price=r.recommend_price,
+            )
+            for r in self._recommendations[: self.target_stock_count]
+        ]
+
+    def generate_signal(self, data: MarketData) -> Signal:
+        return Signal.HOLD

@@ -2,13 +2,10 @@ import json
 import logging
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta
-from datetime import time as dt_time
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Iterable, List, Optional
 
-from config.settings import STRATEGY_ETF_REGIME, STRATEGY_LLM
 from src.api.account import AccountClient
-from src.core import exit_review
 from src.core.engine import TradingEngine
 from src.core.events import (
     BuyExecution,
@@ -19,45 +16,16 @@ from src.core.events import (
     OrderSide,
     OrderStatus,
     OrderType,
-    TuningOutcome,
     format_stock,
-)
-from src.data.collector import DataCollector, market_looks_closed
-from src.llm import exit_reviewer as exit_reviewer_module
-from src.llm import exit_tuner as exit_tuner_module
-from src.llm import reviewer as reviewer_module
-from src.llm import tuner as tuner_module
-from src.llm.exit_advisor import EXIT_PROMPT_SECTION_ORDER, build_exit_locked_text, make_exit_prompt_store
-from src.llm.news_verifier import NewsVerdict
-from src.llm.prompt_store import PromptStore
-from src.llm.recommender import (
-    LLMRecommender,
-    StockRecommendation,
-    build_locked_prompt_text,
-    tick_size,
 )
 from src.logger.trade_store import MonthlySummary, TradeStore
 from src.notification.email import EmailNotifier
 from src.notification import chart, templates
 from src.strategy import etf_regime
-from src.strategy.llm_momentum import LLMMomentumStrategy
+from src.strategy.base import StockRecommendation
+from src.strategy.etf_regime import ETFRegimeStrategy
 
 logger = logging.getLogger(__name__)
-
-# 이보다 적게 남았으면 뉴스 검증을 건너뛴다 — 반쯤 하다 마는 것보다 안 하는 것이 낫다.
-# 2종목 병렬 실측이 30초이고 꼬리가 120초다 (스펙 2절).
-MIN_NEWS_VERIFY_SECONDS = 60
-
-# 검증 한 번에 쓸 수 있는 최대 시간. 실측은 2종목 병렬 30초이고 꼬리가 120초다 — 상한을
-# 두지 않으면 느린 날 `_verify_news`가 남은 시간을 전부 먹어, 1차 검증 자체가 매수 시각
-# 직전까지 이어지고 재추천은 `budget_seconds`의 바닥(120초)만 들고 매수 시각을 넘긴다
-# (2026-09-16 추천 지연 사고와 같은 모양).
-NEWS_VERIFY_MAX_SECONDS = 120.0
-
-# 1차 뉴스 검증이 남겨 둬야 하는 재추천+재검증 몫. 1차 추천 자체가 19~338초로 요동치므로
-# (`recommender.budget_seconds` 참고) 검증 진입 시점에 남은 시간이 넉넉해 보여도, 예약분을
-# 떼어두지 않으면 탈락이 하나만 나와도 재추천이 매수 시각을 거의 확실히 넘긴다.
-RERECOMMEND_RESERVE_SECONDS = 180.0
 
 # 2호 전략 시장가 매수의 증거금 배수 — 키움은 시장가 매수 증거금을 상한가(+30%)로 잡는다.
 # 수량을 이 배수 안에서 정하지 않으면 투입 비율이 높을 때 증거금 부족으로 주문이 거부된다.
@@ -94,12 +62,6 @@ def _is_market_closed_rejection(message: Optional[str]) -> bool:
     return any(marker in text for marker in MARKET_CLOSED_REJECT_TEXTS)
 
 
-def _no_change_outcome(result) -> TuningOutcome:
-    """튜너가 고치지 않기로 했거나(change=False) 응답을 못 받은(None) 결과 — 두 프롬프트 공용."""
-    if result is None:
-        return TuningOutcome(changed=False, reason="판단 실패")
-    return TuningOutcome(changed=False, reason=getattr(result, "reason", "") or "고칠 필요 없음")
-
 # 잔고 대조로 접수 행을 옮길 때 쓰는 상태 (`_settled_row`) — 부분체결은 표에 남지만
 # 체크 열은 비운다. 남은 미체결분만 골라 취소하면 이미 체결된 몫까지 덮어쓰기 때문이다.
 BUY_PARTIAL_STATUS = templates.BUY_OUTCOME_LABELS[BuyOutcome.PARTIALLY_FILLED]
@@ -119,63 +81,33 @@ class BuyRecordState:
 
 
 class DailyWorkflow:
-    """1호 전략의 하루 흐름을 스케줄러 트리거에 연결한다 (PRD 5.5-B, 5.11).
+    """2호 전략의 하루 흐름을 스케줄러 트리거에 연결한다 (PRD 5.5-C, 5.11).
 
-    추천 시각 recommend_and_notify → 매수 시각 execute_buys → 10:10 cancel_unfilled_buys
-    → 15:35 send_final_report
+    결정 시각 recommend_and_notify(결정 → 곧바로 execute_buys로 시장가 매수) → 매수 시각
+    execute_buys(재시작 대비 안전망) → 10:10 cancel_unfilled_buys → 15:35 send_final_report
     (보유 종목이 그 전에 전량 매도되고 체결까지 확인되면 15:35를 기다리지 않고 최종 리포트를 보낸다)
+
+    1호 전략(LLM 대형주 추천·뉴스 검증·15:35 검증과 프롬프트 자동 수정)은 2026-10-23에 폐지됐다.
     """
 
     def __init__(
         self,
-        collector: DataCollector,
-        recommender: LLMRecommender,
-        strategy: LLMMomentumStrategy,
+        strategy: ETFRegimeStrategy,
         engine: TradingEngine,
         account: AccountClient,
         trade_store: TradeStore,
         email: EmailNotifier,
-        reviewer=None,
-        tuner=None,
-        prompt_store=None,
-        exit_reviewer=None,
-        exit_tuner=None,
-        exit_prompt_store=None,
-        tune_skip_monthly_return_ratio: float = 0.05,
         ws_client=None,
         report_mark_path: Optional[Path] = None,
         buy_records_path: Optional[Path] = None,
-        buy_price_tolerance_ratio: float = 0.02,
-        gap_down_tolerance_ratio: float = 0.01,
-        news_verifier=None,
-        news_verify_enabled: bool = True,
-        buy_time: Optional[dt_time] = None,
-        strategy_mode: str = STRATEGY_LLM,
         etf_kill_loss_percent: float = 5.0,
         etf_start_date: Optional[date] = None,
     ):
-        self.collector = collector
-        self.recommender = recommender
         self.strategy = strategy
         self.engine = engine
         self.account = account
         self.trade_store = trade_store
         self.email = email
-        # 15:35 추천 검증의 LLM 평가 모듈 (PRD 5.5-B '추천 검증'). None이면 평가 없이
-        # 수치만 저장하고 메일을 보낸다 — 평가는 읽기용이고 수치가 원본이다.
-        self.reviewer = reviewer
-        # 프롬프트 자동 수정 (PRD '프롬프트 자동 수정'). tuner가 None이면 단계 자체를 건너뛴다.
-        self.tuner = tuner
-        self.prompt_store = prompt_store if prompt_store is not None else PromptStore()
-        # 15:35 매도 판단 검증의 LLM 평가 모듈 (스펙 2026-09-22 3.3). None이면 수치만 남긴다.
-        self.exit_reviewer = exit_reviewer
-        # 매도 프롬프트 자동 수정 (스펙 4절). None이면 단계 자체를 건너뛴다.
-        self.exit_tuner = exit_tuner
-        self.exit_prompt_store = (
-            exit_prompt_store if exit_prompt_store is not None else make_exit_prompt_store()
-        )
-        # 이번 달 순수익률이 이 값 이상이면 두 프롬프트 모두 고치지 않는다 (스펙 4-A)
-        self.tune_skip_monthly_return_ratio = tune_skip_monthly_return_ratio
         self.ws_client = ws_client
         # 최종 리포트를 보낸 날짜 — 전량 매도 완료와 15:35 스케줄이 중복 발송하지 않도록
         # 공유하는 표시다 (send_final_report). 매수로 보유가 다시 생기면 초기화된다.
@@ -196,29 +128,12 @@ class DailyWorkflow:
         # 판정이 되돌아가 매수예정 표로 행이 살아 돌아온다 (2026-09-01 실측).
         # _buy_board와 같이 (날짜, 값) 한 튜플로 통째 갈아끼워 UI 스레드가 일관되게 읽는다.
         self._settled_board: tuple = (None, frozenset())
-        # 매수 시각의 현재가가 목표 매수가보다 이만큼 넘게 높으면 그 종목은 건너뛴다 (_gap_note 참고).
-        # 동시에 이 값이 주문 지정가를 정한다 — 밴드 상단이 곧 주문가다 (_order_price 참고)
-        self.buy_price_tolerance_ratio = buy_price_tolerance_ratio
-        # 매수 시각의 현재가가 추천 시점 가격보다 이만큼 넘게 낮으면 건너뛴다. 0이면 끈다 (_gap_note 참고)
-        self.gap_down_tolerance_ratio = gap_down_tolerance_ratio
-        # 추천 종목의 악재를 웹검색으로 확인하는 모듈 (PRD 5.5-B '뉴스 검증'). None이면
-        # 검증 단계 자체를 건너뛴다 — 추천이 검증 이전과 같게 동작한다.
-        self.news_verifier = news_verifier
-        self.news_verify_enabled = news_verify_enabled
-        # `self.settings`가 없어 스칼라로 받는다 (buy_price_tolerance_ratio와 같은 꼴).
-        # None이면 매수 시각을 몰라 검증에 쓸 시간 예산을 계산할 수 없으므로 건너뛴다.
-        self.buy_time = buy_time
-        # 2호 전략 (PRD 5.5-C). 추천 단계만 갈리고 매수·청산·리포트는 1호와 같은 경로다.
-        self.strategy_mode = strategy_mode
+        # 자동 중단 장치 (PRD 5.5-C) — `_etf_kill_reason`
         self.etf_kill_loss_percent = etf_kill_loss_percent
         self.etf_start_date = etf_start_date
         # 오늘 2호 결정(매수/쉼/중단)을 마친 날짜 — 매수 시각 안전망이 결정을 되풀이하지 않게 한다.
         # 인메모리라 엔진이 재시작되면 비고, 그때는 안전망이 다시 정한다 (`_execute_etf_buy`).
         self._etf_decided_on: Optional[date] = None
-
-    @property
-    def etf_mode(self) -> bool:
-        return self.strategy_mode == STRATEGY_ETF_REGIME
 
     # ── '매수 예정' 표 (PRD 5.10) ────────────────────────────
     def buy_plan_snapshot(self, today: Optional[date] = None) -> List[BuyPlanView]:
@@ -425,113 +340,21 @@ class DailyWorkflow:
             if r.outcome != BuyOutcome.FILLED
         ]
 
-    def recommend_and_notify(self, today: Optional[date] = None) -> None:
-        """09:05 — 전일·당일 데이터 수집 → LLM 추천 → 결과를 이메일로 발송.
-
-        2호 전략 모드면 LLM 대신 ETF 국면 신호로 오늘 살 종목을 정한다 (`_recommend_etf`).
-        """
-        today = today or date.today()
-        if self.etf_mode:
-            self._recommend_etf(today)
-            return
-        daily_data = self.collector.collect()
-        if not daily_data:
-            logger.error("No daily data collected. Skipping today's recommendation.")
-            self.engine.notify("[경고] 당일 데이터 수집 실패 — 오늘 매수를 스킵합니다.")
-            return
-
-        # LLM을 부르기 **전에** 휴장을 가려낸다 — 호출 비용과 추천 메일이 여기서 갈린다
-        # (확정 2026-09-24, PRD 10절 '휴장일 자동 판정').
-        if market_looks_closed(daily_data):
-            self.engine.note_market_closed(
-                "후보 전 종목의 당일 지표가 전일 그대로입니다 (등락률 0%, 현재가 = 전일 종가)"
-            )
-            return
-
-        recommendations = self.recommender.recommend(daily_data)
-        if not recommendations:
-            logger.error("LLM recommendation unavailable. Skipping today's buys.")
-            self.engine.notify("[경고] LLM 추천 실패/타임아웃 — 오늘 매수를 스킵합니다.")
-            return
-
-        # 1차 검증에는 재추천+재검증 몫을 미리 떼 둔다 (RERECOMMEND_RESERVE_SECONDS) — 안
-        # 그러면 느린 날 검증이 남은 시간을 전부 먹어, 뒤이은 재추천이 매수 시각을 넘긴다.
-        verdicts = self._verify_news(recommendations, reserve_seconds=RERECOMMEND_RESERVE_SECONDS)
-        blocked = [r for r in recommendations if self._is_blocked(r.ticker, verdicts)]
-        if blocked:
-            # 탈락분을 빼고 **한 번만** 다시 추천받는다. 두 번째 재추천은 시간이 폭발하고,
-            # 세 번째 추천은 이미 두 번 걸러낸 뒤라 후보 질도 떨어진다 (스펙 4.1).
-            excluded = tuple(r.ticker for r in blocked)
-            kept = [r for r in recommendations if r.ticker not in excluded]
-            logger.info(
-                "뉴스 검증에서 %d종목이 탈락했습니다: %s — 제외하고 한 번 더 추천받습니다.",
-                len(blocked), ", ".join(excluded),
-            )
-            # 생존 종목(kept)도 프롬프트에 알려야 한다 — 알리지 않으면 LLM이 생존 종목을
-            # 다시 고르는 것이 "정상 동작"이 되어버려 같은 종목에 배정액이 두 번 들어간다
-            # (리뷰에서 지적된 치명적 결함).
-            # 요구 수는 모자란 만큼만이다 — 전체 수를 다시 요구하면 사고가 max_tokens를 다
-            # 써 재추천이 통째로 실패했다 (2026-10-02).
-            already_picked = tuple(r.ticker for r in kept)
-            shortfall = self.strategy.target_stock_count - len(kept)
-            replacements = (self.recommender.recommend(
-                daily_data, exclude_tickers=excluded, already_picked=already_picked,
-                count=shortfall,
-            ) or []) if shortfall > 0 else []
-            # 재추천 뒤에는 더 미룰 라운드가 없으므로 예약분 없이 남은 시간을 그대로 쓴다
-            replacement_verdicts = self._verify_news(replacements)
-            verdicts.update(replacement_verdicts)
-
-            # 위에서 프롬프트로 건 제약은 소프트 제약이다 — 이 코드베이스가
-            # drop_unknown_tickers·drop_other_setups로 프롬프트 제약을 코드로 한 번 더
-            # 자르는 것과 같은 이유로, LLM이 지시를 어기고 생존 종목을 다시 고르거나 탈락
-            # 종목을 또 고르면 여기서 한 번 더 걸러낸다. recommender.py의 중복 제거(seen)는
-            # 응답 **하나** 안의 중복만 잡아, 1차·2차 응답을 가로지르는 중복은 못 막는다.
-            # 1차 탈락 종목을 재검증에 맡기지 않는 이유: 재검증은 실패하면 통과로 떨어지므로,
-            # 맡기면 한 번 악재로 판정된 종목이 재검증 실패 한 번으로 그대로 매수된다.
-            kept_tickers = set(already_picked) | set(excluded)
-            replacement_blocked = [
-                r for r in replacements if self._is_blocked(r.ticker, replacement_verdicts)
-            ]
-            replacement_blocked_tickers = {r.ticker for r in replacement_blocked}
-            new_picks = [
-                r for r in replacements
-                if r.ticker not in kept_tickers and r.ticker not in replacement_blocked_tickers
-            ]
-            # 1차 생존분을 앞에 두고, 목표 종목 수를 넘기지 않는다 — 넘기면 추천 메일·DB
-            # 기록이 실제 매수 종목 수(build_buy_plans의 [:target_stock_count])와 어긋나,
-            # 사지도 않은 종목까지 15:35 검증과 프롬프트 자동 수정의 입력이 되어버린다.
-            recommendations = (kept + new_picks)[: self.strategy.target_stock_count]
-            blocked = blocked + replacement_blocked
-
-        if not recommendations:
-            logger.error("뉴스 검증에서 추천 종목이 전부 탈락했습니다 — 오늘 매수를 스킵합니다.")
-            self.engine.notify("[경고] 추천 종목이 모두 악재로 탈락 — 오늘 매수를 스킵합니다.")
-            # 탈락 판정 자체는 남긴다 — 빈 리스트를 넘기면 아무것도 저장되지 않아
-            # "그날 왜 안 샀나"를 되짚을 근거가 사라진다 (TradeStore.save_recommendations는
-            # 빈 리스트를 '아무 일도 하지 않음'으로 취급한다).
-            self._save_recommendations(today, blocked, verdicts)
-            return
-
-        self.strategy.set_recommendations(recommendations)
-        board = self._board_from_recommendations(recommendations)
-        self._set_buy_board(today, board)
-        self._watch_plan_prices([plan.ticker for plan in board])
-        self._save_recommendations(today, recommendations, verdicts)
-        subject, body = templates.recommendation_email(
-            recommendations, today, self.strategy.investable_ratio,
-            self.strategy.target_stock_count,
-            verdicts=verdicts, blocked=[v for v in verdicts.values() if v.blocking],
-        )
-        self.email.send(subject, body)
-        logger.info("Recommendation email sent for %s", today)
-
     # ── 2호 전략 (PRD 5.5-C) ────────────────────────────────
-    def _recommend_etf(self, today: date) -> None:
-        """추천 시각 — 자동 중단 확인 → 휴장 확인 → 국면 신호 → 오늘 살 ETF 1종목을 정해 메일로 알린다.
+    def recommend_and_notify(self, today: Optional[date] = None) -> None:
+        """결정 시각(버튼 ①) — 오늘 살 ETF를 정해 메일로 알린다. 매수는 같은 실행의 다음 단계다
+        (`actions.manual_steps`의 'recommend')."""
+        self._recommend_etf(today or date.today())
 
-        LLM·뉴스 검증·추천 기록 저장은 하지 않는다 — 15:35 추천 검증과 프롬프트 자동 수정의
-        재료(`recommendations` 테이블)에 ETF 매매가 섞이면 안 된다.
+    def execute_buys(self) -> None:
+        """매수(버튼 ②, 매수 시각 안전망) — 정한 ETF를 시장가로 즉시 산다 (`_execute_etf_buy`)."""
+        self._execute_etf_buy(date.today())
+
+    def _recommend_etf(self, today: date) -> None:
+        """결정 시각 — 자동 중단 확인 → 휴장 확인 → 국면 신호 → 오늘 살 ETF 1종목을 정해 메일로 알린다.
+
+        결정은 메모리에만 둔다 — 엔진이 재시작되면 매수 시각 안전망이 다시 정한다
+        (`_execute_etf_buy`). 판단 재료가 전날까지의 일봉이라 다시 정해도 같다.
         """
         blocked = self._etf_kill_reason(today)
         if blocked:
@@ -577,14 +400,14 @@ class DailyWorkflow:
             logger.error("2호 전략 현재가가 0입니다 — 오늘 매수를 스킵합니다: %s", pick_ticker)
             return
 
-        # 목표 매수가 = 추천 시점 현재가 — 매수 시각의 허용 밴드가 그대로 '현재가 근처 지정가'가 된다
+        # 기준가 = 결정 시점 현재가 — 실제 주문은 시장가라, 표·메일에 보이는 참고값이다
         recommendation = StockRecommendation(
             ticker=pick_ticker,
             name=pick_name,
             target_price=int(price),
             reason=f"직전 {etf_regime.LOOKBACK_DAYS}거래일 장중 평균 {signal:+.3f}%",
             recommend_price=price,
-            setup=STRATEGY_ETF_REGIME,
+            setup=etf_regime.SETUP,
             # AI 매도 판단이 '아침 전망'으로 읽는 칸 — 2호는 가격 전망이 없으므로 무엇이 시나리오인지 적는다
             outlook=(
                 "2호 전략(지수 ETF 국면 추종): 가격 목표 없이 방향만 정했다. 시나리오는 '최근 "
@@ -730,67 +553,6 @@ class DailyWorkflow:
             )
         self.email.send(subject, body)
 
-    def _verify_news(
-        self, recommendations, reserve_seconds: float = 0.0
-    ) -> Dict[str, NewsVerdict]:
-        """추천 종목의 악재를 확인한다. 어떤 실패도 빈 dict로 떨어진다 (= 전원 통과).
-
-        검증은 추가 안전장치지 관문이 아니다 — 막으면 그날 매매가 통째로 빠지고,
-        통과시키면 2026-10-01 이전과 같은 상태일 뿐이다.
-
-        `reserve_seconds`는 이 호출 **뒤에** 올 재추천·재검증 몫으로 남겨 둘 시간이다.
-        1차 검증에만 `RERECOMMEND_RESERVE_SECONDS`를 넘기고, 2차(재검증) 호출은 그 뒤에
-        더 미룰 라운드가 없으므로 0을 쓴다. 예약분을 뺀 뒤에도 `NEWS_VERIFY_MAX_SECONDS`
-        상한을 한 번 더 씌운다 — 남은 시간이 아무리 넉넉해도 검증 한 번에 그 이상 쓰지
-        않는다(상한이 없으면 느린 날 남은 시간을 전부 먹는다).
-        """
-        if not self.news_verify_enabled or self.news_verifier is None or not recommendations:
-            return {}
-        if self.buy_time is None:
-            return {}
-        # `budget_seconds`를 쓰지 않는다 — 그쪽은 바닥이 MIN_BUDGET_SECONDS(120초)라
-        # 매수 시각이 이미 지났어도 120을 돌려준다. 추천 호출에는 그 바닥이 맞지만
-        # (늦더라도 추천은 나와야 한다), 검증은 늦으면 **안 하는 것이 맞다.**
-        buy_at = datetime.combine(date.today(), self.buy_time)
-        remaining = (buy_at - datetime.now()).total_seconds() - reserve_seconds
-        if remaining < MIN_NEWS_VERIFY_SECONDS:
-            logger.warning(
-                "매수까지 %.0f초뿐이라(재추천 예약분 %.0f초 제외) 뉴스 검증을 건너뜁니다 "
-                "(최소 %d초).",
-                remaining, reserve_seconds, MIN_NEWS_VERIFY_SECONDS,
-            )
-            return {}
-        budget = min(remaining, NEWS_VERIFY_MAX_SECONDS)
-        try:
-            # `verify`가 어떤 이유로든 None을 돌려주면(실제로는 {}만 내지만 가짜 검증기가
-            # 더 느슨할 수 있다) 바로 아래 `_is_blocked`의 `.get`이 AttributeError로 샌다.
-            return self.news_verifier.verify(
-                [(r.ticker, r.name) for r in recommendations], timeout_seconds=budget
-            ) or {}
-        except Exception:
-            logger.exception("뉴스 검증이 실패했습니다 — 추천을 그대로 씁니다.")
-            return {}
-
-    @staticmethod
-    def _is_blocked(ticker: str, verdicts: Dict[str, NewsVerdict]) -> bool:
-        """판정이 없으면 통과다 — 호출 실패·형식 오류가 매수를 막으면 안 된다."""
-        verdict = verdicts.get(ticker)
-        return bool(verdict and verdict.blocking)
-
-    def _save_recommendations(
-        self, today: date, recommendations, verdicts: Optional[Dict[str, NewsVerdict]] = None
-    ) -> None:
-        """추천을 DB에 남긴다 — 15:35 검증이 읽는 유일한 출처다 (PRD 5.5-B '추천 검증').
-
-        실패해도 삼킨다. 기록은 사후 분석용이고, 매매가 그것 때문에 멈출 이유가 없다.
-        """
-        try:
-            self.trade_store.save_recommendations(
-                today, recommendations, self.recommender.prompt_version, verdicts
-            )
-        except Exception:
-            logger.exception("추천 기록 저장에 실패했습니다 — 오늘 검증 메일이 비게 됩니다.")
-
     def _watch_plan_prices(self, tickers: List[str]) -> None:
         """추천 종목의 실시간 시세를 미리 구독한다 — UI '매수 예정' 표 현재가의 출처.
 
@@ -801,345 +563,6 @@ class DailyWorkflow:
             return
         self.ws_client.subscribe(tickers)
         logger.info("추천 종목 시세 구독: %s", tickers)
-
-    def execute_buys(self) -> None:
-        """매수 시각 — 예수금 기준으로 자금을 배분해 추천 종목을 허용 밴드 상단에 지정가 매수.
-
-        체결 확인과 결과 메일은 여기서 하지 않는다 — 지정가 주문은 접수 직후에 체결 여부를
-        알 수 없어, 10:10 `cancel_unfilled_buys`가 미체결분을 정리한 뒤에 알린다.
-
-        **종목당 배정액은 상한이지만 1주 값이 그것을 넘는 고가주에는 예외를 둔다**
-        (확정 2026-09-14, PRD 5.5-B "고가주 1주 예외"). 종전에는 `배정액 // 주문가`가 0이면
-        그대로 건너뛰어, 1주 값이 배정액보다 비싼 종목은 예수금이 남아 있어도 영영 못 샀다 —
-        2026-09-14 삼양식품(1주 1,307,000원 > 배정 1,039,625원)이 그렇게 빠졌고 그날 목표
-        매도가까지 갔다. 이제 **총 투입 한도**가 남아 있으면 1주는 산다.
-
-        2호 전략은 시장가로 즉시 산다 — `_execute_etf_buy` (PRD 5.5-C '매수').
-        """
-        if self.etf_mode:
-            self._execute_etf_buy(date.today())
-            return
-        cash = self.account.get_cash()
-        plans = self.strategy.build_buy_plans(cash)
-        if not plans:
-            logger.warning("매수 계획이 없습니다 (추천 종목 없음). 주문가능금액 %s원", f"{cash:,.0f}")
-            return
-
-        # 오늘 쓰기로 한 총액. 배정액을 넘겨 사는 고가주가 있어도 이 선은 넘지 않는다.
-        # 추천이 목표 종목 수보다 적은 날은 그만큼 작아진다 — 모자란 몫을 현금으로 남기는
-        # 규칙(build_buy_plans)을 여기서 되살리지 않기 위해서다.
-        budget = sum(plan.amount for plan in plans)
-        spent = 0.0
-
-        logger.info(
-            "매수 시작 — 주문가능금액 %s원, 대상 %d종목, 종목당 배정 %s원 (총 투입 한도 %s원)",
-            f"{cash:,.0f}",
-            len(plans),
-            f"{plans[0].amount:,.0f}",
-            f"{budget:,.0f}",
-        )
-
-        positions = self.account.get_positions()
-        ordered, skipped, failed = [], [], []
-        records: List[BuyRecord] = []
-        for plan in plans:
-            label = format_stock(plan.ticker, plan.name)
-            try:
-                target = float(plan.target_price)
-
-                gap_note, current = self._gap_note(
-                    plan.ticker, label, target, plan.recommend_price
-                )
-                if gap_note is not None:
-                    skipped.append(plan.ticker)
-                    records.append(
-                        BuyRecord(
-                            ticker=plan.ticker,
-                            name=plan.name,
-                            outcome=BuyOutcome.SKIPPED,
-                            reference_price=target,
-                            note=gap_note,
-                        )
-                    )
-                    continue
-
-                price = self._order_price(target, current)
-                if price != target:
-                    logger.info(
-                        "주문가 = 허용 밴드 상단: %s 목표가 %s원 → 지정가 %s원 "
-                        "(현재가 %s원, 상승 허용치 %.1f%%)",
-                        label,
-                        f"{target:,.0f}",
-                        f"{price:,.0f}",
-                        f"{current:,.0f}",
-                        self.buy_price_tolerance_ratio * 100,
-                    )
-
-                # 배정액과 '남은 총 한도' 중 작은 쪽으로 산다 — 앞 종목이 배정액을 넘겨
-                # 샀으면 뒤 종목이 쓸 수 있는 돈이 그만큼 줄어 있다
-                remaining = budget - spent
-                quantity = int(min(plan.amount, remaining) // price)
-                if quantity <= 0 and price <= remaining:
-                    # 1주 값이 배정액보다 비싼 고가주 — 총 한도 안이면 1주는 산다
-                    # (확정 2026-09-14, PRD 5.5-B "고가주 1주 예외")
-                    quantity = 1
-                    logger.info(
-                        "배정액 초과 매수: %s 주문가 1주 %s원 > 배정액 %s원 — "
-                        "남은 총 한도 %s원 안이라 1주만 삽니다.",
-                        label,
-                        f"{price:,.0f}",
-                        f"{plan.amount:,.0f}",
-                        f"{remaining:,.0f}",
-                    )
-                if quantity <= 0:
-                    logger.warning(
-                        "매수 건너뜀: %s — 주문가 1주 %s원이 남은 총 투입 한도 %s원을 초과합니다.",
-                        label,
-                        f"{price:,.0f}",
-                        f"{remaining:,.0f}",
-                    )
-                    # 별도 알림 메일은 보내지 않는다 — 매수 실행 결과 메일의
-                    # '매수하지 못한 종목'에 사유까지 그대로 실린다
-                    skipped.append(plan.ticker)
-                    records.append(
-                        BuyRecord(
-                            ticker=plan.ticker,
-                            name=plan.name,
-                            outcome=BuyOutcome.SKIPPED,
-                            reference_price=price,
-                            note=f"주문가 1주 {price:,.0f}원이 남은 총 투입 한도 {remaining:,.0f}원을 초과",
-                        )
-                    )
-                    continue
-
-                logger.info(
-                    "매수 산정: %s 주문가 %s원 × %d주 = %s원 (배정 %s원)",
-                    label,
-                    f"{price:,.0f}",
-                    quantity,
-                    f"{price * quantity:,.0f}",
-                    f"{plan.amount:,.0f}",
-                )
-
-                request = OrderRequest(
-                    ticker=plan.ticker,
-                    side=OrderSide.BUY,
-                    order_type=OrderType.LIMIT,
-                    quantity=quantity,
-                    price=price,
-                    name=plan.name,
-                )
-                if not self.engine.risk_manager.approve(request, positions, reference_price=price):
-                    logger.warning("매수 거부 (리스크 관리): %s x%d주", label, quantity)
-                    self.engine.notify(f"매수 거부 (리스크 관리): {label}")
-                    failed.append(plan.ticker)
-                    records.append(
-                        BuyRecord(
-                            ticker=plan.ticker,
-                            name=plan.name,
-                            outcome=BuyOutcome.FAILED,
-                            quantity=quantity,
-                            reference_price=price,
-                            note="리스크 관리 규칙에 걸려 주문하지 않았습니다",
-                        )
-                    )
-                    continue
-
-                result = self.engine.order_client.send_order(request)
-                self.engine.risk_manager.record_order(result)
-                self.trade_store.record_fill(result)
-
-                # 거부된 주문을 접수된 것처럼 남기면 매수 실패를 알아챌 수 없다
-                if result.status == OrderStatus.REJECTED:
-                    logger.error(
-                        "매수 주문 거부됨: %s x%d주 — %s", label, quantity, result.error_message
-                    )
-                    # 거래소가 휴장이라고 답한 것은 확정적인 신호다 — 수집 지표 판정이
-                    # 빗나간 날에도 여기서 그날 남은 스케줄이 멈춘다 (확정 2026-09-24)
-                    if _is_market_closed_rejection(result.error_message):
-                        self.engine.note_market_closed("주문이 '장이 열리지않는 날'로 거부됐습니다")
-                    self.engine.notify(f"[실패] 매수 거부: {label} x{quantity}주 — {result.error_message}")
-                    failed.append(plan.ticker)
-                    records.append(
-                        BuyRecord(
-                            ticker=plan.ticker,
-                            name=plan.name,
-                            outcome=BuyOutcome.FAILED,
-                            quantity=quantity,
-                            reference_price=price,
-                            order_id=result.order_id,
-                            note=f"주문 거부: {result.error_message}",
-                        )
-                    )
-                    continue
-
-                ordered.append(plan.ticker)
-                # 접수한 만큼만 한도에서 깎는다 — 건너뛴·거부된 종목의 배정액은 남은 종목에
-                # 재분배되지 않고 현금으로 남는다 (build_buy_plans와 같은 규약)
-                spent += price * quantity
-                records.append(
-                    BuyRecord(
-                        ticker=plan.ticker,
-                        name=plan.name,
-                        outcome=BuyOutcome.ORDERED,
-                        quantity=quantity,
-                        reference_price=price,
-                        order_id=result.order_id,
-                    )
-                )
-                # 체결 통보를 기다리지 않고 감시 대상으로 표시한다 (창 종료 경고의 근거)
-                self.engine.note_open_position(plan.ticker)
-                logger.info(
-                    "지정가 매수 접수: %s %s원 x%d주 (상태 %s, 주문번호 %s)",
-                    label,
-                    f"{price:,.0f}",
-                    quantity,
-                    result.status.value,
-                    result.order_id,
-                )
-            except Exception:
-                logger.exception("매수 처리 중 오류: %s", label)
-                self.engine.notify(f"[오류] 매수 실패: {label}")
-                failed.append(plan.ticker)
-                records.append(
-                    BuyRecord(
-                        ticker=plan.ticker,
-                        name=plan.name,
-                        outcome=BuyOutcome.FAILED,
-                        note="매수 처리 중 오류가 발생했습니다 (로그 확인 필요)",
-                    )
-                )
-
-        logger.info(
-            "매수 종료 — 접수 %d종목%s, 건너뜀 %d종목%s, 실패 %d종목%s",
-            len(ordered),
-            f" {ordered}" if ordered else "",
-            len(skipped),
-            f" {skipped}" if skipped else "",
-            len(failed),
-            f" {failed}" if failed else "",
-        )
-        if not ordered:
-            self.engine.notify("[경고] 매수가 한 건도 접수되지 않았습니다. 로그를 확인하세요.")
-        else:
-            # 보유가 다시 생겼으므로 앞서 보낸 최종 리포트는 더 이상 최종이 아니다.
-            # 이 보유분이 전량 매도되면 리포트를 다시 보내고, 남으면 15:35가 보낸다.
-            self._clear_report_mark()
-
-        # 접수된 종목만 실시간 시세를 구독한다 — 손절 감시(RiskManager.check_position_exits)와
-        # AI 매도 판단의 전제.
-        # 거부된 종목까지 구독하면 보유하지도 않은 종목의 시세를 받는다.
-        if ordered and self.ws_client is not None:
-            self.ws_client.subscribe(ordered)
-            if getattr(self.ws_client, "is_connected", True):
-                logger.info("실시간 시세 구독: %s", ordered)
-            else:
-                # 구독 목록에는 담기지만 재접속까지 시세가 오지 않는다 = 그동안 청산 감시 공백
-                logger.error(
-                    "실시간 시세 구독 보류 — WebSocket 미연결 상태입니다. "
-                    "재접속까지 청산 감시가 동작하지 않습니다: %s",
-                    ordered,
-                )
-                self.engine.notify(
-                    "[경고] 실시간 시세 미연결 — 재접속까지 청산 감시가 멈춥니다. "
-                    f"대상: {ordered}"
-                )
-
-        self._set_buy_board(date.today(), self._board_from_records(records))
-        # 결과 메일은 10:10 cancel_unfilled_buys가 보낸다 — 지정가라 지금은 체결 여부를 모른다
-        self._write_buy_records(cash, plans[0].amount, records)
-
-    def _order_price(self, target_price: float, current_price: float) -> float:
-        """주문 지정가 = 허용 밴드 상단 (PRD 5.5-B '주문 방식', 범위 지정 2026-08-26).
-
-        목표 매수가는 밴드의 기준점일 뿐 주문가가 아니다. 지정가 매수는 그 가격 **이하**의
-        매도호가에 체결되므로, 상단에 걸어야 밴드 안 어떤 가격이든 받아낼 수 있다 — 목표가
-        한 점에 걸면 현재가가 조금이라도 위일 때 되밀리지 않는 한 영원히 미체결이다
-        (2026-08-26 015760 한국전력, 그날 투입 0원).
-
-        **밴드의 위쪽 절반에서만 올린다.** 현재가가 목표가 이하면 목표가 지정가가 이미 시장가
-        위에 있어 즉시 체결되므로, 상단으로 올려봤자 수량만 줄어든다.
-
-        현재가를 모르면(0 이하) 밴드를 확인할 수 없으므로 종전대로 목표가로 낸다.
-        """
-        if current_price <= target_price:
-            return target_price
-
-        ceiling = target_price * (1 + self.buy_price_tolerance_ratio)
-        tick = tick_size(ceiling)
-        price = float(int(ceiling // tick) * tick)
-        # 호가 단위 내림이 현재가 아래로 떨어지면 다시 미체결이 된다. 현재가는 체결된 값이라
-        # 이미 호가 단위에 맞으므로 그대로 쓴다 — 현재가 ≤ 상단은 갭 상승 판정이 보장한다
-        return max(price, current_price)
-
-    def _gap_note(
-        self, ticker: str, label: str, target_price: float, reference_price: float = 0.0
-    ) -> tuple:
-        """갭 판정 결과를 `(건너뛸 사유 또는 None, 판정에 쓴 현재가)`로 돌려준다.
-
-        현재가를 함께 넘기는 것은 `_order_price`가 같은 값을 다시 조회하지 않게 하기 위함이다
-        — 조회에 실패했으면 0.0이다.
-
-        위아래 두 방향을 본다 (PRD 5.5-B '주문 방식').
-
-        - **갭 상승** (확정 2026-08-07): 목표 매수가는 추천 시점 가격을 근거로 잡은 값이다.
-          현재가가 그보다 크게 높으면 그 전제가 이미 깨진 것이므로 그날은 참여하지 않는다.
-          이 허용치는 **주문 지정가도 함께 정한다**(`_order_price`) — 밴드 안이면 목표가보다
-          이만큼 비싸게 체결될 수 있다는 뜻이라, 손절선보다 크게 잡으면 진입 직후 손절 구간에서
-          시작한다.
-        - **갭 하락** (확정 2026-08-11, 기준값 변경 2026-08-14): 기준이 목표가가 아니라
-          **추천 시점(09:05)의 현재가**다. 목표가 자체가 눌림을 노려 기준가보다 낮게 잡히므로,
-          목표가 기준으로 하한을 두면 얼마나 낮게 출발했는지를 잡지 못한다. 전일 종가 대비
-          판정은 09:05 후보 선정이 이미 맡았고(PRD 5.5-B '당일 지표 병행 수집'), 여기서는
-          추천한 뒤 무너진 종목을 잡는다. 지정가 매수는 가격이 목표가까지 내려온 종목만 잡는
-          역선택이 있어(오르는 종목은 미체결) 이 판정이 없으면 갭 하락 종목만 남는다.
-
-        시세 조회에 실패하면 매수를 막지 않고 그대로 진행한다 — 다만 밴드를 모르므로
-        `_order_price`가 목표가 지정가로 되돌아간다. 기준가를 모르면(0 이하) 갭 하락 판정만
-        건너뛴다.
-        """
-        try:
-            current = self.engine.market_data.get_current_price(ticker).price
-        except Exception:
-            logger.warning("현재가 조회 실패 — 갭 판정을 건너뛰고 매수합니다: %s", label, exc_info=True)
-            return None, 0.0
-
-        if current <= 0:
-            return None, 0.0
-
-        limit = target_price * (1 + self.buy_price_tolerance_ratio)
-        if current > limit:
-            logger.info(
-                "매수 건너뜀: %s — 현재가 %s원이 목표가 %s원의 허용 상한 %s원을 넘었습니다.",
-                label,
-                f"{current:,.0f}",
-                f"{target_price:,.0f}",
-                f"{limit:,.0f}",
-            )
-            return (
-                f"갭 상승 — 현재가 {current:,.0f}원이 목표가 {target_price:,.0f}원 대비 "
-                f"허용치 {self.buy_price_tolerance_ratio * 100:.1f}%를 초과"
-            ), current
-
-        # 허용치 0은 '끔'이다 — 갭 상승 쪽(0 = 가장 엄격)과 반대 규약이라 PRD 5.5-B에 명시했다
-        if self.gap_down_tolerance_ratio <= 0 or reference_price <= 0:
-            return None, current
-
-        floor = reference_price * (1 - self.gap_down_tolerance_ratio)
-        if current >= floor:
-            return None, current
-
-        logger.info(
-            "매수 건너뜀: %s — 현재가 %s원이 추천 시점 %s원의 허용 하한 %s원을 밑돕니다.",
-            label,
-            f"{current:,.0f}",
-            f"{reference_price:,.0f}",
-            f"{floor:,.0f}",
-        )
-        return (
-            f"갭 하락 — 현재가 {current:,.0f}원이 추천 시점 {reference_price:,.0f}원 대비 "
-            f"허용치 {self.gap_down_tolerance_ratio * 100:.1f}%를 초과 하락"
-        ), current
 
     def buy_orders_filled(self, today: Optional[date] = None) -> bool:
         """오늘 접수한 매수 주문이 남김없이 전량 체결됐는지 — 결과 메일을 앞당길 근거.
@@ -1555,133 +978,6 @@ class DailyWorkflow:
             logger.exception("체결 내역 동기화 실패 — 접수 기준으로 리포트를 발송합니다.")
             return False
 
-    def review_recommendations(self, today: Optional[date] = None) -> None:
-        """15:35 — 오늘 추천한 종목의 실제 움직임을 대조해 저장하고, 추천 프롬프트 자동 수정을
-        돌린 뒤 그 결과까지 실어 별도 메일로 보낸다.
-
-        추천 목록은 메모리가 아니라 DB에서 읽는다 — 엔진이 장중에 재시작돼도 그날 검증이
-        빠지지 않는다. 최종 리포트와 별개의 메일인 이유는 `recommendation_review_email`
-        주석 참고 (리포트는 전량 매도 시 15:30 이전에 조기 발송될 수 있다).
-
-        자동 수정은 2026-10-01까지 별도 스케줄 단계였다. 검증 메일에 수정 여부를 싣기 위해
-        여기서 부른다 — 순서(검증 → 수정)는 그대로이고, 메일만 수정 **뒤**로 밀렸다.
-        오늘 추천이 없어도 자동 수정은 돈다 (최근 10거래일 검증 결과가 재료다).
-        2호 전략 모드에서는 통째로 건너뛴다 — 1호 프롬프트를 고칠 근거가 없다 (PRD 5.5-C).
-        """
-        today = today or date.today()
-        if self.etf_mode:
-            logger.info("2호 전략 모드 — 추천 검증·프롬프트 자동 수정을 건너뜁니다.")
-            return
-        rows = self.trade_store.recommendations_for(today)
-        if rows:
-            self._fill_actual_moves(today, rows)
-            self._fill_reviews(today, rows)
-        else:
-            logger.info("오늘 추천 기록이 없습니다 — 검증을 건너뜁니다 (%s).", today)
-
-        # 검증 **다음**에 돈다 — 그날 검증 결과가 판단 재료다
-        tuning = self._tune_for_review_mail(self.tune_prompt, today)
-        if not rows:
-            return
-
-        subject, body = templates.recommendation_review_email(rows, today, tuning)
-        self.email.send(subject, body)
-        logger.info("추천 검증 메일 발송 (%s, %d종목)", today, len(rows))
-
-    def _fill_actual_moves(self, today: date, rows) -> None:
-        """당일 봉을 조회해 실제 움직임과 목표가 도달 여부를 저장한다 (rows도 제자리 갱신).
-
-        조회에 실패한 종목은 실제값을 비운 채 남긴다 — 한 종목의 일시적 실패로 나머지
-        종목의 검증까지 잃지 않는다 (아침 수집의 같은 규약).
-
-        시세 클라이언트는 collector가 이미 들고 있는 것을 그대로 쓴다. 워크플로가 따로
-        참조를 하나 더 들면 두 경로가 다른 클라이언트를 볼 수 있다.
-        """
-        for row in rows:
-            try:
-                metrics = self.collector.market_data.get_today_metrics(row.ticker, today)
-            except Exception:
-                logger.exception("당일 봉 조회 실패: %s %s", row.ticker, row.name)
-                metrics = None
-            # 고가·저가가 빈 문자열로 와도 to_float가 0.0을 돌려주므로(market_data.py), 종가만
-            # 보면 그 0.0을 진짜 저가로 착각해 저장한다 — 셋 다 봐야 "빈 응답"을 걸러낸다.
-            if metrics is None or metrics.close <= 0 or metrics.high <= 0 or metrics.low <= 0:
-                continue
-
-            row.actual_high = metrics.high
-            row.actual_low = metrics.low
-            row.actual_close = metrics.close
-            row.actual_change_rate = metrics.change_rate
-            # 저가가 목표 매수가까지 내려왔으면 그 지정가는 체결될 수 있었다는 뜻이다
-            row.buy_target_hit = metrics.low > 0 and metrics.low <= row.target_price
-            row.sell_target_hit = (
-                metrics.high >= row.target_sell_price if row.target_sell_price > 0 else None
-            )
-            try:
-                self.trade_store.save_recommendation_outcome(
-                    today,
-                    row.ticker,
-                    actual_high=row.actual_high,
-                    actual_low=row.actual_low,
-                    actual_close=row.actual_close,
-                    actual_change_rate=row.actual_change_rate,
-                    buy_target_hit=row.buy_target_hit,
-                    sell_target_hit=row.sell_target_hit,
-                )
-            except Exception:
-                logger.exception("추천 검증 결과 저장 실패: %s %s", row.ticker, row.name)
-
-    def _fill_reviews(self, today: date, rows) -> None:
-        """LLM 평가문을 받아 저장한다 (rows도 제자리 갱신). 실패해도 메일 발송을 막지 않는다."""
-        if self.reviewer is None:
-            return
-        items = [
-            reviewer_module.ReviewInput(
-                ticker=row.ticker,
-                name=row.name,
-                outlook=row.outlook,
-                target_price=row.target_price,
-                target_sell_price=row.target_sell_price,
-                recommend_price=row.recommend_price,
-                actual_high=row.actual_high,
-                actual_low=row.actual_low,
-                actual_close=row.actual_close,
-                actual_change_rate=row.actual_change_rate,
-            )
-            # 실제값이 없는 종목은 대조할 것이 없다. 전망이 없는 종목도 평가 대상이 아니다.
-            # ReviewInput이 네 수치를 모두 쓰므로 넷 다 채워졌는지 본다 — 하나만 보면 나머지
-            # 셋 중 None이 남아 있을 때 build_review_user_prompt의 포맷 문자열이 TypeError로 죽는다.
-            for row in rows
-            if (
-                row.actual_high is not None
-                and row.actual_low is not None
-                and row.actual_close is not None
-                and row.actual_change_rate is not None
-                and row.outlook
-            )
-        ]
-        if not items:
-            return
-
-        try:
-            reviews = self.reviewer.review(items)
-        except Exception:
-            logger.exception("LLM 검증 평가 호출이 실패했습니다 — 수치만으로 메일을 보냅니다.")
-            return
-        if not reviews:
-            logger.warning("LLM 검증 평가를 받지 못했습니다 — 수치만으로 메일을 보냅니다.")
-            return
-
-        for row in rows:
-            review = reviews.get(row.ticker, "")
-            if not review:
-                continue
-            row.review = review
-            try:
-                self.trade_store.save_recommendation_review(today, row.ticker, review)
-            except Exception:
-                logger.exception("추천 평가문 저장 실패: %s %s", row.ticker, row.name)
-
     def _monthly_summary_with_base(self, today: date, snapshot) -> MonthlySummary:
         """이번 달 누적 실적 + 월초 자산 추정치 — 일일 리포트와 월 순수익 게이트가 함께 쓴다.
 
@@ -1692,280 +988,3 @@ class DailyWorkflow:
         monthly.base_asset = snapshot.total_asset - monthly.net_pnl
         return monthly
 
-    def _monthly_return_block_reason(self, today: date) -> Optional[str]:
-        """이번 달 순수익률이 기준 이상이면 그 사유 — 두 프롬프트 모두 고치지 않는다 (스펙 4-A).
-
-        수익률을 알 수 없으면(잔고 조회 실패·기준자산 0 이하) 역시 사유를 돌려준다 — 아무것도
-        바꾸지 않는 것이 기본 상태다. 막지 않으면 None. 사유는 검증 메일에 그대로 실린다.
-        """
-        try:
-            snapshot = self.account.get_balance_snapshot()
-        except Exception:
-            logger.warning("잔고 조회 실패 — 월 순수익을 알 수 없어 프롬프트를 고치지 않습니다.", exc_info=True)
-            return "잔고 조회 실패로 이번 달 순수익을 알 수 없음"
-        monthly = self._monthly_summary_with_base(today, snapshot)
-        if monthly.base_asset <= 0:
-            logger.warning("월초 자산 추정치가 0 이하라 월 순수익을 알 수 없어 프롬프트를 고치지 않습니다.")
-            return "월초 자산 추정치가 0 이하라 이번 달 순수익을 알 수 없음"
-        ratio = monthly.net_pnl / monthly.base_asset
-        if ratio >= self.tune_skip_monthly_return_ratio:
-            logger.info(
-                "이번 달 순수익 %+.2f%% ≥ 기준 %.1f%% — 프롬프트를 고치지 않습니다 (%s).",
-                ratio * 100, self.tune_skip_monthly_return_ratio * 100, today,
-            )
-            return (
-                f"이번 달 순수익 {ratio * 100:+.2f}% ≥ 기준 "
-                f"{self.tune_skip_monthly_return_ratio * 100:.1f}%"
-            )
-        return None
-
-    @staticmethod
-    def _tune_for_review_mail(tune, today: date) -> Optional[TuningOutcome]:
-        """검증 메일에 실을 자동 수정 결과를 받는다. 예상 못 한 예외도 메일을 막지 않는다.
-
-        종전에는 자동 수정이 독립된 스케줄 단계라 거기서 난 예외가 검증 메일과 무관했다.
-        한 단계로 묶인 지금은 여기서 삼키지 않으면 검증 메일까지 함께 사라진다.
-        """
-        try:
-            return tune(today)
-        except Exception:
-            logger.exception("프롬프트 자동 수정이 실패했습니다 — 검증 메일은 그대로 보냅니다.")
-            return TuningOutcome(changed=False, reason="판단 실패")
-
-    def review_exits(self, today: Optional[date] = None) -> None:
-        """15:35 — 오늘 매도한 종목의 순손익을 AI 매도 판단 이력과 대조해 남기고, 매도
-        프롬프트 자동 수정을 돌린 뒤 그 결과까지 실어 메일로 보낸다.
-
-        잣대는 순수익이다 (스펙 2026-09-22 1절). 분류는 코드가(`exit_review`), 평가문은 LLM이
-        쓴다. 매도가 없던 날은 메일이 없지만 자동 수정은 돈다 (쌓인 표본이 재료다).
-        어떤 실패도 매매에 영향이 없다. 자동 수정을 여기서 부르는 이유는 `review_recommendations`.
-        2호 전략 모드에서는 통째로 건너뛴다 — AI 매도 판단이 돌지 않아 대조할 판단이 없다.
-        """
-        today = today or date.today()
-        if self.etf_mode:
-            logger.info("2호 전략 모드 — 매도 판단 검증·프롬프트 자동 수정을 건너뜁니다.")
-            return
-        self._sync_fills(today)
-        decisions = self.trade_store.ai_exit_decisions_for(today)
-        rows = exit_review.build_exit_review_rows(
-            today,
-            self.trade_store.daily_summary(today).trades,
-            self.trade_store.position_peaks_for(today),
-            decisions,
-            self.trade_store.last_exit_reasons(today),
-            self.trade_store.tickers_with_unknown_pnl(today),
-        )
-        if rows:
-            self._fill_exit_reviews(today, rows, decisions)
-            for row in rows:
-                try:
-                    self.trade_store.save_exit_review(row)
-                except Exception:
-                    logger.exception("매도 판단 검증 저장 실패: %s", row.label)
-            self._record_investor_flow(today, [row.ticker for row in rows])
-        else:
-            logger.info("오늘 매도한 종목이 없습니다 — 매도 판단 검증을 건너뜁니다 (%s).", today)
-
-        # 검증 **다음**에 돈다 — 오늘 저장한 검증 결과까지 표본에 든다 (스펙 2026-09-22 3.1)
-        tuning = self._tune_for_review_mail(self.tune_exit_prompt, today)
-        if not rows:
-            return
-
-        subject, body = templates.exit_review_email(rows, decisions, today, tuning)
-        self.email.send(subject, body)
-        logger.info("매도 판단 검증 메일 발송 (%s, %d종목)", today, len(rows))
-
-    def _record_investor_flow(self, today: date, tickers: Iterable[str]) -> None:
-        """오늘 매도한 종목의 장중 외국인·기관 순매수 잠정치를 남긴다 (관찰 기록, 2026-10-08).
-
-        AI 매도 판단에 수급을 넣을 가치가 있는지 매도 결과와 대조해 보려는 것이라 판단에는
-        쓰지 않는다. ka10064는 한 번 호출로 그날 시계열이 다 오므로 장 마감 뒤 한 번이면
-        되고, 장중 루프의 호출 수는 늘지 않는다. 실패는 기록만 빠진다.
-        """
-        for ticker in dict.fromkeys(tickers):
-            try:
-                points = self.collector.market_data.get_intraday_investor_flow(ticker)
-                self.trade_store.save_investor_flow(today, ticker, points)
-            except Exception:
-                logger.exception("장중 투자자 수급 기록 실패: %s", ticker)
-                continue
-            logger.info("장중 투자자 수급 기록: %s %d시점", ticker, len(points))
-
-    def _fill_exit_reviews(self, today: date, rows, decisions) -> None:
-        """LLM 평가문을 받아 rows에 채운다. 판정 불가(unknown) 종목은 보내지 않는다."""
-        if self.exit_reviewer is None:
-            return
-        recommendations = {r.ticker: r for r in self.trade_store.recommendations_for(today)}
-        items = [
-            exit_reviewer_module.ExitReviewInput(
-                row=row,
-                decisions=[d for d in decisions if d.ticker == row.ticker],
-                outlook=recommendations[row.ticker].outlook if row.ticker in recommendations else "",
-                target_sell_price=(
-                    recommendations[row.ticker].target_sell_price
-                    if row.ticker in recommendations
-                    else 0
-                ),
-            )
-            for row in rows
-            if row.outcome != exit_review.UNKNOWN
-        ]
-        if not items:
-            return
-        try:
-            reviews = self.exit_reviewer.review(items)
-        except Exception:
-            logger.exception("매도 판단 평가 호출이 실패했습니다 — 수치만으로 메일을 보냅니다.")
-            return
-        for row in rows:
-            row.review = (reviews or {}).get(row.ticker, "")
-
-    def tune_prompt(
-        self, today: Optional[date] = None, force: bool = False
-    ) -> Optional[TuningOutcome]:
-        """15:35 — 최근 추천 성과를 보고 추천 프롬프트의 다섯 절을 자동으로 고친다.
-
-        추천 검증(`review_recommendations`)이 그 끝에서 부른다 — 그날 검증이 끝나야 판단
-        재료가 완성된다. 고친 날만 수정 메일이 나가고, 고치지 않는 날이 정상 동작이다
-        (PRD '프롬프트 자동 수정'). 어느 쪽이든 결과를 돌려줘 검증 메일에 싣게 한다.
-        튜너가 없으면 None — 검증 메일에 블록을 싣지 않는다.
-
-        `force`는 UI '강제 갱신' 버튼이 쓴다 — 월 순수익 게이트만 건너뛴다. 검증된 추천이
-        없을 때 멈추는 것은 그대로다: 재료가 없으면 고칠 근거 자체가 없다.
-
-        어떤 실패도 매매 흐름을 막지 않는다. 고치지 못하면 다음 거래일 추천은 이전
-        프롬프트로 그대로 돈다.
-        """
-        today = today or date.today()
-        if self.tuner is None:
-            return None
-        if not force:
-            blocked = self._monthly_return_block_reason(today)
-            if blocked:
-                return TuningOutcome(changed=False, reason=blocked)
-
-        rows = self.trade_store.recent_recommendations()
-        if not rows:
-            logger.info("검증된 추천이 없습니다 — 프롬프트 수정을 건너뜁니다 (%s).", today)
-            return TuningOutcome(changed=False, reason="검증된 추천이 없음")
-
-        stats = tuner_module.group_by_version(rows)
-        before = self.prompt_store.load_sections()
-        old_version = self.prompt_store.load_version()
-        locked_text = build_locked_prompt_text(self.strategy.target_stock_count)
-
-        result = self.tuner.tune(stats, rows, before, locked_text, self._why_history())
-        if result is None or not result.change:
-            logger.info(
-                "프롬프트를 고치지 않습니다 (%s): %s",
-                today,
-                getattr(result, "reason", "판단 실패"),
-            )
-            return _no_change_outcome(result)
-
-        sections = tuner_module.sanitize_sections(result.sections)
-        if not sections:
-            logger.warning("수정안이 안전장치에 전부 걸렸습니다 — 그대로 둡니다 (%s).", today)
-            return TuningOutcome(changed=False, reason="수정안이 안전장치에 전부 걸림")
-
-        try:
-            new_version = self.prompt_store.save(sections, result.reason, today)
-        except OSError:
-            logger.exception("프롬프트 파일 쓰기에 실패했습니다 — 그대로 둡니다.")
-            return TuningOutcome(changed=False, reason="프롬프트 파일 쓰기 실패")
-
-        after = self.prompt_store.load_sections()
-        subject, body = templates.prompt_tuning_email(
-            today,
-            old_version,
-            new_version,
-            result.reason,
-            stats,
-            {key: before[key] for key in sections},
-            {key: after[key] for key in sections},
-        )
-        self.email.send(subject, body)
-        logger.info("프롬프트 수정 메일 발송 (%s, %s → %s)", today, old_version, new_version)
-        return TuningOutcome(
-            changed=True, reason=result.reason, old_version=old_version, new_version=new_version
-        )
-
-    def tune_exit_prompt(
-        self, today: Optional[date] = None, force: bool = False
-    ) -> Optional[TuningOutcome]:
-        """15:35 — 매도 판단 검증 결과를 보고 매도 프롬프트의 편집 가능한 절을 고친다 (스펙 4절).
-
-        매도 판단 검증(`review_exits`)이 그 끝에서 부른다. 게이트는 순서대로 월 순수익(4-A) →
-        표본 10건(4.3)이고, 둘 다 LLM 호출 전에 코드가 본다. 고친 날만 수정 메일이 나가고,
-        고치지 않는 날이 정상이다. 결과는 `tune_prompt`와 같이 돌려줘 검증 메일에 싣는다.
-
-        `force`는 UI '강제 갱신' 버튼이 쓴다 — `tune_prompt`와 같이 월 순수익 게이트만
-        건너뛰고, 표본 10건 요건은 그대로 본다.
-        """
-        today = today or date.today()
-        if self.exit_tuner is None:
-            return None
-        if not force:
-            blocked = self._monthly_return_block_reason(today)
-            if blocked:
-                return TuningOutcome(changed=False, reason=blocked)
-
-        old_version = self.exit_prompt_store.load_version()
-        verified = self.trade_store.count_exit_reviews(old_version)
-        if verified < exit_tuner_module.MIN_REVIEWS_FOR_TUNING:
-            logger.info(
-                "매도 프롬프트 %s로 검증된 종목이 %d건이라(기준 %d건) 고치지 않습니다 (%s).",
-                old_version, verified, exit_tuner_module.MIN_REVIEWS_FOR_TUNING, today,
-            )
-            return TuningOutcome(
-                changed=False,
-                reason=(
-                    f"현 버전 {old_version} 검증 {verified}건 < 기준 "
-                    f"{exit_tuner_module.MIN_REVIEWS_FOR_TUNING}건"
-                ),
-            )
-
-        rows = self.trade_store.recent_exit_reviews()
-        stats = exit_tuner_module.group_by_version(rows)
-        before = self.exit_prompt_store.load_sections()
-        result = self.exit_tuner.tune(
-            stats, rows, before, build_exit_locked_text(), self.exit_prompt_store.why_history()
-        )
-        if result is None or not result.change:
-            logger.info(
-                "매도 프롬프트를 고치지 않습니다 (%s): %s", today, getattr(result, "reason", "판단 실패")
-            )
-            return _no_change_outcome(result)
-
-        sections = tuner_module.sanitize_sections(
-            result.sections, EXIT_PROMPT_SECTION_ORDER, exit_tuner_module.MAX_SECTIONS_PER_CHANGE
-        )
-        if not sections:
-            logger.warning("매도 프롬프트 수정안이 안전장치에 전부 걸렸습니다 — 그대로 둡니다 (%s).", today)
-            return TuningOutcome(changed=False, reason="수정안이 안전장치에 전부 걸림")
-
-        try:
-            new_version = self.exit_prompt_store.save(sections, result.reason, today)
-        except OSError:
-            logger.exception("매도 프롬프트 파일 쓰기에 실패했습니다 — 그대로 둡니다.")
-            return TuningOutcome(changed=False, reason="프롬프트 파일 쓰기 실패")
-
-        after = self.exit_prompt_store.load_sections()
-        subject, body = templates.exit_prompt_tuning_email(
-            today,
-            old_version,
-            new_version,
-            result.reason,
-            stats,
-            {key: before[key] for key in sections},
-            {key: after[key] for key in sections},
-        )
-        self.email.send(subject, body)
-        logger.info("매도 프롬프트 수정 메일 발송 (%s, %s → %s)", today, old_version, new_version)
-        return TuningOutcome(
-            changed=True, reason=result.reason, old_version=old_version, new_version=new_version
-        )
-
-    def _why_history(self) -> str:
-        """직전 변경들의 이유 — `PromptStore.why_history`로 옮겼다 (매도 프롬프트와 공유)."""
-        return self.prompt_store.why_history()

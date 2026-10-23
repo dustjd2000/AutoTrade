@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from config.settings import STRATEGY_ETF_REGIME
 from src.core import daily_workflow
 from src.core.daily_workflow import DailyWorkflow
 from src.core import actions
@@ -96,22 +95,15 @@ def make_workflow(rows, returns=(), kill_percent=5.0, start=None, cash=1_000_000
         risk_manager=SimpleNamespace(approve=lambda *a, **kw: True, record_order=lambda *a, **kw: None),
         note_open_position=opened.append,
     )
-    fail = lambda *a, **kw: pytest.fail("2호 모드에서 1호 경로를 불렀습니다")  # noqa: E731
     workflow = DailyWorkflow(
-        collector=SimpleNamespace(collect=fail),
-        recommender=SimpleNamespace(recommend=fail, prompt_version="v"),
         strategy=strategy,
         engine=engine,
         account=SimpleNamespace(get_cash=lambda: cash, get_positions=lambda: {}),
         trade_store=SimpleNamespace(
             closed_trade_returns=closed_trade_returns,
             record_fill=lambda *a, **kw: None,
-            save_recommendations=fail,
-            recommendations_for=fail,
-            ai_exit_decisions_for=fail,
         ),
         email=email,
-        strategy_mode=STRATEGY_ETF_REGIME,
         etf_kill_loss_percent=kill_percent,
         etf_start_date=start,
     )
@@ -209,16 +201,6 @@ def test_kill_switch_zero_means_off():
     assert [r.ticker for r in t.strategy._recommendations] == [LONG_ETF[0]]
 
 
-def test_reviews_are_skipped_in_etf_mode():
-    """15:35 검증·프롬프트 자동 수정은 1호 재료다 — 2호 매매가 섞이면 안 된다."""
-    t = make_workflow(candles(0.5))
-
-    t.workflow.review_recommendations(today=TODAY)
-    t.workflow.review_exits(today=TODAY)
-
-    assert t.email.sent == []
-
-
 # ── 매수: 결정 즉시 시장가 (2026-10-23) ─────────────────────────
 def test_buy_sends_a_market_order_right_after_the_decision():
     t = make_workflow(candles(-0.5), cash=1_000_000, price=1250.0)
@@ -295,6 +277,3 @@ def test_recommend_action_chains_the_buy_in_etf_mode():
     assert [s.touches_orders for s in steps] == [False, True]
 
 
-def test_recommend_action_stays_single_step_for_llm_strategy():
-    runtime = SimpleNamespace(workflow=SimpleNamespace(etf_mode=False, recommend_and_notify=lambda: None))
-    assert len(actions.manual_steps(runtime, "recommend")) == 1
