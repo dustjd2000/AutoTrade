@@ -116,8 +116,9 @@ pytest tests/test_strategy/test_llm_momentum.py -k name  # 테스트 단위 (-k 
   그대로 타고 **추천 단계만 갈린다**(`DailyWorkflow._recommend_etf`). 직전 20거래일 KODEX 200
   장중 수익률 평균이 +0.2% 이상이면 KODEX 200, -0.2% 이하이면 KODEX 인버스를 1종목, **결정 직후
   같은 실행에서 시장가로** 산다(`_execute_etf_buy`, 매수 시각 스케줄은 재시작 대비 안전망). 손절·15:15
-  청산은 1호와 같다. LLM 추천·뉴스 검증·AI 매도 판단
-  (`ai_exit_due`가 막는다 — UI 체크박스와 무관)·15:35 두 검증과 프롬프트 자동 수정은 돌지 않는다.
+  청산은 1호와 같다. AI 매도 판단은 주기가 아니라 종목 순손익률이 ±1%·±2%… 단계를 새로 넘을
+  때만 묻는다(`etf_exit_trigger.StepTrigger` → `runtime.etf_exit_due`). LLM 추천·뉴스 검증·15:35 두
+  검증과 프롬프트 자동 수정은 돌지 않는다.
   ETF 매매 건별 순수익률 누적합이 `-ETF_KILL_LOSS_PERCENT`(기본 5)에 닿으면 매수를 멈추고, 풀려면
   사람이 `ETF_START_DATE`나 한도를 바꾼다. 근거는 2024년 이후 국면뿐이다(27년 장기로는 손실) —
   1호 방식이 1분봉 검증에서 어떤 조정으로도 음수였던 것이 도입 계기다(PRD 5.5-B 추세 추종 철회 항목).

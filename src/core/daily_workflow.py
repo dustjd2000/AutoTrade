@@ -585,6 +585,12 @@ class DailyWorkflow:
             reason=f"직전 {etf_regime.LOOKBACK_DAYS}거래일 장중 평균 {signal:+.3f}%",
             recommend_price=price,
             setup=STRATEGY_ETF_REGIME,
+            # AI 매도 판단이 '아침 전망'으로 읽는 칸 — 2호는 가격 전망이 없으므로 무엇이 시나리오인지 적는다
+            outlook=(
+                "2호 전략(지수 ETF 국면 추종): 가격 목표 없이 방향만 정했다. 시나리오는 '최근 "
+                f"{etf_regime.LOOKBACK_DAYS}거래일의 장중 흐름이 오늘도 이어진다'이며, 오늘 장중 "
+                "흐름이 그 반대로 뚜렷하게 돌아섰다면 시나리오가 깨진 것이다."
+            ),
         )
         self.strategy.set_recommendations([recommendation])
         self._etf_decided_on = today

@@ -19,6 +19,7 @@ import pytest
 from src.api.account import Position
 from src.core.events import ExitReason, MarketData
 from src.core.exit_drawdown import DrawdownTracker
+from src.core.etf_exit_trigger import StepTrigger
 from src.core.exit_trace import ExitTrace
 from src.core.runtime import (
     AI_EXIT_END_TIME,
@@ -207,12 +208,71 @@ def test_no_call_when_ai_exit_disabled():
     assert advisor.calls == []
 
 
-def test_no_call_in_etf_regime_strategy_even_when_enabled():
-    """2호 전략은 '종가까지 보유'로 검증한 규칙이다 — 체크박스가 켜져 있어도 부르지 않는다 (PRD 5.5-C)."""
-    runtime, engine, advisor = make_runtime(holdings=[holding()], ai_exit_enabled=True)
+def etf_runtime(net_return, ai_exit_enabled=True):
+    """2호 전략 런타임 — 주기 대신 순손익률 단계 트리거로 묻는다 (PRD 5.5-C '매도 판단')."""
+    runtime, engine, advisor = make_runtime(holdings=[holding()], ai_exit_enabled=ai_exit_enabled)
     runtime.settings.strategy_mode = "etf_regime"
+    runtime.etf_exit_trigger = StepTrigger()
+    state = {"ret": net_return}
+    engine.position_net_return = lambda position: state["ret"]
+    return runtime, engine, advisor, state
+
+
+def test_etf_strategy_asks_when_profit_reaches_one_percent():
+    runtime, engine, advisor, _ = etf_runtime(0.012)
+    asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW, None))
+    assert len(advisor.calls) == 1
+
+
+def test_etf_strategy_asks_when_loss_reaches_one_percent():
+    runtime, engine, advisor, _ = etf_runtime(-0.011)
+    asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW, None))
+    assert len(advisor.calls) == 1
+
+
+def test_etf_strategy_does_not_ask_inside_one_percent():
+    runtime, engine, advisor, _ = etf_runtime(0.009)
     asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW, None))
     assert advisor.calls == []
+
+
+def test_etf_strategy_asks_again_only_at_the_next_step():
+    """같은 단계에 머무는 동안은 다시 묻지 않는다 — 30초 폴링마다 LLM을 부르지 않게 한다."""
+    runtime, engine, advisor, state = etf_runtime(0.012)
+    last = asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW, None))
+    state["ret"] = 0.018                                   # 여전히 +1% 단계
+    last = asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW + timedelta(seconds=30), last))
+    state["ret"] = 0.021                                   # +2% 단계 — 다시 묻는다
+    asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW + timedelta(seconds=60), last))
+    assert len(advisor.calls) == 2
+
+
+def test_etf_strategy_ignores_the_period_but_respects_the_checkbox():
+    """주기가 지나도 단계가 없으면 묻지 않고, 체크박스를 끄면 단계가 넘어도 묻지 않는다."""
+    runtime, engine, advisor, _ = etf_runtime(0.0)
+    asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW, IN_WINDOW - timedelta(hours=1)))
+    assert advisor.calls == []
+
+    runtime, engine, advisor, _ = etf_runtime(0.03, ai_exit_enabled=False)
+    asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW, None))
+    assert advisor.calls == []
+
+
+def test_etf_strategy_does_not_ask_after_the_window_closes():
+    runtime, engine, advisor, _ = etf_runtime(0.03)
+    asyncio.run(maybe_run_ai_exit_cycle(runtime, AFTER_WINDOW, None))
+    assert advisor.calls == []
+
+
+def test_etf_strategy_passes_the_morning_decision_to_the_prompt():
+    """2호 결정은 DB에 남기지 않는다 — 메모리의 결정이 판단 근거(reason/outlook)로 실려야 한다."""
+    runtime, engine, advisor, _ = etf_runtime(0.012)
+    rec = SimpleNamespace(ticker="005930", reason="직전 20거래일 장중 평균 +0.500%",
+                          outlook="2호 전략 시나리오", target_sell_price=0)
+    runtime.workflow = SimpleNamespace(strategy=SimpleNamespace(_recommendations=[rec]))
+    asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW, None))
+    [view] = advisor.calls[0]["holdings"]
+    assert view.reason == rec.reason and view.outlook == rec.outlook
 
 
 def test_stop_loss_tax_is_zero_only_for_etf_strategy():

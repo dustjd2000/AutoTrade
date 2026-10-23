@@ -35,6 +35,7 @@ from src.core.engine import TradingEngine
 from src.core.events import ExitReason
 from src.data.collector import DataCollector, LargeCapUniverse
 from src.core.disclosure_watch import DisclosureWatch
+from src.core.etf_exit_trigger import StepTrigger
 from src.data.disclosure import DisclosureClient
 from src.llm.exit_advisor import ExitAdvisor, HoldingView, make_exit_prompt_store
 from src.llm.exit_reviewer import ExitReviewer
@@ -173,6 +174,8 @@ class Runtime:
     # 스케줄 잡과 UI 버튼이 공유하는 실행 통로. build_runtime이 Runtime을 만든 뒤에
     # 채운다 — ActionRunner가 runtime을 참조해야 해서 순서를 뒤집을 수 없다.
     runner: Optional[ActionRunner] = None
+    # 2호 전략의 AI 매도 판단 트리거 (PRD 5.5-C '매도 판단'). 1호면 None이다.
+    etf_exit_trigger: Optional[StepTrigger] = None
 
 
 def risk_tax_ratio(settings) -> float:
@@ -284,6 +287,7 @@ def build_runtime(settings: Settings) -> Runtime:
         workflow=workflow,
         exit_advisor=exit_advisor,
         disclosure_watch=DisclosureWatch(disclosures),
+        etf_exit_trigger=StepTrigger() if etf_mode else None,
     )
     runtime.runner = ActionRunner(runtime)
 
@@ -561,10 +565,9 @@ def ai_exit_due(
     if not is_trading_day(now):
         return False
 
-    # 2호 전략은 "종가까지 보유"로 검증한 규칙이다 — UI 체크박스와 무관하게 부르지 않는다
-    # (PRD 5.5-C). 엔진 플래그로 막지 않는 이유: UI가 엔진 시작 직후 체크박스 상태를 다시 넣는다.
+    # 2호 전략은 주기가 아니라 순손익률 단계 트리거로 묻는다 (PRD 5.5-C '매도 판단')
     if getattr(runtime.settings, "strategy_mode", STRATEGY_LLM) == STRATEGY_ETF_REGIME:
-        return False
+        return etf_exit_due(runtime, now)
 
     engine = runtime.engine
     if not engine.ai_exit_enabled:
@@ -589,6 +592,30 @@ def ai_exit_due(
         return False
 
     return True
+
+
+def etf_exit_due(runtime, now: datetime) -> bool:
+    """2호 전략: 보유 종목 순손익률이 +1%·+2%… 또는 -1%·-2%… 단계를 새로 넘었으면 True.
+
+    UI의 AI 매도 판단 체크박스(`engine.ai_exit_enabled`)는 그대로 따른다 — 끄면 묻지 않는다.
+    시간은 개장~`AI_EXIT_END_TIME`(15:15 강제청산 직전에는 어차피 곧 팔린다). 매수 직후 대기
+    (`AI_EXIT_START_DELAY_MINUTES`)는 두지 않는다 — 1%p 단계 자체가 노이즈를 거른다.
+    호출이 실패해도 닿은 단계는 기록된 채로 남는다 — 실패는 보유로 떨어진다는 원칙과 같다.
+    """
+    engine = runtime.engine
+    trigger = getattr(runtime, "etf_exit_trigger", None)
+    if trigger is None or not engine.ai_exit_enabled:
+        return False
+    if not (MARKET_OPEN_TIME <= now.time() <= AI_EXIT_END_TIME):
+        return False
+    fired = []
+    for position in engine.exit_candidates():
+        step = trigger.crossed(position.ticker, engine.position_net_return(position), now.date())
+        if step is not None:
+            fired.append(f"{position.ticker} {step:+d}% 단계")
+    if fired:
+        logger.info("2호 전략 매도 판단 트리거: %s", ", ".join(fired))
+    return bool(fired)
 
 
 AI_EXIT_FAILURE_TEXT = "LLM 호출 실패·타임아웃·형식 오류 (이번 주기는 매도하지 않습니다)"
@@ -685,6 +712,11 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
             if engine.trade_store is not None
             else {}
         )
+        # 2호 전략은 추천을 DB에 남기지 않는다(15:35 검증 재료와 섞이지 않게) — 메모리의 오늘
+        # 결정을 대신 넘겨 판단 근거(신호)가 프롬프트에 실리게 한다 (PRD 5.5-C '매도 판단')
+        workflow = getattr(runtime, "workflow", None)
+        for rec in getattr(getattr(workflow, "strategy", None), "_recommendations", None) or []:
+            recommendations.setdefault(rec.ticker, rec)
         watch = runtime.disclosure_watch
         # 실시간 콜백이 쌓아 둔 당일 고점 — 궤적(15분 간격)에는 없는 봉우리가 여기 남는다
         peaks = {
