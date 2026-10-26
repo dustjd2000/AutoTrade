@@ -17,12 +17,13 @@ from types import SimpleNamespace
 import pytest
 
 from src.api.account import Position
-from src.core.events import ExitReason, MarketData
+from src.core.events import ExitReason, FillRecord, MarketData, OrderSide
 from src.core.exit_drawdown import DrawdownTracker
 from src.core.etf_exit_trigger import StepTrigger
 from src.core.exit_trace import ExitTrace
 from src.core.runtime import (
     ETF_TAX_RATIO,
+    collect_user_sells,
     maybe_run_ai_exit_cycle,
     run_ai_exit_cycle,
     watch_ai_exit,
@@ -124,6 +125,7 @@ class SpyAdvisor:
         minutes_to_close,
         partial,
         timeout_seconds=120.0,
+        user_sells=None,
     ):
         self.threads.append(threading.get_ident())
         self.calls.append(
@@ -132,6 +134,7 @@ class SpyAdvisor:
                 trace=trace,
                 minutes_to_close=minutes_to_close,
                 partial=partial,
+                user_sells=user_sells,
             )
         )
         return self.result
@@ -765,7 +768,9 @@ class BoomVersionAdvisor:
     def __init__(self, result):
         self.result = result
 
-    def decide(self, holdings, trace, minutes_to_close, partial, timeout_seconds=120.0):
+    def decide(
+        self, holdings, trace, minutes_to_close, partial, timeout_seconds=120.0, user_sells=None
+    ):
         return self.result
 
     @property
@@ -791,3 +796,64 @@ def test_cycle_flushes_pending_peaks_first():
     asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
 
     assert engine.peak_flushes == [True]
+
+
+# ── 사용자 직접 매도 (프롬프트 v4) ──────────────────────────────
+def fill(order_id, ticker="069500", side=OrderSide.SELL, qty=3, price=36_200.0, name="KODEX 200"):
+    return FillRecord(
+        order_id=order_id, ticker=ticker, side=side,
+        filled_quantity=qty, filled_price=price, name=name,
+    )
+
+
+def user_sell_runtime(fills, own_ids=("A1",), buy_price=35_850.0, boom=False):
+    def get_today_fills():
+        if boom:
+            raise RuntimeError("조회 실패")
+        return fills
+
+    engine = SimpleNamespace(
+        order_client=SimpleNamespace(get_today_fills=get_today_fills),
+        trade_store=SimpleNamespace(
+            program_order_ids=lambda day: set(own_ids),
+            same_day_buy_price=lambda ticker, day: buy_price,
+        ),
+    )
+    return SimpleNamespace(engine=engine)
+
+
+def test_collect_user_sells_keeps_only_sells_the_program_did_not_place():
+    fills = [
+        fill("A1"),                                      # 프로그램이 낸 주문
+        fill("U1", qty=2, price=36_000.0),               # 사용자 매도
+        fill("U2", qty=1, price=36_300.0),               # 사용자 매도 (같은 종목 — 묶인다)
+        fill("U3", side=OrderSide.BUY),                  # 매수는 제외
+    ]
+    sells = collect_user_sells(user_sell_runtime(fills), [], IN_WINDOW)
+
+    assert len(sells) == 1
+    assert sells[0].ticker == "069500"
+    assert sells[0].quantity == 3
+    assert sells[0].price == pytest.approx(36_100.0)     # 가중평균
+    assert sells[0].buy_price == 35_850.0
+
+
+def test_collect_user_sells_falls_back_to_held_avg_price():
+    rt = user_sell_runtime([fill("U1")], buy_price=None)
+    sells = collect_user_sells(rt, [holding(ticker="069500", avg_price=35_500.0)], IN_WINDOW)
+
+    assert sells[0].buy_price == 35_500.0
+
+
+def test_collect_user_sells_returns_empty_when_lookup_fails():
+    assert collect_user_sells(user_sell_runtime([], boom=True), [], IN_WINDOW) == []
+
+
+def test_cycle_passes_user_sells_to_advisor(monkeypatch):
+    runtime, engine, advisor = make_runtime(holdings=[holding()], decide_result=None)
+    marker = [object()]
+    monkeypatch.setattr("src.core.runtime.collect_user_sells", lambda rt, hs, now: marker)
+
+    asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
+
+    assert advisor.calls[0]["user_sells"] is marker

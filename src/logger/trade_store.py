@@ -447,6 +447,27 @@ class TradeStore:
             ).fetchall()
         return {row["ticker"]: row["peak_return"] for row in rows}
 
+    def program_order_ids(self, day: date) -> set:
+        """그날 이 프로그램이 낸 주문의 주문번호.
+
+        `apply_fills`가 넣은 외부 체결 행(타임스탬프가 그날 0시)은 뺀다 — 사용자 직접 매도를
+        알아보는 데 쓰는 값인데, 리포트 동기화가 먼저 돌았다고 해서 사용자 매도가 프로그램 주문으로
+        바뀌면 안 된다.
+        """
+        start, end = _day_range(day)
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT order_id FROM trades WHERE timestamp BETWEEN ? AND ? AND timestamp != ?",
+                (start, end, start),
+            ).fetchall()
+        return {row["order_id"] for row in rows}
+
+    def same_day_buy_price(self, ticker: str, day: date) -> Optional[float]:
+        """그날 그 종목 매수 체결의 가중평균가. 없으면 None (전일 이월분 등)."""
+        start, end = _day_range(day)
+        with closing(self._connect()) as conn:
+            return _same_day_buy_price(conn, ticker, start, end)
+
     def daily_summary(self, day: date) -> DailySummary:
         start, end = _day_range(day)
         with closing(self._connect()) as conn:

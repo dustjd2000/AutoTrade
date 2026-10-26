@@ -9,6 +9,7 @@ from src.llm.exit_advisor import (
     ExitAdvisor,
     HoldingView,
     PositionExit,
+    UserSell,
     build_exit_system_prompt,
     build_exit_user_prompt,
     make_exit_prompt_store,
@@ -577,3 +578,24 @@ def test_advisor_reads_the_store_on_every_call(tmp_path):
 
     assert advisor.prompt_version == "20260929"
     assert "새 시간 지침" in build_exit_system_prompt(advisor.prompt_store.load_sections())
+
+
+def test_user_prompt_lists_user_sells_only_when_present():
+    sells = [UserSell("069500", "KODEX 200", 3, 36_200.0, 35_850.0)]
+    with_sells = build_exit_user_prompt([holding()], trace_points(), 330, False, user_sells=sells)
+    without = build_exit_user_prompt([holding()], trace_points(), 330, False)
+
+    assert "사용자가 직접 판 기록" in with_sells
+    assert "3주 @ 36,200원" in with_sells and "+0.98%" in with_sells
+    assert "사용자가 직접 판 기록" not in without
+
+
+def test_user_prompt_says_when_buy_price_of_user_sell_is_unknown():
+    sells = [UserSell("069500", "KODEX 200", 3, 36_200.0, None)]
+    prompt = build_exit_user_prompt([holding()], trace_points(), 330, False, user_sells=sells)
+
+    assert "매수가를 알 수 없음" in prompt
+
+
+def test_system_prompt_carries_the_user_sell_rule():
+    assert "사용자의 직접 매도" in build_exit_system_prompt()

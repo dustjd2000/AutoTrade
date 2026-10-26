@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 # v3 (2026-10-01): 노이즈 수준 고점에 반납 수치를 주지 않도록 바꿨다 (`_peak_text`).
 # 프롬프트가 달라지면 검증 표본을 섞으면 안 되므로 버전을 올린다 — `exit_reviews`의
 # 10건 게이트도 v3 기준으로 다시 센다.
-EXIT_PROMPT_TEMPLATE_VERSION = "v3"
+# v4 (2026-10-26): 사용자가 키움 앱에서 직접 판 기록을 참고 정보로 싣는다 (`UserSell`).
+EXIT_PROMPT_TEMPLATE_VERSION = "v4"
 
 # 응답 스키마 — 종목마다 판정과 근거를 받는다 (확정 2026-09-19). 전량 판정이던 시절에는
 # {sell, reason} 하나였다.
@@ -70,6 +71,21 @@ class HoldingView:
     target_sell_price: float = 0.0
     # 당일 고점 순손익률과 그 대비 반납폭 (`DrawdownTracker`). 아직 모르면 None이다.
     peak_return: Optional[float] = None
+
+
+@dataclass
+class UserSell:
+    """사용자가 키움 앱에서 직접 판 종목의 당일 체결 요약 (종목당 한 줄).
+
+    이 프로그램이 낸 주문이 아닌 매도 체결이다. 체결 시각은 체결내역 조회가 주지 않아 없다.
+    `buy_price`는 같은 날 매수가(없으면 보유 평단) — 전일 이월분을 판 경우 모르면 None이다.
+    """
+
+    ticker: str
+    name: str
+    quantity: int
+    price: float
+    buy_price: Optional[float] = None
 
 
 @dataclass
@@ -204,6 +220,17 @@ EXIT_DEFAULT_HOLD_SECTION = """## 기본은 보유입니다
 쉽습니다. 그렇게 되면 이 판단 자체가 무의미해집니다. "이 정도면 팔아도 되지 않을까"
 수준의 애매한 근거로는 그 종목의 `sell`을 `false`로 남기십시오."""
 
+# 사용자의 직접 매도: 참고 정보일 뿐 매도 신호가 아니라는 선을 긋는다 (2026-10-26).
+EXIT_USER_SELL_SECTION = """## 사용자의 직접 매도
+사용자 상황 설명에 **"사용자가 직접 판 기록"**이 있으면 참고하십시오. 사용자가 키움 앱에서
+직접 낸 매도이며, 이 판단과 별개입니다. 기본은 보유 원칙과 순수익 기준은 그대로입니다.
+- 사용자가 같은 종목을 일부 팔고 일부를 남겼다면, 남긴 수량은 사용자가 그 가격에서 보유를
+  택한 것입니다. 현재 순손익이 사용자가 판 가격 아래로 내려왔다면 그것을 매도 근거의
+  하나로 쓸 수 있습니다.
+- 사용자가 이익 구간에서 판 수익률은 이익을 확정할 만한 수준을 가늠하는 **참고값**일 뿐입니다.
+- 사용자가 팔았다는 사실만으로 팔지 마십시오. `reason`에는 그 종목 궤적의 구체적 수치를
+  인용하십시오."""
+
 # reason 작성 지침: 출력 형식 계약이다.
 EXIT_REASON_FORMAT_SECTION = """## reason 작성 지침
 `reason`에는 **그 종목** 궤적의 구체적 수치를 인용하십시오. ("고점 +2.10%에서
@@ -267,13 +294,20 @@ def build_exit_system_prompt(sections: Optional[Dict[str, str]] = None) -> str:
             merged[key] = text
     parts = [_EXIT_PROMPT_HEADER, EXIT_ROLE_SECTION, EXIT_DEFAULT_HOLD_SECTION]
     parts.extend(merged[key] for key in EXIT_PROMPT_SECTION_ORDER)
-    parts.append(EXIT_REASON_FORMAT_SECTION)
+    parts.extend([EXIT_USER_SELL_SECTION, EXIT_REASON_FORMAT_SECTION])
     return "\n\n".join(parts)
 
 
 def build_exit_locked_text() -> str:
     """튜너에게 참고용으로 보여줄 잠긴 절 전문."""
-    return "\n\n".join([EXIT_ROLE_SECTION, EXIT_DEFAULT_HOLD_SECTION, EXIT_REASON_FORMAT_SECTION])
+    return "\n\n".join(
+        [
+            EXIT_ROLE_SECTION,
+            EXIT_DEFAULT_HOLD_SECTION,
+            EXIT_USER_SELL_SECTION,
+            EXIT_REASON_FORMAT_SECTION,
+        ]
+    )
 
 
 def make_exit_prompt_store(prompt_dir: Path = EXIT_PROMPT_DIR) -> PromptStore:
@@ -293,6 +327,7 @@ def build_exit_user_prompt(
     minutes_to_close: int,
     partial: bool,
     min_peak: float = 0.0,
+    user_sells: Optional[List[UserSell]] = None,
 ) -> str:
     lines = [
         "보유 종목을 종목마다 지금 매도할지 판단하기 위한 현재 상황입니다.",
@@ -318,6 +353,16 @@ def build_exit_user_prompt(
         lines.append(f"  아침 근거: {h.reason}")
         lines.append(f"  아침 전망: {h.outlook}")
         lines.append(f"  오늘 공시: {_headline_text(h)}")
+
+    if user_sells:
+        lines.append("\n## 사용자가 직접 판 기록 (오늘, 수수료·세금 전)")
+        for s in user_sells:
+            gain = (
+                f"같은 날 매수가 {s.buy_price:,.0f}원 대비 {_pct(s.price / s.buy_price - 1)}"
+                if s.buy_price
+                else "매수가를 알 수 없음 (전일 이월분 등)"
+            )
+            lines.append(f"- {s.ticker} {s.name}: {s.quantity}주 @ {s.price:,.0f}원 ({gain})")
 
     lines.append("\n종목마다 지금 매도할지 판단하세요.")
     return "\n".join(lines)
@@ -376,6 +421,7 @@ class ExitAdvisor:
         minutes_to_close: int,
         partial: bool,
         timeout_seconds: float = 120.0,
+        user_sells: Optional[List[UserSell]] = None,
     ) -> Optional[ExitDecision]:
         """청산 여부를 판단해 돌려준다. 실패하면 None — 호출측은 그 주기에 아무것도 팔지 않는다."""
         user_prompt = build_exit_user_prompt(
@@ -386,6 +432,7 @@ class ExitAdvisor:
             # 이익 반납 감시(`DrawdownTracker`)와 같은 기준을 쓴다 — 호출을 앞당길 만큼의
             # 고점이 아니면 판단 근거로도 삼지 않는다 (2026-10-01, `_peak_text` 참고)
             self.settings.ai_exit_drawdown_ratio,
+            user_sells,
         )
         logger.info(
             "AI 매도 판단 요청 (exit_prompt_version=%s, 보유 %d종목):\n%s",

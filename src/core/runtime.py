@@ -31,9 +31,9 @@ from src.core.actions import (  # noqa: F401  (재수출)
 )
 from src.core.daily_workflow import DailyWorkflow
 from src.core.engine import TradingEngine
-from src.core.events import ExitReason
+from src.core.events import ExitReason, OrderSide
 from src.core.etf_exit_trigger import StepTrigger
-from src.llm.exit_advisor import ExitAdvisor, HoldingView, make_exit_prompt_store
+from src.llm.exit_advisor import ExitAdvisor, HoldingView, UserSell, make_exit_prompt_store
 from src.logger.trade_store import AIExitDecisionRow, TradeStore
 from src.notification.alert import AlertNotifier
 from src.notification.email import EmailNotifier
@@ -524,6 +524,44 @@ def _record_ai_exit_decisions(runtime: Runtime, now: datetime, holdings_view, de
         logger.warning("AI 매도 판단 기록 실패 — 매도 흐름은 그대로 진행합니다.", exc_info=True)
 
 
+def collect_user_sells(runtime: Runtime, holdings, now: datetime) -> List[UserSell]:
+    """사용자가 키움 앱에서 직접 판 당일 매도를 종목별로 묶는다 (프롬프트 v4 참고 정보).
+
+    장중에는 외부 체결이 DB에 없다(`apply_fills`는 리포트 때 돈다) — 체결내역을 직접 조회해
+    이 프로그램이 낸 주문번호를 뺀 매도 체결을 사용자 매도로 본다. REST 호출이라 별도
+    스레드에서 불러야 한다. 어떤 실패도 빈 목록으로 떨어진다 — 참고 정보일 뿐이라 매도
+    판단을 막지 않는다.
+    """
+    try:
+        engine = runtime.engine
+        own = engine.trade_store.program_order_ids(now.date())
+        held_avg = {p.ticker: p.avg_price for p in holdings}
+        grouped = {}
+        for fill in engine.order_client.get_today_fills():
+            if fill.side != OrderSide.SELL or fill.filled_quantity <= 0 or fill.order_id in own:
+                continue
+            grouped.setdefault(fill.ticker, []).append(fill)
+
+        sells = []
+        for ticker, fills in grouped.items():
+            qty = sum(f.filled_quantity for f in fills)
+            price = sum(f.filled_price * f.filled_quantity for f in fills) / qty
+            buy_price = engine.trade_store.same_day_buy_price(ticker, now.date()) or held_avg.get(ticker)
+            sells.append(
+                UserSell(
+                    ticker=ticker,
+                    name=next((f.name for f in fills if f.name), ""),
+                    quantity=qty,
+                    price=price,
+                    buy_price=buy_price,
+                )
+            )
+        return sells
+    except Exception:
+        logger.warning("사용자 직접 매도 조회 실패 — 이번 판단에서는 그 절을 뺍니다.", exc_info=True)
+        return []
+
+
 async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) -> None:
     """AI 매도 판단 한 사이클을 실행한다 — 궤적에 점을 남기고 종목마다 판정해 매도로 정해진
     종목만 판다.
@@ -599,6 +637,10 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
 
         # 하루 호출 상한은 '시도'를 센다 — 응답이 실패해도 LLM 호출 자체는 이미 나갔다.
         engine.note_ai_exit_call()
+        # 체결내역 조회는 REST라 LLM 호출과 마찬가지로 루프를 막지 않게 스레드로 넘긴다
+        user_sells = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: collect_user_sells(runtime, holdings, now)
+        )
         # LLM 호출은 별도 스레드로 넘긴다 — ExitAdvisor.decide는 최대 120초까지 걸릴 수
         # 있어(timeout_seconds), 이벤트 루프에서 그대로 기다리면 그동안 WebSocket PING
         # 응답이 끊기고 실시간 손절 콜백도 멈춘다.
@@ -609,6 +651,7 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
                 trace,
                 minutes_to_close,
                 partial,
+                user_sells=user_sells,
             ),
         )
     except Exception:
