@@ -12,6 +12,7 @@ from src.core.exit_trace import TracePoint
 from src.llm.common import MAX_TOKENS
 from src.llm.common import extract_json as _extract_json
 from src.llm.prompt_store import PromptStore
+from src.strategy.etf_regime import FLIP_PERCENT, INVERSE_ETF, LONG_ETF
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,9 @@ logger = logging.getLogger(__name__)
 # 프롬프트가 달라지면 검증 표본을 섞으면 안 되므로 버전을 올린다 — `exit_reviews`의
 # 10건 게이트도 v3 기준으로 다시 센다.
 # v4 (2026-10-26): 사용자가 키움 앱에서 직접 판 기록을 참고 정보로 싣는다 (`UserSell`).
-EXIT_PROMPT_TEMPLATE_VERSION = "v4"
+# v5 (2026-10-28): 지수 ETF 보유에 오늘 KODEX 200 시가 대비 수익률과 방향 유불리를 싣고,
+# "지수 때문에 자연스러운 손실"을 보유 근거로 못 쓰게 한다 (`_index_text`).
+EXIT_PROMPT_TEMPLATE_VERSION = "v5"
 
 # 응답 스키마 — 종목마다 판정과 근거를 받는다 (확정 2026-09-19). 전량 판정이던 시절에는
 # {sell, reason} 하나였다.
@@ -183,6 +186,27 @@ def _peak_text(holding: HoldingView, min_peak: float = 0.0) -> str:
     )
 
 
+def _index_text(ticker: str, index_return: Optional[float]) -> Optional[str]:
+    """지수 ETF 보유에 지수 방향이 유리한지 불리한지 — 판정은 코드가 하고 말로 못 박는다.
+
+    지수 ETF의 손실은 늘 지수가 반대로 움직여서 난 것인데, AI가 그것을 "자연스러운 손실"로
+    읽고 -2%대까지 보유했다 (2026-10-28 인버스). 지수 수치를 주고 불리 여부를 직접 적는다.
+    ETF가 아니거나 지수 수익률을 모르면 None이다.
+    """
+    if index_return is None or ticker not in (LONG_ETF[0], INVERSE_ETF[0]):
+        return None
+    held_against = index_return * (1 if ticker == INVERSE_ETF[0] else -1)
+    head = f"KODEX 200 시가 대비 {_pct(index_return / 100)}"
+    if held_against >= FLIP_PERCENT:
+        return (
+            f"{head} — **보유 방향에 불리**, {FLIP_PERCENT:.2f}% 이상 반대로 움직였습니다 "
+            "(아침 시나리오가 깨진 근거)"
+        )
+    if held_against > 0:
+        return f"{head} — 보유 방향에 불리하나 {FLIP_PERCENT:.2f}% 미만입니다"
+    return f"{head} — 보유 방향에 유리합니다"
+
+
 def _headline_text(holding: HoldingView) -> str:
     """보유 종목 한 줄에 붙일 공시 문자열 — 장중에 새로 뜬 것에 `[신규]`를 붙인다.
 
@@ -253,7 +277,14 @@ DEFAULT_EXIT_PROMPT_SECTIONS: Dict[str, str] = {
   현실이 된 것입니다.
 - 아침 전망이 "오전 중 돌파" 같은 시한을 걸었는데, 그 시한이 지나도록 전제가 이뤄지지
   않았고 현재가가 평단 아래에 있다.
-- 아침 시나리오를 무너뜨리는 악재 공시가 떴다 (아래 판단 기준 3).""",
+- 아침 시나리오를 무너뜨리는 악재 공시가 떴다 (아래 판단 기준 3).
+- **지수 ETF(KODEX 200·인버스)는 지수 방향이 곧 시나리오입니다.** 종목 줄에 `지수 방향:`이
+  **"보유 방향에 불리, 0.20% 이상"**으로 적혀 있고 순손익이 마이너스라면 시나리오가 깨진
+  것입니다 — 손실이 단계(-1%, -2%…)를 내려갈수록 이 근거는 강해집니다.
+
+**"지수 상승(하락)에 따른 자연스런 손실", "통상적 변동", "인버스 특성상 어쩔 수 없다"는
+보유 근거가 되지 못합니다.** 지수 ETF의 손실은 언제나 지수가 반대로 움직여서 난 것이고,
+그것이 곧 시나리오가 어긋났다는 뜻입니다.""",
     "time": """## 시간
 15:15가 되면 보유 종목 전체가 강제로 청산됩니다. 남은 시간이 짧을수록 지금 팔지
 않아도 되는 이유(반등을 기다릴 시간)가 줄어든다는 뜻이므로, 남은 시간을 판단에
@@ -328,6 +359,7 @@ def build_exit_user_prompt(
     partial: bool,
     min_peak: float = 0.0,
     user_sells: Optional[List[UserSell]] = None,
+    index_return: Optional[float] = None,
 ) -> str:
     lines = [
         "보유 종목을 종목마다 지금 매도할지 판단하기 위한 현재 상황입니다.",
@@ -349,6 +381,9 @@ def build_exit_user_prompt(
             f"수량 {h.quantity}주, 순손익률 {_pct(h.net_return)}"
         )
         lines.append(f"  되돌림: {_peak_text(h, min_peak)}")
+        index_text = _index_text(h.ticker, index_return)
+        if index_text:
+            lines.append(f"  지수 방향: {index_text}")
         lines.append(f"  아침 목표 매도가: {_sell_target_text(h)}")
         lines.append(f"  아침 근거: {h.reason}")
         lines.append(f"  아침 전망: {h.outlook}")
@@ -422,6 +457,7 @@ class ExitAdvisor:
         partial: bool,
         timeout_seconds: float = 120.0,
         user_sells: Optional[List[UserSell]] = None,
+        index_return: Optional[float] = None,
     ) -> Optional[ExitDecision]:
         """청산 여부를 판단해 돌려준다. 실패하면 None — 호출측은 그 주기에 아무것도 팔지 않는다."""
         user_prompt = build_exit_user_prompt(
@@ -433,6 +469,7 @@ class ExitAdvisor:
             # 고점이 아니면 판단 근거로도 삼지 않는다 (2026-10-01, `_peak_text` 참고)
             self.settings.ai_exit_drawdown_ratio,
             user_sells,
+            index_return,
         )
         logger.info(
             "AI 매도 판단 요청 (exit_prompt_version=%s, 보유 %d종목):\n%s",

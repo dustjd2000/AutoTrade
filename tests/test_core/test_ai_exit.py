@@ -23,6 +23,7 @@ from src.core.etf_exit_trigger import StepTrigger
 from src.core.exit_trace import ExitTrace
 from src.core.runtime import (
     ETF_TAX_RATIO,
+    collect_index_return,
     collect_user_sells,
     maybe_run_ai_exit_cycle,
     run_ai_exit_cycle,
@@ -126,6 +127,7 @@ class SpyAdvisor:
         partial,
         timeout_seconds=120.0,
         user_sells=None,
+        index_return=None,
     ):
         self.threads.append(threading.get_ident())
         self.calls.append(
@@ -135,6 +137,7 @@ class SpyAdvisor:
                 minutes_to_close=minutes_to_close,
                 partial=partial,
                 user_sells=user_sells,
+                index_return=index_return,
             )
         )
         return self.result
@@ -769,7 +772,8 @@ class BoomVersionAdvisor:
         self.result = result
 
     def decide(
-        self, holdings, trace, minutes_to_close, partial, timeout_seconds=120.0, user_sells=None
+        self, holdings, trace, minutes_to_close, partial, timeout_seconds=120.0,
+        user_sells=None, index_return=None,
     ):
         return self.result
 
@@ -857,3 +861,24 @@ def test_cycle_passes_user_sells_to_advisor(monkeypatch):
     asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
 
     assert advisor.calls[0]["user_sells"] is marker
+
+
+def test_collect_index_return_reads_todays_candle_of_kodex_200():
+    candle = {"dt": "20261028", "open_pric": "10000", "cur_prc": "10080"}
+    market_data = SimpleNamespace(get_ohlcv=lambda ticker, base_date=None: [candle])
+    runtime = SimpleNamespace(engine=SimpleNamespace(market_data=market_data))
+
+    assert collect_index_return(runtime, datetime(2026, 10, 28, 10, 0)) == pytest.approx(0.8)
+
+
+def test_collect_index_return_is_none_when_lookup_fails():
+    assert collect_index_return(SimpleNamespace(engine=SimpleNamespace()), IN_WINDOW) is None
+
+
+def test_cycle_passes_index_return_to_advisor(monkeypatch):
+    runtime, engine, advisor = make_runtime(holdings=[holding()], decide_result=None)
+    monkeypatch.setattr("src.core.runtime.collect_index_return", lambda rt, now: 0.8)
+
+    asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
+
+    assert advisor.calls[0]["index_return"] == 0.8

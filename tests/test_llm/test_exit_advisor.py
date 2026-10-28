@@ -599,3 +599,37 @@ def test_user_prompt_says_when_buy_price_of_user_sell_is_unknown():
 
 def test_system_prompt_carries_the_user_sell_rule():
     assert "사용자의 직접 매도" in build_exit_system_prompt()
+
+
+def test_user_prompt_marks_inverse_holding_as_against_when_index_rises():
+    prompt = build_exit_user_prompt(
+        [holding(ticker="114800")], trace_points(), 330, False, index_return=0.8
+    )
+    assert "지수 방향: KODEX 200 시가 대비 +0.80% — **보유 방향에 불리**" in prompt
+
+
+def test_user_prompt_marks_long_holding_as_favorable_when_index_rises():
+    prompt = build_exit_user_prompt(
+        [holding(ticker="069500")], trace_points(), 330, False, index_return=0.8
+    )
+    assert "보유 방향에 유리합니다" in prompt
+
+
+def test_user_prompt_says_small_adverse_move_is_below_the_threshold():
+    prompt = build_exit_user_prompt(
+        [holding(ticker="114800")], trace_points(), 330, False, index_return=0.1
+    )
+    assert "0.20% 미만" in prompt
+
+
+def test_user_prompt_has_no_index_line_for_stocks_or_unknown_index():
+    stock = build_exit_user_prompt([holding()], trace_points(), 330, False, index_return=0.8)
+    unknown = build_exit_user_prompt(
+        [holding(ticker="114800")], trace_points(), 330, False, index_return=None
+    )
+    assert "지수 방향" not in stock and "지수 방향" not in unknown
+
+
+def test_system_prompt_forbids_natural_loss_as_a_reason_to_hold():
+    system = build_exit_system_prompt()
+    assert "자연스런 손실" in system and "보유 근거가 되지 못합니다" in system

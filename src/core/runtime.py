@@ -39,6 +39,7 @@ from src.notification.alert import AlertNotifier
 from src.notification.email import EmailNotifier
 from src.risk.manager import RiskManager
 from src.scheduler.scheduler import TimeScheduler
+from src.strategy import etf_regime
 from src.strategy.etf_regime import ETFRegimeStrategy
 
 logger = logging.getLogger(__name__)
@@ -562,6 +563,21 @@ def collect_user_sells(runtime: Runtime, holdings, now: datetime) -> List[UserSe
         return []
 
 
+def collect_index_return(runtime: Runtime, now: datetime) -> Optional[float]:
+    """오늘 KODEX 200의 시가 대비 수익률(%) — 지수 ETF 보유의 방향 유불리 판단 재료 (프롬프트 v5).
+
+    REST 호출이라 별도 스레드에서 불러야 한다. 실패하면 None — 그 줄만 빠지고 판단은 그대로 돈다.
+    """
+    try:
+        candles = runtime.engine.market_data.get_ohlcv(
+            etf_regime.LONG_ETF[0], base_date=now.date()
+        )
+        return etf_regime.today_return(candles, now.date())
+    except Exception:
+        logger.warning("KODEX 200 오늘 수익률 조회 실패 — 지수 방향 줄을 뺍니다.", exc_info=True)
+        return None
+
+
 async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) -> None:
     """AI 매도 판단 한 사이클을 실행한다 — 궤적에 점을 남기고 종목마다 판정해 매도로 정해진
     종목만 판다.
@@ -641,6 +657,9 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
         user_sells = await asyncio.get_running_loop().run_in_executor(
             None, lambda: collect_user_sells(runtime, holdings, now)
         )
+        index_return = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: collect_index_return(runtime, now)
+        )
         # LLM 호출은 별도 스레드로 넘긴다 — ExitAdvisor.decide는 최대 120초까지 걸릴 수
         # 있어(timeout_seconds), 이벤트 루프에서 그대로 기다리면 그동안 WebSocket PING
         # 응답이 끊기고 실시간 손절 콜백도 멈춘다.
@@ -652,6 +671,7 @@ async def run_ai_exit_cycle(runtime: Runtime, now: Optional[datetime] = None) ->
                 minutes_to_close,
                 partial,
                 user_sells=user_sells,
+                index_return=index_return,
             ),
         )
     except Exception:
