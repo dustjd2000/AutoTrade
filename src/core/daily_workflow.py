@@ -381,7 +381,10 @@ class DailyWorkflow:
             return
 
         signal = etf_regime.regime_signal(list(recent) + list(earlier), today)
-        pick = etf_regime.pick_etf(signal)
+        day_return = etf_regime.today_return(recent, today)
+        pick = etf_regime.pick_etf(signal, day_return)
+        # 신호만으로 정한 방향과 다르면 오늘 장중 흐름 때문에 뒤집힌 것이다
+        flipped = pick is not None and pick != etf_regime.pick_etf(signal)
         if pick is None:
             logger.info("2호 전략: 오늘은 쉽니다 (신호 %s)", "없음" if signal is None else f"{signal:+.3f}%")
             self.strategy.set_recommendations([])
@@ -405,14 +408,23 @@ class DailyWorkflow:
             ticker=pick_ticker,
             name=pick_name,
             target_price=int(price),
-            reason=f"직전 {etf_regime.LOOKBACK_DAYS}거래일 장중 평균 {signal:+.3f}%",
+            reason=(
+                f"직전 {etf_regime.LOOKBACK_DAYS}거래일 장중 평균 {signal:+.3f}%"
+                + (f" — 오늘 KODEX 200 시가 대비 {day_return:+.2f}%라 방향을 뒤집었다" if flipped else "")
+            ),
             recommend_price=price,
             setup=etf_regime.SETUP,
             # AI 매도 판단이 '아침 전망'으로 읽는 칸 — 2호는 가격 전망이 없으므로 무엇이 시나리오인지 적는다
             outlook=(
-                "2호 전략(지수 ETF 국면 추종): 가격 목표 없이 방향만 정했다. 시나리오는 '최근 "
-                f"{etf_regime.LOOKBACK_DAYS}거래일의 장중 흐름이 오늘도 이어진다'이며, 오늘 장중 "
-                "흐름이 그 반대로 뚜렷하게 돌아섰다면 시나리오가 깨진 것이다."
+                (
+                    "2호 전략(지수 ETF 국면 추종): 가격 목표 없이 방향만 정했다. 20일 신호와 반대로 "
+                    f"오늘 KODEX 200이 시가 대비 {day_return:+.2f}% 움직여 오늘 장중 방향을 따라 뒤집었다. "
+                    "시나리오는 '오늘 장중 흐름이 이어진다'이며, 그 흐름이 다시 꺾였다면 시나리오가 깨진 것이다."
+                    if flipped
+                    else "2호 전략(지수 ETF 국면 추종): 가격 목표 없이 방향만 정했다. 시나리오는 '최근 "
+                    f"{etf_regime.LOOKBACK_DAYS}거래일의 장중 흐름이 오늘도 이어진다'이며, 오늘 장중 "
+                    "흐름이 그 반대로 뚜렷하게 돌아섰다면 시나리오가 깨진 것이다."
+                )
             ),
         )
         self.strategy.set_recommendations([recommendation])
@@ -421,8 +433,10 @@ class DailyWorkflow:
         self._set_buy_board(today, board)
         self._watch_plan_prices([pick_ticker])
         logger.info(
-            "2호 전략: %s 매수 결정 (신호 %+.3f%%, 기준가 %s원) — 곧바로 시장가로 삽니다",
-            pick_name, signal, f"{price:,.0f}",
+            "2호 전략: %s 매수 결정 (신호 %+.3f%%, 오늘 %s, 기준가 %s원%s) — 곧바로 시장가로 삽니다",
+            pick_name, signal,
+            "시가 대비 모름" if day_return is None else f"시가 대비 {day_return:+.2f}%",
+            f"{price:,.0f}", ", 방향 뒤집음" if flipped else "",
         )
         self._send_etf_mail(today, signal, recommendation, None)
 

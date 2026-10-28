@@ -29,6 +29,10 @@ SETUP = "etf_regime"
 # 2024~2026에서도 연 -4%였다 (PRD 5.5-C).
 LOOKBACK_DAYS = 20
 MIN_SIGNAL_PERCENT = 0.2
+# 오늘 KODEX 200이 시가 대비 신호의 반대 방향으로 이만큼 움직였으면 방향을 뒤집는다 (2026-10-28).
+# 20일 신호만 보면 장중에 다시 정해도 아침과 같은 답이 나온다 — 10/28 인버스가 -3%를 맞고 팔린 뒤
+# 같은 신호로 인버스를 다시 샀다. 검증된 값이 아니라 신호 문턱과 같은 값을 임시로 쓴다.
+FLIP_PERCENT = 0.2
 
 
 def _candle_day(candle: Dict) -> str:
@@ -75,13 +79,36 @@ def regime_signal(candles: Iterable[Dict], today: date) -> Optional[float]:
     return mean(returns)
 
 
-def pick_etf(signal: Optional[float]) -> Optional[Tuple[str, str]]:
-    """신호로 오늘 살 ETF를 정한다. 문턱 안쪽이거나 신호가 없으면 None(쉼)."""
+def today_return(candles: Iterable[Dict], today: date) -> Optional[float]:
+    """오늘 봉의 시가 대비 현재 수익률(%). 당일 봉이 없거나 시가·현재가가 0이면 None."""
+    today_str = today.strftime("%Y%m%d")
+    for candle in candles:
+        if _candle_day(candle) == today_str:
+            open_price = _price(candle, "open_pric")
+            close_price = _price(candle, "close_pric", "cur_prc")
+            if open_price <= 0 or close_price <= 0:
+                return None
+            return (close_price / open_price - 1) * 100
+    return None
+
+
+def pick_etf(
+    signal: Optional[float], day_return: Optional[float] = None
+) -> Optional[Tuple[str, str]]:
+    """신호로 오늘 살 ETF를 정한다. 문턱 안쪽이거나 신호가 없으면 None(쉼).
+
+    `day_return`(오늘 KODEX 200 시가 대비 %)이 신호와 반대로 `FLIP_PERCENT` 이상 움직였으면
+    방향을 뒤집는다. 신호가 약해 쉬는 날은 뒤집지 않는다 — 뒤집기는 정한 방향을 바꾸는 규칙이다.
+    """
     if signal is None:
         return None
     if signal >= MIN_SIGNAL_PERCENT:
+        if day_return is not None and day_return <= -FLIP_PERCENT:
+            return INVERSE_ETF
         return LONG_ETF
     if signal <= -MIN_SIGNAL_PERCENT:
+        if day_return is not None and day_return >= FLIP_PERCENT:
+            return LONG_ETF
         return INVERSE_ETF
     return None
 

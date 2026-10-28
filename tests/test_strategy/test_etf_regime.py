@@ -1,5 +1,7 @@
 from datetime import date, timedelta
 
+import pytest
+
 from src.strategy import etf_regime
 from src.strategy.etf_regime import (
     INVERSE_ETF,
@@ -9,6 +11,7 @@ from src.strategy.etf_regime import (
     intraday_returns,
     pick_etf,
     regime_signal,
+    today_return,
     traded_today,
 )
 from src.strategy.base import StockRecommendation
@@ -100,3 +103,25 @@ def test_strategy_invests_the_whole_ratio_in_one_etf():
 
 def test_etf_tickers_are_the_two_etfs():
     assert etf_regime.ETF_TICKERS == ("069500", "114800")
+
+
+def test_pick_etf_flips_when_today_moves_against_the_signal():
+    assert pick_etf(-0.6, day_return=0.3) == LONG_ETF       # 인버스 신호인데 오늘 지수가 올랐다
+    assert pick_etf(0.6, day_return=-0.3) == INVERSE_ETF    # 반대도 같다
+    assert pick_etf(-0.6, day_return=0.19) == INVERSE_ETF   # 문턱 안쪽이면 그대로
+    assert pick_etf(-0.6, day_return=-0.5) == INVERSE_ETF   # 같은 방향이면 그대로
+    assert pick_etf(-0.6, day_return=None) == INVERSE_ETF   # 오늘 값을 모르면 신호대로
+
+
+def test_pick_etf_does_not_flip_a_resting_day():
+    assert pick_etf(0.1, day_return=-1.0) is None
+    assert pick_etf(None, day_return=1.0) is None
+
+
+def test_today_return_reads_open_to_current_of_todays_candle():
+    candles = [candle(TODAY, 10000, 10050), candle(TODAY - timedelta(days=1), 10000, 9000)]
+    assert today_return(candles, TODAY) == pytest.approx(0.5)
+
+
+def test_today_return_is_none_without_todays_candle():
+    assert today_return([candle(TODAY - timedelta(days=1), 10000, 9000)], TODAY) is None

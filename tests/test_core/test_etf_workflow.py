@@ -133,6 +133,18 @@ def test_falling_regime_buys_the_inverse_etf():
     assert [r.ticker for r in t.strategy._recommendations] == [INVERSE_ETF[0]]
 
 
+def test_inverse_signal_flips_to_long_when_the_index_is_up_today():
+    """10/28 — 인버스가 -3% 맞은 날 같은 신호로 인버스를 다시 샀다. 오늘 지수가 올랐으면 뒤집는다."""
+    rows = candles(-0.5)
+    rows[0]["close_pric"] = "10050"  # 오늘 시가 대비 +0.5%
+
+    t = make_workflow(rows)
+    t.workflow.recommend_and_notify(today=TODAY)
+
+    assert [r.ticker for r in t.strategy._recommendations] == [LONG_ETF[0]]
+    assert "뒤집었다" in t.strategy._recommendations[0].reason
+
+
 def test_signal_reads_two_queries_so_twenty_past_days_are_available():
     """한 번 조회가 20거래일치라 당일 봉이 섞이면 19개뿐이다 — 기준일을 하루 당긴 조회를 함께 한다."""
     t = make_workflow(candles(0.5))
