@@ -335,3 +335,46 @@ def test_get_intraday_investor_flow_returns_empty_on_unexpected_shape():
     client = make_client({"return_code": 0})
 
     assert client.get_intraday_investor_flow("005930") == []
+
+
+def test_get_minute_candles_pages_until_since(monkeypatch):
+    from src.api import market_data as module
+
+    monkeypatch.setattr(module.time, "sleep", lambda s: None)
+    pages = [
+        ({"stk_min_pole_chart_qry": [
+            {"cntr_tm": "20261029090100", "cur_prc": "+101"},
+            {"cntr_tm": "20261029090000", "cur_prc": "-100"},
+        ]}, {"cont-yn": "Y", "next-key": "k1"}),
+        ({"stk_min_pole_chart_qry": [
+            {"cntr_tm": "20261028153000", "cur_prc": "99"},
+            {"cntr_tm": "20261027153000", "cur_prc": "98"},
+        ]}, {"cont-yn": "Y", "next-key": "k2"}),
+    ]
+    calls = []
+
+    def request(path, api_id, params, cont_yn="N", next_key=""):
+        calls.append((api_id, params, cont_yn, next_key))
+        return pages[len(calls) - 1]
+
+    client = MarketDataClient.__new__(MarketDataClient)
+    client._client = SimpleNamespace(request=request)
+
+    bars = client.get_minute_candles("069500", since="20261028")
+
+    assert bars == {"20261029": [("0900", 100.0), ("0901", 101.0)], "20261028": [("1530", 99.0)]}
+    assert len(calls) == 2                       # 27일이 나와 멈췄다
+    assert calls[0] == ("ka10080", {"stk_cd": "069500", "tic_scope": "1", "upd_stkpc_tp": "1"}, "N", "")
+    assert calls[1][2:] == ("Y", "k1")
+
+
+def test_get_minute_candles_stops_when_no_more_pages(monkeypatch):
+    from src.api import market_data as module
+
+    monkeypatch.setattr(module.time, "sleep", lambda s: None)
+    client = MarketDataClient.__new__(MarketDataClient)
+    client._client = SimpleNamespace(request=lambda *a, **kw: (
+        {"stk_min_pole_chart_qry": [{"cntr_tm": "20261029090000", "cur_prc": "100"}]}, {"cont-yn": "N"}
+    ))
+
+    assert client.get_minute_candles("069500") == {"20261029": [("0900", 100.0)]}

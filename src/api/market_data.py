@@ -1,7 +1,8 @@
 import logging
+import time
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from config.settings import Settings
 from src.api.auth import AuthClient
@@ -84,6 +85,10 @@ STOCK_INFO_API_ID = "ka10001"   # 주식기본정보요청
 ORDERBOOK_API_ID = "ka10004"    # 주식호가요청
 DAILY_PRICE_API_ID = "ka10086"  # 일별주가요청
 INTRADAY_INVESTOR_API_ID = "ka10064"  # 장중투자자별매매차트요청
+MINUTE_CHART_API_ID = "ka10080"  # 주식분봉차트조회요청 — 규칙 자동 평가용 1분봉
+# 연속조회 사이 쉬는 시간과 안전 상한. 한 페이지가 약 900봉(2.4거래일)이라 400페이지면 약 13개월이다.
+MINUTE_PAGE_PAUSE_SECONDS = 0.4
+MINUTE_MAX_PAGES = 400
 
 STOCK_INFO_PATH = "/api/dostk/stkinfo"
 MARKET_PATH = "/api/dostk/mrkcond"
@@ -192,6 +197,45 @@ class MarketDataClient:
 
         logger.error("일별주가 응답에서 목록 필드를 찾지 못했습니다. 응답 키: %s", list(data.keys()))
         return []
+
+    def get_minute_candles(
+        self, ticker: str, since: Optional[str] = None
+    ) -> Dict[str, List[Tuple[str, float]]]:
+        """1분봉을 최신부터 거꾸로 받아 {YYYYMMDD: [(HHMM, 종가), ...]}로 돌려준다 (스펙 2026-10-29 5.1).
+
+        `since`(YYYYMMDD)보다 이전 날짜가 나오면 멈추고 `since` 이후 날짜만 담는다. None이면
+        키움이 주는 만큼(약 13개월) 받는다. 2026-10-29 세션에서 확인한 요청 모양이다.
+        """
+        days: Dict[str, Dict[str, float]] = {}
+        cont_yn, next_key = "N", ""
+        for _ in range(MINUTE_MAX_PAGES):
+            data, headers = self._client.request(
+                CHART_PATH,
+                MINUTE_CHART_API_ID,
+                {"stk_cd": ticker, "tic_scope": "1", "upd_stkpc_tp": "1"},
+                cont_yn=cont_yn,
+                next_key=next_key,
+            )
+            rows = data.get("stk_min_pole_chart_qry") or []
+            reached = False
+            for row in rows:
+                stamp = str(row.get("cntr_tm", "")).strip()
+                if len(stamp) < 12:
+                    continue
+                day, hhmm = stamp[:8], stamp[8:12]
+                if since is not None and day < since:
+                    reached = True
+                    continue
+                # 키움은 가격에 등락 방향 부호를 붙여 보낸다
+                price = abs(to_float(row.get("cur_prc")))
+                if price > 0:
+                    days.setdefault(day, {})[hhmm] = price
+            cont_yn = headers.get("cont-yn", "N")
+            next_key = headers.get("next-key", "")
+            if reached or cont_yn != "Y" or not rows:
+                break
+            time.sleep(MINUTE_PAGE_PAUSE_SECONDS)
+        return {day: sorted(bars.items()) for day, bars in days.items()}
 
     def get_previous_day_metrics(
         self, ticker: str, today: Optional[date] = None
