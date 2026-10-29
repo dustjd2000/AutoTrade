@@ -122,3 +122,24 @@ def test_alert_mail_has_subject_and_error_and_never_raises(monkeypatch):
 
     monkeypatch.setattr(main_window, "EmailNotifier", explode)
     main_window.send_restart_failure_alert("x")  # 예외 없이 끝나야 한다
+
+
+def test_failure_after_started_ok_still_alerts(monkeypatch):
+    """실제 순서: started_ok는 엔진 시작(토큰 발급) 전에 나가므로 그 신호로는 플래그를 지우지 않는다."""
+    sent = []
+    monkeypatch.setattr(main_window, "send_restart_failure_alert", sent.append)
+    fake = make_window(FakeThread())
+    fake._on_action_finished("evaluate_rules", True, "")
+    # started_ok에는 플래그를 건드리는 핸들러가 연결돼 있지 않다 — 곧바로 실패가 온다
+    fake._on_engine_failed("token error")
+    assert sent == ["token error"]
+
+
+def test_failure_after_engine_ready_does_not_alert(monkeypatch):
+    sent = []
+    monkeypatch.setattr(main_window, "send_restart_failure_alert", sent.append)
+    fake = make_window(FakeThread())
+    fake._on_action_finished("evaluate_rules", True, "")
+    fake._clear_rule_restart_check()  # engine_ready
+    fake._on_engine_failed("died days later")
+    assert sent == []

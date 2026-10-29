@@ -1507,7 +1507,7 @@ class MainWindow(QMainWindow):
 
         thread = EngineThread(settings, parent=self)
         thread.started_ok.connect(lambda: self._set_engine_running(True))
-        thread.started_ok.connect(self._clear_rule_restart_check)
+        thread.engine_ready.connect(self._clear_rule_restart_check)
         thread.failed.connect(self._on_engine_failed)
         thread.finished_run.connect(self._on_engine_finished)
         thread.action_started.connect(self._on_action_started)

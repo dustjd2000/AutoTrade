@@ -180,6 +180,8 @@ class Runtime:
     etf_exit_trigger: StepTrigger = field(default_factory=StepTrigger)
     # 2호 규칙 자동 검증 — 15:45 분봉 수집, 금요일 16:00 평가·자동 적용
     research: Optional[RuleTuning] = None
+    # 엔진이 실제로 시작된 직후(토큰·계좌 조회 성공 뒤)에 부르는 알림 — UI가 '재시작 성공'을 판단한다
+    on_ready: Optional[Callable[[], None]] = None
 
 
 # 손절 판정(순손익률)에 넣을 매도세율 — 2호 전략은 지수 ETF만 사고, 국내 주식형 ETF는
@@ -848,6 +850,11 @@ async def run(runtime: Runtime) -> None:
     runtime.engine.start()
     # 구독은 연결 전에 걸어도 된다 — WebSocketClient.connect가 접속 직후 복구해 보낸다
     adopt_carried_over_positions(runtime)
+    if runtime.on_ready is not None:
+        try:
+            runtime.on_ready()
+        except Exception:
+            logger.exception("엔진 준비 알림 콜백 실패 — 무시하고 계속합니다.")
     runner_task = asyncio.create_task(runtime.runner.run())
     watchdog = asyncio.create_task(watch_quote_stall(runtime))
     closeout_watch = asyncio.create_task(watch_closeout_report(runtime))

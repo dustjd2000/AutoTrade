@@ -25,6 +25,7 @@ class EngineThread(QThread):
     """매매 엔진 스레드. 시작 성공/실패와 종료를 시그널로 알린다."""
 
     started_ok = pyqtSignal()
+    engine_ready = pyqtSignal()                     # 엔진이 실제로 시작된 뒤 (started_ok는 그보다 먼저 나간다)
     failed = pyqtSignal(str)
     finished_run = pyqtSignal()
     action_started = pyqtSignal(str)                # action key
@@ -45,6 +46,7 @@ class EngineThread(QThread):
             # 스케줄 실행과 버튼 실행이 같은 통로를 타므로, 자동 실행 상태도 UI에 그대로 뜬다
             self._runtime.runner.on_started = self.action_started.emit
             self._runtime.runner.on_finished = self.action_finished.emit
+            self._runtime.on_ready = self.engine_ready.emit
             self.started_ok.emit()
             loop.run_until_complete(runtime_module.run(self._runtime))
         except Exception as e:

@@ -66,3 +66,36 @@ def test_register_jobs_wires_rule_jobs_with_the_friday_guard(monkeypatch):
     FixedNow.current = FixedNow(2026, 10, 30, 16, 0)  # 금요일
     evaluate()
     assert submitted == ["evaluate_rules"]
+
+
+def test_run_calls_on_ready_after_engine_start(monkeypatch):
+    import asyncio
+
+    order = []
+
+    async def noop(_runtime):
+        pass
+
+    for name in ("watch_quote_stall", "watch_closeout_report", "watch_buy_result", "watch_cash_refresh", "watch_ai_exit"):
+        monkeypatch.setattr(runtime, name, noop)
+    monkeypatch.setattr(runtime, "adopt_carried_over_positions", lambda rt: order.append("adopt"))
+    monkeypatch.setattr(runtime, "request_stop", lambda rt: None)
+
+    async def idle():
+        pass
+
+    async def disconnect():
+        pass
+
+    rt = SimpleNamespace(
+        engine=SimpleNamespace(start=lambda: order.append("start")),
+        runner=SimpleNamespace(run=idle),
+        ws_client=SimpleNamespace(connect=idle, disconnect=disconnect),
+        scheduler=SimpleNamespace(run=idle),
+        on_ready=lambda: order.append("ready"),
+    )
+    asyncio.run(runtime.run(rt))
+    assert order == ["start", "adopt", "ready"]
+
+    rt.on_ready = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    asyncio.run(runtime.run(rt))  # 콜백 예외가 엔진을 깨지 않는다
