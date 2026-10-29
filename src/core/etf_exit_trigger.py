@@ -1,8 +1,8 @@
 """2호 전략의 AI 매도 판단 트리거 — 순손익률이 일정 폭 단계를 새로 넘을 때마다 (PRD 5.5-C '매도 판단').
 
 1호는 15분 주기로 묻는다. 2호는 주기 없이, 종목 순손익률이 **+0.5%·+1%·+1.5%…**(이익 쪽 새 고점)
-또는 **-0.5%·-1%·-1.5%…**(손실 쪽 새 저점)에 처음 닿을 때만 묻는다 (사용자 결정 2026-10-23,
-단계 1%p → 0.5%p는 2026-10-29).
+또는 **-0.5%·-1%·-1.5%…**(손실 쪽 새 저점)에 처음 닿을 때, 그리고 이익 고점에서 단계를 새로
+내려올 때(0단계까지)만 묻는다 (사용자 결정 2026-10-23, 단계 1%p → 0.5%p와 하락 단계 추가는 2026-10-29).
 단계 폭은 `.env`의 `AI_EXIT_STEP_PERCENT`(UI 'AI 판단 단계')로 바꾼다 — 아래 예시는 기본값 0.5 기준이다.
 같은 단계 안에 머무는 동안은 다시 묻지 않는다 — 30초 폴링마다 LLM을 부르지 않게 하는 장치다.
 """
@@ -26,12 +26,16 @@ def step_of(net_return: float, step_percent: float = STEP_PERCENT) -> int:
 
 
 class StepTrigger:
-    """종목별로 이미 물어본 가장 높은 이익 단계와 가장 낮은 손실 단계를 기억한다. 날이 바뀌면 비운다."""
+    """종목별로 이미 물어본 가장 높은 이익 단계·가장 낮은 손실 단계·고점에서 내려온 바닥 단계를 기억한다.
+
+    바닥(floor)은 마지막 새 고점 이후 내려온 가장 낮은 단계다. 새 고점이 나오면 그 고점으로 되돌리고,
+    이익 고점에서 내려오는 동안에는 바닥을 새로 낮출 때만(0단계 포함) 묻는다. 날이 바뀌면 비운다.
+    """
 
     def __init__(self, step_percent: float = STEP_PERCENT) -> None:
         self.step_percent = step_percent
         self._day: Optional[date] = None
-        self._fired: Dict[str, Tuple[int, int]] = {}   # ticker → (최고 이익 단계, 최저 손실 단계)
+        self._fired: Dict[str, Tuple[int, int, int]] = {}   # ticker → (최고 이익 단계, 최저 손실 단계, 하락 바닥)
         self.count = 0
 
     def _roll(self, today: date) -> None:
@@ -41,19 +45,25 @@ class StepTrigger:
             self.count = 0
 
     def crossed(self, ticker: str, net_return: float, today: date) -> Optional[int]:
-        """새 단계에 처음 닿았으면 그 단계를, 아니면 None. 닿은 단계는 기록한다."""
+        """새 단계에 처음 닿았으면 그 단계를, 아니면 None. 닿은 단계는 기록한다.
+
+        새 이익 고점·새 손실 저점 외에, 이익 고점(+단계)을 찍은 뒤 0 이상 구간에서 단계를 새로
+        내려올 때도 묻는다(2026-10-29 — 고점에서 이익이 녹는 동안 호출이 없었다). 0단계는
+        이 하락 규칙으로만 나온다.
+        """
         self._roll(today)
         if self.count >= MAX_TRIGGERS_PER_DAY:
             return None
         step = step_of(net_return, self.step_percent)
-        if step == 0:
-            return None
-        high, low = self._fired.get(ticker, (0, 0))
+        high, low, floor = self._fired.get(ticker, (0, 0, 0))
         if step > high:
-            self._fired[ticker] = (step, low)
-        elif step < low:
-            self._fired[ticker] = (high, step)
+            high, floor = step, step
+        elif step < low and step < 0:
+            low, floor = step, min(floor, step)
+        elif high > 0 and 0 <= step < floor:
+            floor = step
         else:
             return None
+        self._fired[ticker] = (high, low, floor)
         self.count += 1
         return step

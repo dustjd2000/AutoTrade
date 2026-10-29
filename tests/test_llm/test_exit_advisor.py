@@ -260,11 +260,16 @@ def test_prompt_says_so_when_now_is_the_peak():
     assert "지금이 당일 고점입니다" in prompt
 
 
-def test_system_prompt_makes_a_big_giveback_a_sell_reason():
+def test_system_prompt_has_no_giveback_threshold_and_bans_index_direction_as_hold_reason():
+    """v6 (2026-10-29) — "절반 미만 반납"·"지수 방향 유리"는 보유 근거가 아니다."""
     system = build_exit_system_prompt()
 
-    assert "고점 이익의 절반 이상을 반납했다면 그것" in system
-    assert "여전히 플러스" in system
+    assert EXIT_PROMPT_TEMPLATE_VERSION == "v6"
+    assert "절반 이상을 반납했다면 그것 자체가 매도 근거" not in system
+    assert "문턱은 없습니다" in system
+    assert "반납이 아직 절반 미만" in system
+    assert "지수(보유) 방향이 아직 유리하다" in system
+    assert "확정하는 쪽을 먼저 검토" in system
 
 
 # ── 최소 고점 요건 (2026-10-01) ─────────────────────────────

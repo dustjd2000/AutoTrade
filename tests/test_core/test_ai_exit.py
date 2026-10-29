@@ -223,6 +223,17 @@ def test_etf_strategy_asks_again_only_at_the_next_step():
     assert len(advisor.calls) == 2
 
 
+def test_etf_strategy_asks_again_when_profit_falls_a_step_from_the_peak():
+    """2026-10-29 — 고점에서 이익이 녹는 동안 새 고점이 아니라서 한 번도 묻지 않았다."""
+    runtime, engine, advisor, state = etf_runtime(0.0156)  # +1.5% 단계
+    last = asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW, None))
+    state["ret"] = 0.0126                                  # +1.0% 단계로 하락 — 다시 묻는다
+    last = asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW + timedelta(seconds=30), last))
+    state["ret"] = 0.0121                                  # 같은 단계 — 묻지 않는다
+    asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW + timedelta(seconds=60), last))
+    assert len(advisor.calls) == 2
+
+
 def test_etf_strategy_ignores_the_period_but_respects_the_checkbox():
     """주기가 지나도 단계가 없으면 묻지 않고, 체크박스를 끄면 단계가 넘어도 묻지 않는다."""
     runtime, engine, advisor, _ = etf_runtime(0.0)

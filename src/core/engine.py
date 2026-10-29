@@ -857,8 +857,7 @@ class TradingEngine:
             if retracement is None:
                 continue
             logger.warning(
-                "이익 반납: %s 당일 고점 %+.2f%% → 현재 %+.2f%% (%.2f%%p 반납, 고점 이익의 %.0f%%) "
-                "— AI 매도 판단을 앞당깁니다.",
+                "이익 반납: %s 당일 고점 %+.2f%% → 현재 %+.2f%% (%.2f%%p 반납, 고점 이익의 %.0f%%)",
                 ticker,
                 retracement.peak * 100,
                 retracement.current * 100,
