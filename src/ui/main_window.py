@@ -1633,6 +1633,17 @@ class MainWindow(QMainWindow):
             self._statusbar.showMessage(f"실행 실패: {label} — {message}", 8000)
         # 엔진이 계속 돌고 있다면 버튼을 다시 열어준다
         self._set_actions_enabled(self._engine_thread is not None)
+        # 금요일 규칙 평가가 .env를 바꿨다 — 화면 값을 먼저 다시 읽어야 재시작 때의 '설정 저장'이
+        # 옛 손절값으로 덮어쓰지 않는다 (_start_engine이 화면 값을 .env에 저장한다)
+        if (
+            action == "evaluate_rules"
+            and ok
+            and self._engine_thread is not None
+            and self._engine_thread.consume_rule_change()
+        ):
+            logger.warning("2호 규칙이 자동으로 바뀌었습니다 — 설정을 다시 읽고 엔진을 재시작합니다.")
+            self._load_settings()
+            self._restart_engine()
 
     def _on_engine_failed(self, message: str) -> None:
         logger.error("엔진 오류: %s", message)

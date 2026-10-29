@@ -69,6 +69,9 @@ SCHEDULED_ACTIONS: Dict[str, str] = {
     # 매도 프롬프트 자동 수정은 이 검증 안에서 돈다 — 수정 여부를 검증 메일에 싣기 위해서다
     # (2026-10-29 2호용으로 복구, PRD 5.14·5.15)
     "review_exits": "매도 판단 검증·프롬프트 자동 수정 (스케줄)",
+    # 2호 규칙 자동 검증 (2026-10-29 스펙) — 매일 분봉을 쌓고 금요일에 평가·자동 적용한다
+    "collect_minute_bars": "1분봉 수집 (스케줄)",
+    "evaluate_rules": "2호 규칙 주간 평가·자동 적용 (스케줄)",
 }
 
 ACTION_LABELS: Dict[str, str] = {**MANUAL_ACTIONS, **SCHEDULED_ACTIONS}
@@ -168,6 +171,13 @@ def manual_steps(runtime, action: str, tickers: Iterable[str] = ()) -> List[Manu
         # 체결 동기화·LLM 호출·프롬프트 파일 쓰기가 걸리므로 루프 스레드를 쓰지 않는다.
         "review_exits": lambda: [
             ManualStep(SCHEDULED_ACTIONS["review_exits"], runtime.workflow.review_exits)
+        ],
+        # 연속조회·백테스트 계산이 길어 루프 스레드를 쓰지 않는다 (WebSocket PING 응답 유지)
+        "collect_minute_bars": lambda: [
+            ManualStep(SCHEDULED_ACTIONS["collect_minute_bars"], runtime.research.collect_minute_bars)
+        ],
+        "evaluate_rules": lambda: [
+            ManualStep(SCHEDULED_ACTIONS["evaluate_rules"], runtime.research.evaluate_rules)
         ],
     }
     # 일괄 실행은 '진입'까지만 — 청산과 리포트는 스케줄에 맡긴다.

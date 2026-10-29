@@ -113,6 +113,14 @@ class EngineThread(QThread):
             return None
         return runtime.engine.cash_snapshot()
 
+    def consume_rule_change(self) -> bool:
+        """금요일 규칙 평가가 `.env`를 바꿨으면 한 번만 True — UI가 설정을 다시 읽고 엔진을 재시작한다."""
+        research = getattr(self._runtime, "research", None)
+        if research is None or not research.applied_pending:
+            return False
+        research.applied_pending = False
+        return True
+
     def set_exit_flags(self, ai_exit: bool, stop_loss: bool) -> bool:
         """AI 매도 판단·손절 적용 여부를 돌고 있는 엔진에 바로 반영한다. 반영했으면 True.
 

@@ -8,6 +8,7 @@ import inspect
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, time as dt_time
+from pathlib import Path
 from typing import Callable, List, Optional
 
 from config.settings import Settings
@@ -39,10 +40,12 @@ from src.llm.exit_tuner import ExitPromptTuner
 from src.logger.trade_store import AIExitDecisionRow, TradeStore
 from src.notification.alert import AlertNotifier
 from src.notification.email import EmailNotifier
+from src.research.rule_tuning import RuleTuning
 from src.risk.manager import RiskManager
 from src.scheduler.scheduler import TimeScheduler
 from src.strategy import etf_regime
 from src.strategy.etf_regime import ETFRegimeStrategy
+from src.ui.env_store import save_env
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +65,13 @@ REPORT_TIME = dt_time(15, 35)       # 일일/월간 성과 리포트 이메일 (
 # 매도 판단 검증·매도 프롬프트 자동 수정 — 리포트 다음이다. 마감 동시호가 체결분까지 체결내역에
 # 잡힌 뒤라야 순손익을 제대로 대조한다 (PRD 5.14). 같은 큐를 타므로 리포트와 겹치면 순서대로 돈다.
 REVIEW_EXITS_TIME = dt_time(15, 40)
+# 2호 규칙 자동 검증 (docs/superpowers/specs/2026-10-29-rule-auto-tuning-design.md).
+# 분봉 수집은 매도 검증 뒤, 평가는 금요일 장 마감 뒤 — 15:15 강제청산 뒤라 적용 시점에 보유 종목이 없다.
+MINUTE_COLLECT_TIME = dt_time(15, 45)
+RULE_EVAL_TIME = dt_time(16, 0)
+RULE_EVAL_WEEKDAY = 4  # 금요일
+# 자동 적용이 쓰는 .env — UI(`main_window.ENV_PATH`)와 같은 파일이다
+ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 # 시세 끊김 감시 — 손절이 실시간 시세에만 의존하므로(키움 REST 스탑오더 미지원),
 # 보유 종목이 있는데 시세가 끊기면 손절이 조용히 멈춘다. 그 공백을 알린다.
@@ -144,6 +154,16 @@ def _trading_days_only(job, name: str):
     return guarded
 
 
+def _on_weekday(weekday: int, job: Callable[[], None], now_fn=datetime.now) -> Callable[[], None]:
+    """정한 요일에만 작업을 넘긴다 — 스케줄러는 매일 발동하므로 주간 작업은 여기서 거른다."""
+
+    def guarded() -> None:
+        if now_fn().weekday() == weekday:
+            job()
+
+    return guarded
+
+
 @dataclass
 class Runtime:
     settings: Settings
@@ -158,6 +178,8 @@ class Runtime:
     runner: Optional[ActionRunner] = None
     # AI 매도 판단 트리거 — 순손익률이 설정 폭(`AI_EXIT_STEP_PERCENT`)의 단계를 새로 넘을 때 묻는다 (PRD 5.5-C '매도 판단')
     etf_exit_trigger: StepTrigger = field(default_factory=StepTrigger)
+    # 2호 규칙 자동 검증 — 15:45 분봉 수집, 금요일 16:00 평가·자동 적용
+    research: Optional[RuleTuning] = None
 
 
 # 손절 판정(순손익률)에 넣을 매도세율 — 2호 전략은 지수 ETF만 사고, 국내 주식형 ETF는
@@ -240,6 +262,14 @@ def build_runtime(settings: Settings) -> Runtime:
         etf_exit_trigger=StepTrigger(settings.ai_exit_step_percent),
     )
     runtime.runner = ActionRunner(runtime)
+    runtime.research = RuleTuning(
+        settings=settings,
+        market_data=market_data,
+        trade_store=trade_store,
+        email=email,
+        env_writer=lambda values: save_env(ENV_PATH, values),
+        open_tickers=lambda: engine.open_tickers,
+    )
 
     for trigger_time, action in (
         (DAILY_RESET_TIME, "daily_reset"),
@@ -249,12 +279,20 @@ def build_runtime(settings: Settings) -> Runtime:
         (FORCE_CLOSE_TIME, "close_out"),
         (REPORT_TIME, "daily_report"),
         (REVIEW_EXITS_TIME, "review_exits"),
+        (MINUTE_COLLECT_TIME, "collect_minute_bars"),
     ):
         scheduler.add_job(
             trigger_time,
             _trading_days_only(_submit(runtime, action), action),
             name=action,
         )
+    scheduler.add_job(
+        RULE_EVAL_TIME,
+        _trading_days_only(
+            _on_weekday(RULE_EVAL_WEEKDAY, _submit(runtime, "evaluate_rules")), "evaluate_rules"
+        ),
+        name="evaluate_rules",
+    )
 
     return runtime
 

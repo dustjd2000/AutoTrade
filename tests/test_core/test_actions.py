@@ -30,7 +30,11 @@ def make_runtime(calls):
         ),
         reset_for_new_day=lambda: calls.append("daily_reset"),
     )
-    return SimpleNamespace(workflow=workflow, engine=engine)
+    research = SimpleNamespace(
+        collect_minute_bars=lambda: calls.append("collect_minute_bars"),
+        evaluate_rules=lambda: calls.append("evaluate_rules"),
+    )
+    return SimpleNamespace(workflow=workflow, engine=engine, research=research)
 
 
 # ── 스케줄 전용 액션 ────────────────────────────────────────
