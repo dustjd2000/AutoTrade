@@ -92,6 +92,25 @@ CREATE TABLE IF NOT EXISTS exit_reviews (
 );
 """
 
+# 금요일 규칙 자동 평가 기록 — 하루 한 줄 (스펙 2026-10-29 5.5). 연속·휴지 판정의 재료다.
+RULE_EVALUATION_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS rule_evaluations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
+    current_rule TEXT NOT NULL DEFAULT '',
+    best_rule TEXT NOT NULL DEFAULT '',
+    select_current REAL,
+    select_best REAL,
+    test_current REAL,
+    test_best REAL,
+    beats INTEGER NOT NULL DEFAULT 0,
+    positive INTEGER NOT NULL DEFAULT 0,
+    applied INTEGER NOT NULL DEFAULT 0,
+    note TEXT NOT NULL DEFAULT ''
+)
+"""
+
 # 부분체결도 실제 매매이므로 집계에 포함한다
 FILLED_STATUSES = (OrderStatus.FILLED.value, OrderStatus.PARTIALLY_FILLED.value)
 
@@ -223,6 +242,24 @@ class AIExitDecisionRow:
 
 
 @dataclass
+class RuleEvaluationRow:
+    """금요일 규칙 자동 평가 한 번의 기록 (스펙 2026-10-29 5.5). 규칙은 `Rule.to_json()` 문자열이다."""
+
+    day: date
+    status: str
+    current_rule: str = ""
+    best_rule: str = ""
+    select_current: Optional[float] = None
+    select_best: Optional[float] = None
+    test_current: Optional[float] = None
+    test_best: Optional[float] = None
+    beats: bool = False
+    positive: bool = False
+    applied: bool = False
+    note: str = ""
+
+
+@dataclass
 class ExitReviewRow:
     """매도 판단 검증 한 줄 — 그날 매도한 종목 하나의 순손익과 분류 (스펙 2026-09-22 3.2).
 
@@ -268,6 +305,7 @@ class TradeStore:
             conn.execute(AI_EXIT_DECISION_SCHEMA_SQL)
             conn.execute(POSITION_PEAK_SCHEMA_SQL)
             conn.execute(EXIT_REVIEW_SCHEMA_SQL)
+            conn.execute(RULE_EVALUATION_SCHEMA_SQL)
             self._migrate(conn, "trades", MIGRATIONS)
             conn.commit()
 
@@ -574,6 +612,44 @@ class TradeStore:
         for row in rows:
             reasons[row["ticker"]] = row["exit_reason"] or ""
         return reasons
+
+    def save_rule_evaluation(self, row: RuleEvaluationRow) -> None:
+        """평가 기록을 남긴다. 같은 날은 덮어쓴다 — 적용 여부를 정한 뒤 같은 줄을 다시 쓴다."""
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO rule_evaluations
+                   (day, status, current_rule, best_rule, select_current, select_best,
+                    test_current, test_best, beats, positive, applied, note)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    row.day.isoformat(), row.status, row.current_rule, row.best_rule,
+                    row.select_current, row.select_best, row.test_current, row.test_best,
+                    int(row.beats), int(row.positive), int(row.applied), row.note,
+                ),
+            )
+            conn.commit()
+
+    def rule_evaluations(self) -> List[RuleEvaluationRow]:
+        """평가 기록 전체 (오래된 것부터) — 연속·휴지 판정의 재료다."""
+        with closing(self._connect()) as conn:
+            records = conn.execute("SELECT * FROM rule_evaluations ORDER BY day").fetchall()
+        return [
+            RuleEvaluationRow(
+                day=date.fromisoformat(r["day"]),
+                status=r["status"],
+                current_rule=r["current_rule"],
+                best_rule=r["best_rule"],
+                select_current=r["select_current"],
+                select_best=r["select_best"],
+                test_current=r["test_current"],
+                test_best=r["test_best"],
+                beats=bool(r["beats"]),
+                positive=bool(r["positive"]),
+                applied=bool(r["applied"]),
+                note=r["note"],
+            )
+            for r in records
+        ]
 
     def save_exit_review(self, row: ExitReviewRow) -> None:
         """검증 한 줄을 남긴다. 같은 날 같은 종목은 덮어쓴다 (검증을 다시 돌려도 한 줄)."""

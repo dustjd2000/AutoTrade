@@ -484,3 +484,44 @@ def test_exit_prompt_tuning_email_shows_versions_reason_and_diff():
     assert "v6: 5건" in body
     assert "예전 내용" in body and "새 내용" in body
     assert "data/exit_prompt/history/v6/" in body
+
+
+from src.research.backtest import Rule as _Rule
+from src.logger.trade_store import RuleEvaluationRow as _RuleEvaluationRow
+
+
+def test_rule_evaluation_email_reports_conditions():
+    row = _RuleEvaluationRow(
+        day=date(2026, 11, 6), status="evaluated",
+        current_rule=_Rule(0.0, True, "09:10", 2.0).to_json(),
+        best_rule=_Rule(0.2, False, "09:10", 2.0).to_json(),
+        select_current=-0.3, select_best=0.2, test_current=-0.1, test_best=0.09,
+        beats=True, positive=True,
+    )
+    subject, body = templates.rule_evaluation_email(row, streak=2, cooldown=0)
+
+    assert "주간 평가" in subject
+    assert "문턱 0.2% / 뒤집기 끔 / 결정 09:10 / 손절 2%" in body
+    assert "2/4" in body
+    assert "+0.090%" in body
+
+
+def test_rule_evaluation_email_for_an_applied_change():
+    row = _RuleEvaluationRow(day=date(2026, 11, 27), status="evaluated",
+                             current_rule=_Rule(0.0, True, "09:10", 2.0).to_json(),
+                             best_rule=_Rule(0.2, False, "09:10", 2.0).to_json(),
+                             select_current=0.0, select_best=0.2, test_current=0.0, test_best=0.1,
+                             beats=True, positive=True, applied=True, note="자동 적용")
+    subject, body = templates.rule_evaluation_email(
+        row, streak=4, cooldown=0, applied_values={"ETF_FLIP_ENABLED": ("1", "0")}
+    )
+
+    assert "자동 변경" in subject
+    assert "ETF_FLIP_ENABLED: 1 → 0" in body
+
+
+def test_rule_evaluation_email_when_not_evaluated():
+    row = _RuleEvaluationRow(day=date(2026, 10, 30), status="insufficient_data",
+                             current_rule=_Rule(0.0, True, "09:10", 2.0).to_json(), note="거래일 100일 < 120일")
+    subject, body = templates.rule_evaluation_email(row, streak=0, cooldown=0)
+    assert "평가하지 않았습니다" in body and "거래일 100일" in body

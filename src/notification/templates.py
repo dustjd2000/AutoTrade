@@ -17,6 +17,7 @@ from src.logger.trade_store import (
     DailySummary,
     ExitReviewRow,
     MonthlySummary,
+    RuleEvaluationRow,
     TradeRow,
 )
 from src.notification import chart
@@ -617,3 +618,60 @@ def _buy_html(execution: BuyExecution, notes: List[str]) -> str:
         ]
     )
     return "".join(parts)
+
+
+def _rule_text(rule_json: str) -> str:
+    """규칙 JSON → '문턱 0.2% / 뒤집기 끔 / 결정 09:10 / 손절 2%'. 비었으면 '-'."""
+    if not rule_json:
+        return "-"
+    from src.research.backtest import Rule
+
+    rule = Rule.from_json(rule_json)
+    return (
+        f"문턱 {rule.band_percent:g}% / 뒤집기 {'켬' if rule.flip_enabled else '끔'} / "
+        f"결정 {rule.decision_hhmm} / 손절 {rule.stop_percent:g}%"
+    )
+
+
+def _daily_pct(value: Optional[float]) -> str:
+    return "-" if value is None else f"{value:+.3f}%"
+
+
+def rule_evaluation_email(
+    row: RuleEvaluationRow,
+    streak: int,
+    cooldown: int,
+    applied_values: Optional[Dict[str, tuple]] = None,
+) -> tuple[str, str]:
+    """금요일 2호 규칙 평가 메일 (스펙 2026-10-29 5.7). 적용한 주는 제목과 '바꾼 값'이 달라진다."""
+    from src.research import rule_search
+
+    kind = "자동 변경" if applied_values else "주간 평가"
+    subject = f"[AutoTrade] {row.day:%Y-%m-%d} 2호 규칙 {kind}"
+    lines = [f"현행 규칙: {_rule_text(row.current_rule)}"]
+    if row.status != rule_search.STATUS_EVALUATED:
+        lines.extend(["", f"평가하지 않았습니다: {row.note or row.status}"])
+        return subject, "\n".join(lines)
+
+    lines.extend([
+        f"1등 후보: {_rule_text(row.best_rule)}",
+        "",
+        "일 평균 순수익률 (수수료·슬리피지 포함, 쉬는 날 0%)",
+        f" - 고르기 구간: 현행 {_daily_pct(row.select_current)} / 1등 {_daily_pct(row.select_best)}",
+        f" - 시험 구간(최근 {rule_search.TEST_DAYS}거래일): 현행 {_daily_pct(row.test_current)} / "
+        f"1등 {_daily_pct(row.test_best)}",
+        "",
+        "적용 조건",
+        f" 1. 시험 구간에서 현행보다 {rule_search.MIN_EDGE_PERCENT}%p/일 이상: "
+        f"{'충족' if row.beats else '미충족'}",
+        f" 2. 1등의 시험 구간 성과가 플러스: {'충족' if row.positive else '미충족'}",
+        f" 3. 같은 1등 연속: {streak}/{rule_search.STREAK_EVALUATIONS}",
+        f" 4. 휴지 기간: {'충족' if cooldown == 0 else f'{cooldown}회 남음'}",
+    ])
+    if applied_values:
+        lines.extend(["", "바꾼 값 (.env)"])
+        lines.extend(f" - {key}: {old} → {new}" for key, (old, new) in applied_values.items())
+    if row.note:
+        lines.extend(["", f"비고: {row.note}"])
+    lines.extend(["", "※ 평가는 손절과 15:15 청산만으로 한다 — AI 매도 판단은 재현하지 않는다."])
+    return subject, "\n".join(lines)
