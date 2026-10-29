@@ -120,7 +120,7 @@ def test_exit_watch_text_describes_ai_exit_as_a_step_triggered_judgement_not_an_
     text = fake._exit_watch_text()
 
     assert "손절 -2%" in text
-    assert "+1%·+2%" in text and "-1%·-2%" in text
+    assert "'AI 판단 단계' 폭" in text and "이익·손실 단계" in text
     assert "자동으로 팔리지" in text
 
 

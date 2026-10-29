@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_RECOMMEND_TIME_HHMM = "09:05"
 DEFAULT_BUY_TIME_HHMM = "09:10"
 MIN_RECOMMEND_TO_BUY_MINUTES = 3
+# AI 매도 판단 단계 폭 하한(%p) — 이보다 좁으면 거의 틱마다 LLM을 부르게 된다
+MIN_AI_EXIT_STEP_PERCENT = 0.1
 MARKET_OPEN_HHMM = "09:00"
 
 
@@ -146,6 +148,12 @@ class Settings:
         default_factory=lambda: float(os.getenv("AI_EXIT_DRAWDOWN_PERCENT", "1"))
     )
 
+    # AI 매도 판단 호출 단계 폭(%p) — 순손익률이 이 폭의 단계를 새로 넘을 때마다 부른다.
+    # UI '리스크 관리'에서 조정 (2026-10-29). 너무 작으면 틱마다 LLM을 부르므로 validate가 막는다.
+    ai_exit_step_percent: float = field(
+        default_factory=lambda: float(os.getenv("AI_EXIT_STEP_PERCENT", "0.5"))
+    )
+
     @property
     def ai_exit_drawdown_ratio(self) -> float:
         return self.ai_exit_drawdown_percent / 100
@@ -206,6 +214,11 @@ class Settings:
             raise ValueError(
                 f"BUY_TIME은 RECOMMEND_TIME보다 {MIN_RECOMMEND_TO_BUY_MINUTES}분 이상 뒤여야 "
                 f"합니다: 추천 {self.recommend_time_hhmm} / 매수 {self.buy_time_hhmm}"
+            )
+        if self.ai_exit_step_percent < MIN_AI_EXIT_STEP_PERCENT:
+            raise ValueError(
+                f"AI_EXIT_STEP_PERCENT는 {MIN_AI_EXIT_STEP_PERCENT} 이상이어야 합니다: "
+                f"{self.ai_exit_step_percent}"
             )
         if self.etf_start_date:
             try:

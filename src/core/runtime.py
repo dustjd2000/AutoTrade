@@ -151,7 +151,7 @@ class Runtime:
     # 스케줄 잡과 UI 버튼이 공유하는 실행 통로. build_runtime이 Runtime을 만든 뒤에
     # 채운다 — ActionRunner가 runtime을 참조해야 해서 순서를 뒤집을 수 없다.
     runner: Optional[ActionRunner] = None
-    # AI 매도 판단 트리거 — 순손익률이 ±1%p 단계를 새로 넘을 때 묻는다 (PRD 5.5-C '매도 판단')
+    # AI 매도 판단 트리거 — 순손익률이 설정 폭(`AI_EXIT_STEP_PERCENT`)의 단계를 새로 넘을 때 묻는다 (PRD 5.5-C '매도 판단')
     etf_exit_trigger: StepTrigger = field(default_factory=StepTrigger)
 
 
@@ -224,6 +224,7 @@ def build_runtime(settings: Settings) -> Runtime:
         ws_client=ws_client,
         workflow=workflow,
         exit_advisor=exit_advisor,
+        etf_exit_trigger=StepTrigger(settings.ai_exit_step_percent),
     )
     runtime.runner = ActionRunner(runtime)
 
@@ -447,7 +448,7 @@ def ai_exit_due(
 ) -> bool:
     """이번 사이클에 AI 매도 판단을 부를 조건인지 (PRD 5.5-C '매도 판단').
 
-    보유 종목 순손익률이 +1%·+2%… 또는 -1%·-2%… 단계를 새로 넘었으면 True다 (`StepTrigger`).
+    보유 종목 순손익률이 설정 폭(기본 0.5%p)의 이익·손실 단계를 새로 넘었으면 True다 (`StepTrigger`).
     1호 전략 시절의 15분 주기·하루 상한·장중 공시 트리거는 2026-10-23에 폐지됐다.
     UI의 AI 매도 판단 체크박스(`engine.ai_exit_enabled`)는 그대로 따른다 — 끄면 묻지 않는다.
     시간은 개장~`AI_EXIT_END_TIME`(15:15 강제청산 직전에는 어차피 곧 팔린다). 호출이 실패해도
@@ -467,7 +468,7 @@ def ai_exit_due(
     for position in engine.exit_candidates():
         step = trigger.crossed(position.ticker, engine.position_net_return(position), now.date())
         if step is not None:
-            fired.append(f"{position.ticker} {step:+d}% 단계")
+            fired.append(f"{position.ticker} {step * trigger.step_percent:+.1f}% 단계")
     if fired:
         logger.info("AI 매도 판단 트리거: %s", ", ".join(fired))
     return bool(fired)

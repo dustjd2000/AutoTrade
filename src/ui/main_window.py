@@ -72,6 +72,9 @@ COLOR_LOSS = "#6ba3ff"
 
 # 보유 종목 표 갱신 주기 — 캐시값만 읽으므로 API 호출이 발생하지 않는다
 HOLDINGS_REFRESH_MS = 2000
+# AI 판단 단계(%p) 선택지 — `.env`에 쓰는 문자열 그대로다 (`AI_EXIT_STEP_PERCENT`)
+AI_EXIT_STEP_CHOICES = tuple(f"{tenths / 10:g}" for tenths in range(5, 51, 5))   # 0.5 ~ 5, 0.5 단위
+DEFAULT_AI_EXIT_STEP = "0.5"
 # 0번 열은 '선택 매도' 대상 체크 — 표가 NoEditTriggers라 셀 체크박스는 클릭으로 토글되지
 # 않는다(실측). 체크 표시만 아이템으로 그리고 토글은 cellClicked에서 직접 처리한다.
 HOLDINGS_COLUMNS = ("선택", "종목", "수량", "평단", "현재가", "순손익")
@@ -553,6 +556,12 @@ class MainWindow(QMainWindow):
         self._exit_percent.setPlaceholderText("예: 5 (순손익 -5%에 닿은 종목을 자동 매도)")
         self._exit_percent.setValidator(QDoubleValidator(0.0, 100.0, 2))
 
+        # AI 매도 판단 호출 단계 폭 — 바꾸면 엔진 재시작이 필요하다 (`_save_settings` 대상)
+        self._ai_exit_step = _NoScrollComboBox()
+        for step in AI_EXIT_STEP_CHOICES:
+            self._ai_exit_step.addItem(step, step)
+        self._ai_exit_step.setCurrentIndex(self._ai_exit_step.findData(DEFAULT_AI_EXIT_STEP))
+
         # 적용 여부 체크박스 — 끄면 그 경로는 동작하지 않는다. 켜고 끌 때마다 `.env`에
         # 저장해 다시 시작해도 마지막 상태가 이어지지만(확정 2026-09-09), 저장했다고 엔진을
         # 재시작하지는 않는다 — 끄고 싶은 순간에 감시 공백이 생기면 안 된다.
@@ -564,7 +573,7 @@ class MainWindow(QMainWindow):
         self._stop_loss_enabled = QCheckBox("손절")
         self._stop_loss_enabled.setChecked(True)
         self._ai_exit_enabled.setToolTip(
-            "보유 종목 순손익률이 +1%·+2%… 또는 -1%·-2%… 단계를 새로 넘을 때마다 AI가 보고 "
+            "보유 종목 순손익률이 아래 'AI 판단 단계' 폭만큼 새 단계를 넘을 때마다 AI가 보고 "
             "매도할지 정합니다 — 판정된 종목만 팔립니다. 끄면 손절과 15:15 강제청산만 남습니다."
         )
         self._stop_loss_enabled.setToolTip(
@@ -581,11 +590,12 @@ class MainWindow(QMainWindow):
                 self._stop_loss_enabled,
             ),
         )
+        risk_form.addRow("AI 판단 단계 (%p)", self._ai_exit_step)
         # 종목별 판정이라는 점과 AI 판단을 언제 부르는지를 입력란 바로 아래에서 알린다
         exit_hint = QLabel(
             "손절선입니다. 순손익률이 이 값에 닿으면 실시간으로 시장가 매도합니다. 순손익률은 "
             "수수료·슬리피지를 뺀 값이라 화면의 평가손익률보다 낮습니다(ETF는 거래세 면제).\n"
-            "AI 매도 판단은 주기가 아니라 순손익률이 ±1%p 단계를 새로 넘을 때마다 불러, "
+            "AI 매도 판단은 주기가 아니라 순손익률이 'AI 판단 단계' 폭의 단계를 새로 넘을 때마다 불러, "
             "팔기로 정한 경우에만 매도합니다. 나머지는 15:15에 강제청산됩니다."
         )
         exit_hint.setWordWrap(True)
@@ -638,7 +648,7 @@ class MainWindow(QMainWindow):
             "스케줄(결정 시각 / 매수 안전망 / 10:10 / 15:15 / 15:35)과 무관하게 지금 바로 실행합니다. "
             "엔진이 실행 중일 때만 동작하며, 장 시간 외에는 주문이 거부될 수 있습니다.\n"
             "①과 일괄 수행은 같습니다 — 오늘 살 ETF(KODEX 200 / 인버스)를 정하고 곧바로 시장가로 "
-            "삽니다. 오늘 이미 주문했으면 다시 사지 않습니다. 매수 후에는 손절과 ±1%p 단계마다의 "
+            "삽니다. 오늘 이미 주문했으면 다시 사지 않습니다. 매수 후에는 손절과 'AI 판단 단계'마다의 "
             "AI 매도 판단이 자동으로 돌고, 매수 결과 메일(10:10), 청산(15:15), 리포트(15:35)는 "
             "스케줄에 맡깁니다."
         )
@@ -1220,7 +1230,7 @@ class MainWindow(QMainWindow):
         """매수 확인 팝업에 넣을 청산 안내 — 두 경로의 성격을 갈라 적는다.
 
         손절은 순손익이 선에 닿는 순간 그 종목만 실시간으로 팔리는 자동선이고, AI 매도
-        판단은 ±1%p 단계마다 묻는 판단이라 가격 기준선이 없다 — 이 구분이 흐려지면 없는
+        판단은 설정한 폭의 단계마다 묻는 판단이라 가격 기준선이 없다 — 이 구분이 흐려지면 없는
         보호를 있다고 믿게 된다.
         """
         percent = self._exit_percent.text().strip() or "2"
@@ -1243,7 +1253,7 @@ class MainWindow(QMainWindow):
 
         if ai_exit:
             lines.append(
-                "AI 매도 판단 — 순손익률이 +1%·+2%… 또는 -1%·-2%… 단계를 새로 넘을 때마다 "
+                "AI 매도 판단 — 순손익률이 'AI 판단 단계' 폭의 이익·손실 단계를 새로 넘을 때마다 "
                 "AI가 보고 매도할지 정해 판정된 경우에만 팝니다. 특정 값에 닿는다고 자동으로 "
                 "팔리지 않습니다."
             )
@@ -1285,6 +1295,7 @@ class MainWindow(QMainWindow):
         self._email_from.setText(env.get("EMAIL_FROM", ""))
         self._email_to.setText(env.get("EMAIL_TO", ""))
         self._exit_percent.setText(env.get("STOP_LOSS_PERCENT", "2"))
+        self._select_step_value(env.get("AI_EXIT_STEP_PERCENT"))
         self._select_combo_value(self._investable_ratio, env.get("INVESTABLE_RATIO_PERCENT"), default=50)
         # 청산 체크박스는 마지막으로 켜고 끈 상태를 그대로 되살린다. 복원하는 동안에는
         # toggled 처리를 막는다 — 방금 읽은 값을 다시 저장할 이유가 없고, 이 시점에는
@@ -1318,6 +1329,17 @@ class MainWindow(QMainWindow):
         index = combo.findData(value)
         combo.setCurrentIndex(index if index >= 0 else combo.findData(default))
 
+    def _select_step_value(self, raw_value: Optional[str]) -> None:
+        """AI 판단 단계 값을 고른다. `.env`의 "0.50"·"1.0"도 같은 항목으로 찾고, 목록에 없으면 기본값."""
+        try:
+            value = f"{float(raw_value):g}" if raw_value else DEFAULT_AI_EXIT_STEP
+        except ValueError:
+            value = DEFAULT_AI_EXIT_STEP
+        index = self._ai_exit_step.findData(value)
+        self._ai_exit_step.setCurrentIndex(
+            index if index >= 0 else self._ai_exit_step.findData(DEFAULT_AI_EXIT_STEP)
+        )
+
     def _save_settings(self, show_popup: bool = False) -> dict:
         """화면 값을 `.env`에 저장하고, 저장한 값을 그대로 돌려준다.
 
@@ -1338,6 +1360,7 @@ class MainWindow(QMainWindow):
             "EMAIL_FROM": self._email_from.text().strip(),
             "EMAIL_TO": self._email_to.text().strip(),
             "STOP_LOSS_PERCENT": self._exit_percent.text().strip() or "2",
+            "AI_EXIT_STEP_PERCENT": self._ai_exit_step.currentData(),
             "INVESTABLE_RATIO_PERCENT": str(self._investable_ratio.currentData()),
         }
         if mode == "live":

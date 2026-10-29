@@ -206,19 +206,19 @@ def test_etf_strategy_asks_when_loss_reaches_one_percent():
     assert len(advisor.calls) == 1
 
 
-def test_etf_strategy_does_not_ask_inside_one_percent():
-    runtime, engine, advisor, _ = etf_runtime(0.009)
+def test_etf_strategy_does_not_ask_inside_the_first_step():
+    runtime, engine, advisor, _ = etf_runtime(0.0045)
     asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW, None))
     assert advisor.calls == []
 
 
 def test_etf_strategy_asks_again_only_at_the_next_step():
     """같은 단계에 머무는 동안은 다시 묻지 않는다 — 30초 폴링마다 LLM을 부르지 않게 한다."""
-    runtime, engine, advisor, state = etf_runtime(0.012)
+    runtime, engine, advisor, state = etf_runtime(0.006)
     last = asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW, None))
-    state["ret"] = 0.018                                   # 여전히 +1% 단계
+    state["ret"] = 0.009                                   # 여전히 +0.5% 단계
     last = asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW + timedelta(seconds=30), last))
-    state["ret"] = 0.021                                   # +2% 단계 — 다시 묻는다
+    state["ret"] = 0.0105                                  # +1% 단계 — 다시 묻는다
     asyncio.run(maybe_run_ai_exit_cycle(runtime, IN_WINDOW + timedelta(seconds=60), last))
     assert len(advisor.calls) == 2
 

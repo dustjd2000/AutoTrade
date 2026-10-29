@@ -236,3 +236,19 @@ def test_parse_flag_keeps_the_given_default_when_value_is_missing():
     assert parse_flag("0", True) is False
 
 
+
+
+def test_ai_exit_step_defaults_to_half_percent(monkeypatch):
+    monkeypatch.delenv("AI_EXIT_STEP_PERCENT", raising=False)
+    assert Settings().ai_exit_step_percent == 0.5
+
+
+def test_ai_exit_step_reads_env_value(monkeypatch):
+    monkeypatch.setenv("AI_EXIT_STEP_PERCENT", "1.5")
+    assert Settings().ai_exit_step_percent == 1.5
+
+
+def test_validate_rejects_too_small_ai_exit_step(monkeypatch):
+    monkeypatch.setenv("AI_EXIT_STEP_PERCENT", "0.05")
+    with pytest.raises(ValueError, match="AI_EXIT_STEP_PERCENT"):
+        _valid_settings(monkeypatch).validate()
