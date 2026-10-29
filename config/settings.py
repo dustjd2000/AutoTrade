@@ -217,6 +217,19 @@ class Settings:
         default_factory=lambda: float(os.getenv("ETF_KILL_LOSS_PERCENT", "5"))
     )
     etf_start_date: str = field(default_factory=lambda: os.getenv("ETF_START_DATE", "").strip())
+    # 2호 신호 문턱(%) — |20일 신호|가 이 값 미만이면 그날 쉰다. 0이면 매일 산다(2026-10-29 현행).
+    # 금요일 규칙 자동 평가가 바꾸는 손잡이다 (docs/superpowers/specs/2026-10-29-rule-auto-tuning-design.md).
+    etf_signal_band_percent: float = field(
+        default_factory=lambda: float(os.getenv("ETF_SIGNAL_BAND_PERCENT", "0"))
+    )
+    # 오늘 장중 움직임으로 방향을 뒤집을지 (`etf_regime.FLIP_PERCENT`, 1=켬). 규칙 자동 평가의 손잡이.
+    etf_flip_enabled: bool = field(
+        default_factory=lambda: parse_flag(os.getenv("ETF_FLIP_ENABLED"), True)
+    )
+    # 규칙 자동 평가가 조건을 모두 만족했을 때 `.env`를 실제로 바꿀지 (1=켬, 0이면 평가·메일만)
+    rule_auto_apply_enabled: bool = field(
+        default_factory=lambda: parse_flag(os.getenv("RULE_AUTO_APPLY_ENABLED"), True)
+    )
 
     # 손절 판정(및 AI 매도 판단 프롬프트·UI의 합산 순손익 표시)에 반영할 비용 —
     # 매매수수료(매수·매도 동일), 세금(매도 시만), 슬리피지(추정)

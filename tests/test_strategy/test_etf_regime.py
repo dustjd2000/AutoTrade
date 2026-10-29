@@ -129,3 +129,20 @@ def test_today_return_reads_open_to_current_of_todays_candle():
 
 def test_today_return_is_none_without_todays_candle():
     assert today_return([candle(TODAY - timedelta(days=1), 10000, 9000)], TODAY) is None
+
+
+def test_pick_etf_rests_inside_the_band():
+    assert pick_etf(0.1, band_percent=0.2) is None
+    assert pick_etf(-0.19, band_percent=0.2) is None
+    assert pick_etf(0.2, band_percent=0.2) == LONG_ETF       # 문턱과 같으면 산다
+    assert pick_etf(-0.3, band_percent=0.2) == INVERSE_ETF
+
+
+def test_pick_etf_does_not_flip_when_disabled():
+    assert pick_etf(-0.6, day_return=0.3, flip_enabled=False) == INVERSE_ETF
+    assert pick_etf(0.6, day_return=-0.3, flip_enabled=False) == LONG_ETF
+
+
+def test_pick_etf_band_applies_before_flip():
+    # 문턱 안쪽이면 오늘 움직임이 커도 쉰다
+    assert pick_etf(0.1, day_return=-1.0, band_percent=0.2) is None

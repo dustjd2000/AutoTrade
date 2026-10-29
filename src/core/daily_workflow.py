@@ -120,6 +120,8 @@ class DailyWorkflow:
         buy_records_path: Optional[Path] = None,
         etf_kill_loss_percent: float = 5.0,
         etf_start_date: Optional[date] = None,
+        signal_band_percent: float = 0.0,
+        flip_enabled: bool = True,
     ):
         self.strategy = strategy
         self.engine = engine
@@ -158,6 +160,8 @@ class DailyWorkflow:
         # 자동 중단 장치 (PRD 5.5-C) — `_etf_kill_reason`
         self.etf_kill_loss_percent = etf_kill_loss_percent
         self.etf_start_date = etf_start_date
+        self.signal_band_percent = signal_band_percent
+        self.flip_enabled = flip_enabled
         # 오늘 2호 결정(매수/쉼/중단)을 마친 날짜 — 매수 시각 안전망이 결정을 되풀이하지 않게 한다.
         # 인메모리라 엔진이 재시작되면 비고, 그때는 안전망이 다시 정한다 (`_execute_etf_buy`).
         self._etf_decided_on: Optional[date] = None
@@ -409,11 +413,16 @@ class DailyWorkflow:
 
         signal = etf_regime.regime_signal(list(recent) + list(earlier), today)
         day_return = etf_regime.today_return(recent, today)
-        pick = etf_regime.pick_etf(signal, day_return)
+        pick = etf_regime.pick_etf(signal, day_return, self.signal_band_percent, self.flip_enabled)
         # 신호만으로 정한 방향과 다르면 오늘 장중 흐름 때문에 뒤집힌 것이다
-        flipped = pick is not None and pick != etf_regime.pick_etf(signal)
+        flipped = pick is not None and pick != etf_regime.pick_etf(signal, None, self.signal_band_percent)
         if pick is None:
-            logger.info("2호 전략: 오늘은 쉽니다 (신호 계산 불가 — 일봉 부족)")
+            if signal is None:
+                logger.info("2호 전략: 오늘은 쉽니다 (신호 계산 불가 — 일봉 부족)")
+            else:
+                logger.info(
+                    "2호 전략: 오늘은 쉽니다 (신호 %+.3f%% — 문턱 ±%g%% 안쪽)", signal, self.signal_band_percent
+                )
             self.strategy.set_recommendations([])
             self._etf_decided_on = today
             self._send_etf_mail(today, signal, None, None)
@@ -579,9 +588,14 @@ class DailyWorkflow:
             body = blocked
         elif recommendation is None:
             subject = f"[2호 전략] {today} 오늘은 쉽니다"
+            reason = (
+                "일봉이 모자라 신호를 계산하지 못해"
+                if signal is None
+                else f"신호가 문턱 ±{self.signal_band_percent:g}% 안쪽이라"
+            )
             body = (
                 f"직전 {etf_regime.LOOKBACK_DAYS}거래일 장중 평균 {signal_text} — "
-                f"일봉이 모자라 신호를 계산하지 못해 매수하지 않습니다."
+                f"{reason} 매수하지 않습니다."
             )
         else:
             subject = f"[2호 전략] {today} {recommendation.name} 시장가 매수"

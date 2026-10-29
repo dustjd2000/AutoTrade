@@ -83,7 +83,7 @@ class FakeOrderClient:
 
 
 def make_workflow(rows, returns=(), kill_percent=5.0, start=None, cash=1_000_000, price=30000.0,
-                  order_status=OrderStatus.PENDING, order_error=None):
+                  order_status=OrderStatus.PENDING, order_error=None, band=0.0, flip=True):
     email = FakeEmail()
     notifications, closed = [], []
     market_data = FakeMarketData(rows, price=price)
@@ -115,6 +115,8 @@ def make_workflow(rows, returns=(), kill_percent=5.0, start=None, cash=1_000_000
         email=email,
         etf_kill_loss_percent=kill_percent,
         etf_start_date=start,
+        signal_band_percent=band,
+        flip_enabled=flip,
     )
     return SimpleNamespace(
         workflow=workflow, email=email, notifications=notifications, closed=closed,
@@ -306,3 +308,23 @@ def test_recommend_action_chains_the_buy_in_etf_mode():
     assert [s.touches_orders for s in steps] == [False, True]
 
 
+
+
+def test_weak_signal_rests_inside_the_band_and_says_why():
+    t = make_workflow(candles(0.1), band=0.2)
+
+    t.workflow.recommend_and_notify(today=TODAY)
+
+    assert t.strategy._recommendations == []
+    assert "쉽니다" in t.email.sent[0][0]
+    assert "문턱" in t.email.sent[0][1]
+
+
+def test_flip_can_be_disabled():
+    rows = candles(-0.5)
+    rows[0]["close_pric"] = "10050"          # 오늘 시가 대비 +0.5% — 뒤집기 조건
+    t = make_workflow(rows, flip=False)
+
+    t.workflow.recommend_and_notify(today=TODAY)
+
+    assert [r.ticker for r in t.strategy._recommendations] == [INVERSE_ETF[0]]

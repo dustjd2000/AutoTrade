@@ -94,23 +94,27 @@ def today_return(candles: Iterable[Dict], today: date) -> Optional[float]:
 
 
 def pick_etf(
-    signal: Optional[float], day_return: Optional[float] = None
+    signal: Optional[float],
+    day_return: Optional[float] = None,
+    band_percent: float = 0.0,
+    flip_enabled: bool = True,
 ) -> Optional[Tuple[str, str]]:
-    """신호로 오늘 살 ETF를 정한다. 신호가 없으면 None(쉼).
+    """신호로 오늘 살 ETF를 정한다. 신호가 없거나 |신호|가 `band_percent` 미만이면 None(쉼).
 
-    신호 0 이상이면 KODEX 200, 음수이면 KODEX 인버스 — 쉬는 구간은 없다 (2026-10-29).
-    `day_return`(오늘 KODEX 200 시가 대비 %)이 신호와 반대로 `FLIP_PERCENT` 이상 움직였으면
-    방향을 뒤집는다.
+    신호 0 이상이면 KODEX 200, 음수이면 KODEX 인버스. `flip_enabled`이고 `day_return`(오늘
+    KODEX 200 시가 대비 %)이 신호와 반대로 `FLIP_PERCENT` 이상 움직였으면 방향을 뒤집는다.
+    문턱과 뒤집기는 `.env`(`ETF_SIGNAL_BAND_PERCENT`·`ETF_FLIP_ENABLED`)로 정하고, 금요일 규칙
+    자동 평가가 바꿀 수 있다 (2026-10-29). 실전과 백테스트(`src/research/backtest.py`)가 이 함수를 함께 쓴다.
     """
-    if signal is None:
+    if signal is None or abs(signal) < band_percent:
         return None
-    if signal >= 0:
-        if day_return is not None and day_return <= -FLIP_PERCENT:
-            return INVERSE_ETF
-        return LONG_ETF
-    if day_return is not None and day_return >= FLIP_PERCENT:
-        return LONG_ETF
-    return INVERSE_ETF
+    long = signal >= 0
+    if flip_enabled and day_return is not None:
+        if long and day_return <= -FLIP_PERCENT:
+            long = False
+        elif not long and day_return >= FLIP_PERCENT:
+            long = True
+    return LONG_ETF if long else INVERSE_ETF
 
 
 def traded_today(candles: Iterable[Dict], today: date) -> bool:

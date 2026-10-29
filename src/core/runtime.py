@@ -219,6 +219,8 @@ def build_runtime(settings: Settings) -> Runtime:
         ws_client=ws_client,
         etf_kill_loss_percent=settings.etf_kill_loss_percent,
         etf_start_date=date.fromisoformat(settings.etf_start_date) if settings.etf_start_date else None,
+        signal_band_percent=settings.etf_signal_band_percent,
+        flip_enabled=settings.etf_flip_enabled,
     )
     exit_advisor = ExitAdvisor(settings, prompt_store=exit_prompt_store)
 

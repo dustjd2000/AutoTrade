@@ -284,3 +284,22 @@ def test_bad_tune_skip_value_falls_back_to_5(monkeypatch, raw):
 def test_bad_tune_skip_value_does_not_stop_the_engine(monkeypatch):
     monkeypatch.setenv("TUNE_SKIP_MONTHLY_RETURN_PERCENT", "7.3")
     _valid_settings(monkeypatch).validate()
+
+
+def test_rule_tuning_settings_default_to_current_behavior(monkeypatch):
+    for key in ("ETF_SIGNAL_BAND_PERCENT", "ETF_FLIP_ENABLED", "RULE_AUTO_APPLY_ENABLED"):
+        monkeypatch.delenv(key, raising=False)
+    settings = Settings()
+    assert settings.etf_signal_band_percent == 0.0
+    assert settings.etf_flip_enabled is True
+    assert settings.rule_auto_apply_enabled is True
+
+
+def test_rule_tuning_settings_read_env(monkeypatch):
+    monkeypatch.setenv("ETF_SIGNAL_BAND_PERCENT", "0.2")
+    monkeypatch.setenv("ETF_FLIP_ENABLED", "0")
+    monkeypatch.setenv("RULE_AUTO_APPLY_ENABLED", "0")
+    settings = Settings()
+    assert settings.etf_signal_band_percent == 0.2
+    assert settings.etf_flip_enabled is False
+    assert settings.rule_auto_apply_enabled is False
