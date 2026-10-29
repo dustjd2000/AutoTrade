@@ -962,20 +962,22 @@ class MainWindow(QMainWindow):
         ret = self._engine_thread.portfolio_return()
         if ret is None:
             return ""
+        # 앞의 '순손익'과는 슬리피지 추정치만큼 다르다 — 이름을 '합산 순손익'으로 두었더니 다른
+        # 대상처럼 읽혀(2026-10-29) 손절 판정에 쓰는 값이라는 뜻으로 '손절 기준'이라 부른다.
         # 지금 향하고 있는 쪽 라인만 붙인다 — 둘 다 적으면 한 줄에 들어가지 않는다.
         # 해제된 쪽은 값 대신 '해제'로 적는다 — 닿아도 팔리지 않으므로 숫자를 보이면 오해한다.
         if ret >= 0:
-            # 이익 쪽은 자동선이 없다 — AI가 주기마다 판단할 뿐이라 '닿으면 팔리는 값'이 없다
+            # 이익 쪽은 자동선이 없다 — AI가 판단할 뿐이라 '닿으면 팔리는 값'이 없다
             line = (
-                "AI 매도 판단" if self._ai_exit_enabled.isChecked() else "AI 매도 판단 해제"
+                " (AI 매도 판단)" if self._ai_exit_enabled.isChecked() else " (AI 매도 판단 해제)"
             )
         else:
             line = (
-                f"손절 -{self._exit_percent.text().strip() or '2'}%"
+                f" / 손절 -{self._exit_percent.text().strip() or '2'}%"
                 if self._stop_loss_enabled.isChecked()
-                else "손절 해제"
+                else " (손절 해제)"
             )
-        return f" · 합산 순손익 {ret * 100:+.2f}% ({line})"
+        return f" · 손절 기준 {ret * 100:+.2f}%{line}"
 
     # ── 매도 불가 ────────────────────────────────────────────
     def _build_buy_plan_box(self) -> QGroupBox:
