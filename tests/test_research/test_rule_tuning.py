@@ -80,13 +80,13 @@ def test_applies_after_four_consecutive_wins(tmp_path):
 
     assert written == [{
         "ETF_SIGNAL_BAND_PERCENT": "0.2", "ETF_FLIP_ENABLED": "0",
-        "RECOMMEND_TIME": "09:30", "BUY_TIME": "09:33", "STOP_LOSS_PERCENT": "2",
+        "RECOMMEND_TIME": "09:30", "BUY_TIME": "09:33",
     }]
     assert tuning.applied_pending
     rows = tuning.trade_store.rule_evaluations()
     assert rows[-1].applied and not any(r.applied for r in rows[:-1])
     assert "자동 변경" in tuning.email.sent[-1][0]
-    assert "STOP_LOSS_PERCENT" not in tuning.email.sent[-1][1]       # 안 바뀐 값은 메일에 없다
+    assert "STOP_LOSS_PERCENT" not in tuning.email.sent[-1][1]       # 안 바뀐 값은 쓰지도, 메일에 싣지도 않는다
 
 
 def test_does_not_apply_when_switched_off(tmp_path):
@@ -188,3 +188,76 @@ def test_collect_failure_for_one_ticker_does_not_stop_the_other(tmp_path):
     tuning.market_data = SimpleNamespace(get_minute_candles=get_minute_candles)
     tuning.collect_minute_bars()
     assert tuning.minute_store.last_day("114800") == "20261029"
+
+
+def test_second_save_failure_after_write_still_mails_and_keeps_pending(tmp_path):
+    tuning, written = make(tmp_path, good)
+    run_weeks(tuning, 3)
+    real_save = tuning.trade_store.save_rule_evaluation
+    calls = []
+
+    def flaky(row):
+        calls.append(row)
+        if len(calls) == 2:
+            raise OSError("db locked")
+        real_save(row)
+
+    tuning.trade_store.save_rule_evaluation = flaky
+    tuning.evaluate_rules(date(2026, 11, 22))
+
+    assert len(written) == 1 and tuning.applied_pending
+    assert "자동 변경" in tuning.email.sent[-1][0]
+    assert "기록 저장 실패" in calls[-1].note
+
+
+def test_open_tickers_failure_postpones(tmp_path):
+    tuning, written = make(tmp_path, good)
+
+    def boom():
+        raise RuntimeError("api")
+
+    tuning.open_tickers = boom
+    run_weeks(tuning, 4)
+    assert written == []
+    assert "확인 실패" in tuning.trade_store.rule_evaluations()[-1].note
+
+
+def test_email_failure_does_not_raise(tmp_path):
+    tuning, _ = make(tmp_path, good)
+
+    def boom(*a, **k):
+        raise OSError("smtp")
+
+    tuning.email.send = boom
+    tuning.evaluate_rules(date(2026, 11, 6))
+
+
+def test_history_read_failure_does_not_apply_but_mails(tmp_path):
+    tuning, written = make(tmp_path, good)
+    run_weeks(tuning, 3)
+
+    def boom():
+        raise OSError("db")
+
+    tuning.trade_store.rule_evaluations = boom
+    tuning.evaluate_rules(date(2026, 11, 22))
+    assert written == []
+    assert len(tuning.email.sent) == 4
+
+
+def test_same_day_rerun_after_apply_does_nothing(tmp_path):
+    tuning, written = make(tmp_path, good)
+    run_weeks(tuning, 3)
+    tuning.evaluate_rules(date(2026, 11, 22))
+    mails = len(tuning.email.sent)
+
+    tuning.evaluate_rules(date(2026, 11, 22))
+
+    assert len(written) == 1 and len(tuning.email.sent) == mails
+    assert tuning.trade_store.rule_evaluations()[-1].applied
+
+
+def test_current_rule_reflects_applied_values(tmp_path):
+    tuning, _ = make(tmp_path, good)
+    run_weeks(tuning, 4)
+    assert tuning.current_rule() == BEST

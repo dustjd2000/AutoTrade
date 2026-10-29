@@ -82,6 +82,13 @@ class RuleTuning:
 
     def evaluate_rules(self, today: Optional[date] = None) -> None:
         today = today or date.today()
+        try:
+            if any(r.day == today and r.applied for r in self.trade_store.rule_evaluations()):
+                # 같은 날 다시 돌리면 적용 기록을 덮어쓰고 같은 변경을 또 쓰게 된다
+                logger.info("2호 규칙 평가: %s는 이미 자동 적용했습니다 — 건너뜁니다.", today)
+                return
+        except Exception:
+            logger.exception("평가 기록 확인 실패 — 평가를 계속합니다.")
         current = self.current_rule()
         evaluation = None
         try:
@@ -119,55 +126,76 @@ class RuleTuning:
                     positive=evaluation.positive,
                 )
 
-        # 이번 주 기록이 들어가야 연속 판정에 이번 주가 든다
-        self.trade_store.save_rule_evaluation(row)
-        history = self.trade_store.rule_evaluations()
-        streak = rule_search.streak_count(history)
-        cooldown = rule_search.cooldown_left(history)
+        # 이번 주 기록이 들어가야 연속 판정에 이번 주가 든다. 기록이 실패하면 이력을 모르니 적용하지 않는다.
+        history = None
+        try:
+            self.trade_store.save_rule_evaluation(row)
+            history = self.trade_store.rule_evaluations()
+        except Exception:
+            logger.exception("평가 기록 저장 실패 — 이번 주는 바꾸지 않고 메일만 보냅니다.")
+            row.note = f"{row.note} (기록 저장 실패)".strip()
+        streak = rule_search.streak_count(history) if history is not None else 0
+        cooldown = rule_search.cooldown_left(history) if history is not None else 0
 
         applied_values = None
         if (
-            evaluation is not None
+            history is not None
+            and evaluation is not None
             and evaluation.best != current
             and streak >= rule_search.STREAK_EVALUATIONS
             and cooldown == 0
         ):
             applied_values, row.note = self._apply(evaluation.best, current)
             row.applied = applied_values is not None
-            self.trade_store.save_rule_evaluation(row)
+            try:
+                self.trade_store.save_rule_evaluation(row)
+            except Exception:
+                logger.exception("적용 기록 저장 실패 — .env는 이미 바뀌었습니다.")
+                row.note = f"{row.note} (기록 저장 실패)"
             logger.warning("2호 규칙 자동 적용 판단: %s — %s", row.note, applied_values)
 
-        subject, body = templates.rule_evaluation_email(row, streak, cooldown, applied_values)
-        self.email.send(subject, body)
-
+        try:
+            subject, body = templates.rule_evaluation_email(row, streak, cooldown, applied_values)
+            self.email.send(subject, body)
+        except Exception:
+            logger.exception("규칙 평가 메일 발송 실패")
     def _apply(self, best: Rule, current: Rule) -> Tuple[Optional[Dict[str, Tuple[str, str]]], str]:
         """`.env`를 바꾼다. 바꾼 값 {키: (이전, 이후)}와 비고를 돌려준다. 못 바꿨으면 (None, 사유)."""
         if not self.settings.rule_auto_apply_enabled:
             return None, "자동 적용 꺼짐 (RULE_AUTO_APPLY_ENABLED=0)"
-        if self.open_tickers():
+        try:
+            holding = self.open_tickers()
+        except Exception:
+            logger.exception("보유 종목 확인 실패")
+            return None, "보유 종목 확인 실패 — 다음 평가로 미룸"
+        if holding:
             return None, "보유 종목이 있어 다음 평가로 미룸"
         if not rule_search.in_range(best):
             return None, "후보 범위 밖"
         buy_hhmm = add_minutes(best.decision_hhmm, BUY_AFTER_DECISION_MINUTES)
         try:
-            replace(
+            new_settings = replace(
                 self.settings,
                 etf_signal_band_percent=best.band_percent,
                 etf_flip_enabled=best.flip_enabled,
                 recommend_time_hhmm=best.decision_hhmm,
                 buy_time_hhmm=buy_hhmm,
                 stop_loss_percent=best.stop_percent,
-            ).validate()
+            )
+            new_settings.validate()
         except Exception as e:
             return None, f"설정 검사 실패: {e}"
 
         new_values = _env_values(best, buy_hhmm)
         old_values = _env_values(current, self.settings.buy_time_hhmm)
+        changed = {key: (old_values[key], new_values[key]) for key in new_values if old_values[key] != new_values[key]}
+        if not changed:
+            return None, "바뀐 값 없음"
         try:
-            self.env_writer(new_values)
+            self.env_writer({key: new for key, (_, new) in changed.items()})
         except Exception as e:
             logger.exception(".env 쓰기 실패 — 규칙을 바꾸지 않습니다.")
             return None, f".env 쓰기 실패: {e}"
+        self.settings = new_settings  # 다음 평가가 새 규칙을 현재 값으로 본다
         self.applied_pending = True
-        changed = {key: (old_values[key], new_values[key]) for key in new_values if old_values[key] != new_values[key]}
         return changed, "자동 적용"
