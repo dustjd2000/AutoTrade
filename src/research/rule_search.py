@@ -105,14 +105,18 @@ def evaluate(backtester, current: Rule) -> Optional[Evaluation]:
 
 
 def streak_count(rows) -> int:
-    """끝에서부터 '평가함 + 조건 1·2 충족 + 같은 1등'이 몇 번 이어졌는지."""
-    count, target = 0, None
+    """끝에서부터 '평가함 + 조건 1·2 충족 + 같은 1등'이 몇 번 이어졌는지.
+
+    평가 당시의 현재 규칙(`current_rule`)이 가장 최근 행과 다른 행에서 끊는다 — 사람이 규칙을
+    직접 바꿨다면 그 전 평가는 다른 규칙과 비교한 결과라 연속으로 치지 않는다.
+    """
+    count, target, current = 0, None, None
     for row in reversed(list(rows)):
         if not (row.status == STATUS_EVALUATED and row.beats and row.positive):
             break
         if target is None:
-            target = row.best_rule
-        elif row.best_rule != target:
+            target, current = row.best_rule, row.current_rule
+        elif row.best_rule != target or row.current_rule != current:
             break
         count += 1
     return count

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, replace
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 from src.logger.trade_store import TradeStore
@@ -21,6 +21,14 @@ class FakeSettings:
     commission_ratio: float = 0.00015
     rule_auto_apply_enabled: bool = True
     invalid: bool = False
+
+    @property
+    def recommend_time(self):
+        return datetime.strptime(self.recommend_time_hhmm, "%H:%M").time()
+
+    @property
+    def buy_time(self):
+        return datetime.strptime(self.buy_time_hhmm, "%H:%M").time()
 
     def validate(self):
         if self.invalid:
@@ -261,3 +269,31 @@ def test_current_rule_reflects_applied_values(tmp_path):
     tuning, _ = make(tmp_path, good)
     run_weeks(tuning, 4)
     assert tuning.current_rule() == BEST
+
+def test_current_rule_normalizes_unpadded_decision_time(tmp_path):
+    """"9:10"처럼 0이 빠진 값도 백테스트의 문자열 비교에 맞게 "09:10"으로 쓴다."""
+    tuning, _ = make(tmp_path, good, settings=FakeSettings(recommend_time_hhmm="9:10"))
+    assert tuning.current_rule().decision_hhmm == "09:10"
+
+
+def test_collect_survives_last_day_failure_for_one_ticker(tmp_path):
+    fetched = []
+
+    def get_minute_candles(ticker, since=None):
+        fetched.append(ticker)
+        return {"20261029": [("0900", 1.0)]}
+
+    tuning, _ = make(tmp_path, good)
+    tuning.market_data = SimpleNamespace(get_minute_candles=get_minute_candles)
+    real_last_day = tuning.minute_store.last_day
+
+    def broken_last_day(ticker):
+        if ticker == "069500":
+            raise ValueError("broken file")
+        return real_last_day(ticker)
+
+    tuning.minute_store.last_day = broken_last_day
+    tuning.collect_minute_bars()
+
+    assert fetched == ["114800"]
+    assert real_last_day("114800") == "20261029"

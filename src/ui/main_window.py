@@ -49,10 +49,26 @@ from src.core.daily_workflow import (
     BUY_PENDING_STATUS,
 )
 from src.core.runtime import ACTION_LABELS, CONFIRM_ACTIONS, MANUAL_ACTIONS, ORDER_ACTIONS
+from src.notification.email import EmailNotifier
 from src.ui.engine_thread import EngineThread
 from src.ui.env_store import load_env, save_env
 
 logger = logging.getLogger(__name__)
+
+
+def send_restart_failure_alert(error: str) -> None:
+    """규칙 자동 변경 뒤 엔진 재시작이 실패했음을 메일로 알린다. 알림 자체는 절대 예외를 내지 않는다."""
+    try:
+        load_dotenv(ENV_PATH, override=True)
+        EmailNotifier(Settings()).send(
+            "[AutoTrade] 2호 규칙 자동 변경 뒤 엔진 재시작 실패",
+            "금요일 규칙 평가가 설정을 자동으로 바꿨지만, 그 뒤 엔진을 다시 시작하지 못했습니다.\n"
+            f"오류: {error}\n\n"
+            "엔진이 정지된 상태입니다. 손절·AI 매도 판단 감시가 꺼져 있으니 확인 후 UI에서 직접 시작하세요.",
+        )
+    except Exception:
+        logger.exception("재시작 실패 알림 메일 발송 실패")
+
 
 ENV_PATH = Path(__file__).parent.parent.parent / ".env"
 
@@ -208,6 +224,10 @@ class MainWindow(QMainWindow):
         self._applied_env: Optional[dict] = None
         # 정지 완료 신호를 받은 뒤 이어서 다시 시작해야 하는지 (설정 저장에 따른 재시작)
         self._restart_pending = False
+        # 사용자가 정지를 눌러 엔진이 내려가는 중인지 — 이때는 규칙 변경이 있어도 재시작하지 않는다
+        self._stopping = False
+        # 규칙 자동 변경에 따른 재시작이 아직 확인되지 않았는지 — 실패하면 메일로 알린다
+        self._rule_restart_pending_check = False
         # 보유 종목 표를 만드는 도중에도 갱신이 한 번 돌기 때문에, 아직 없을 수 있음을 표시해 둔다
         self._unsellable_box: Optional[QGroupBox] = None
         self._buy_plan_box: Optional[QGroupBox] = None
@@ -1479,6 +1499,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error("설정이 올바르지 않아 엔진을 시작할 수 없습니다: %s", e)
             self._statusbar.showMessage("설정 오류로 시작하지 못했습니다.", 5000)
+            self._alert_rule_restart_failure(f"설정 오류: {e}")
             return
 
         logger.info("엔진 시작 요청 (mode=%s)", settings.mode)
@@ -1486,6 +1507,7 @@ class MainWindow(QMainWindow):
 
         thread = EngineThread(settings, parent=self)
         thread.started_ok.connect(lambda: self._set_engine_running(True))
+        thread.started_ok.connect(self._clear_rule_restart_check)
         thread.failed.connect(self._on_engine_failed)
         thread.finished_run.connect(self._on_engine_finished)
         thread.action_started.connect(self._on_action_started)
@@ -1499,6 +1521,7 @@ class MainWindow(QMainWindow):
         if self._engine_thread is None:
             return
         logger.info("엔진 정지 요청")
+        self._stopping = True
         self._btn_stop.setEnabled(False)
         self._set_actions_enabled(False)
         if self._engine_thread.action_busy:
@@ -1641,15 +1664,35 @@ class MainWindow(QMainWindow):
             and self._engine_thread is not None
             and self._engine_thread.consume_rule_change()
         ):
-            logger.warning("2호 규칙이 자동으로 바뀌었습니다 — 설정을 다시 읽고 엔진을 재시작합니다.")
             self._load_settings()
+            if self._stopping or self._restart_pending:
+                # 사용자가 정지하는 중이면 되살리지 않는다 — 설정만 읽어 두면 다음 시작이 새 값으로 뜬다
+                logger.warning("2호 규칙이 자동으로 바뀌었습니다 — 정지 중이라 설정만 다시 읽습니다.")
+                return
+            logger.warning("2호 규칙이 자동으로 바뀌었습니다 — 설정을 다시 읽고 엔진을 재시작합니다.")
+            self._rule_restart_pending_check = True
             self._restart_engine()
+
+    def _alert_rule_restart_failure(self, error: str) -> None:
+        """규칙 자동 변경에 따른 재시작이 실패했으면 메일로 알린다 (한 번만)."""
+        if not self._rule_restart_pending_check:
+            return
+        self._rule_restart_pending_check = False
+        send_restart_failure_alert(error)
+
+    def _clear_rule_restart_check(self) -> None:
+        self._rule_restart_pending_check = False
 
     def _on_engine_failed(self, message: str) -> None:
         logger.error("엔진 오류: %s", message)
         self._statusbar.showMessage(f"엔진 오류: {message}", 8000)
+        self._alert_rule_restart_failure(message)
 
     def _on_engine_finished(self) -> None:
+        # 정지 중에 끝난 금요일 평가의 변경은 여기서야 읽힌다 — 안 읽으면 다음 시작이 옛 화면 값을 .env에 덮어쓴다
+        if self._engine_thread is not None and self._engine_thread.consume_rule_change():
+            self._load_settings()
+        self._stopping = False
         self._engine_thread = None
         self._applied_env = None
         self._set_engine_running(False)
@@ -1662,6 +1705,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._start_engine)
             return
 
+        self._rule_restart_pending_check = False
         self._statusbar.showMessage("엔진이 정지되었습니다.", 3000)
 
     def closeEvent(self, event) -> None:

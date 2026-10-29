@@ -154,11 +154,11 @@ def _trading_days_only(job, name: str):
     return guarded
 
 
-def _on_weekday(weekday: int, job: Callable[[], None], now_fn=datetime.now) -> Callable[[], None]:
+def _on_weekday(weekday: int, job: Callable[[], None], now_fn=None) -> Callable[[], None]:
     """정한 요일에만 작업을 넘긴다 — 스케줄러는 매일 발동하므로 주간 작업은 여기서 거른다."""
 
     def guarded() -> None:
-        if now_fn().weekday() == weekday:
+        if (now_fn or datetime.now)().weekday() == weekday:
             job()
 
     return guarded
@@ -186,6 +186,32 @@ class Runtime:
 # 증권거래세가 면제다. 주식 세율(`TAX_PERCENT`)을 그대로 넣으면 비용이 0.2%p 과대 계상돼
 # 손절이 설정보다 일찍 나간다 (PRD 5.5-C).
 ETF_TAX_RATIO = 0.0
+
+
+def register_jobs(scheduler: TimeScheduler, runtime: Runtime, settings: Settings) -> None:
+    """스케줄러에 시간 기반 작업을 등록한다. 모두 거래일 가드를 거치고, 규칙 평가는 금요일에만 넘긴다."""
+    for trigger_time, action in (
+        (DAILY_RESET_TIME, "daily_reset"),
+        (settings.recommend_time, "recommend"),
+        (settings.buy_time, "buy"),
+        (CANCEL_UNFILLED_TIME, "cancel_unfilled"),
+        (FORCE_CLOSE_TIME, "close_out"),
+        (REPORT_TIME, "daily_report"),
+        (REVIEW_EXITS_TIME, "review_exits"),
+        (MINUTE_COLLECT_TIME, "collect_minute_bars"),
+    ):
+        scheduler.add_job(
+            trigger_time,
+            _trading_days_only(_submit(runtime, action), action),
+            name=action,
+        )
+    scheduler.add_job(
+        RULE_EVAL_TIME,
+        _trading_days_only(
+            _on_weekday(RULE_EVAL_WEEKDAY, _submit(runtime, "evaluate_rules")), "evaluate_rules"
+        ),
+        name="evaluate_rules",
+    )
 
 
 def build_runtime(settings: Settings) -> Runtime:
@@ -271,28 +297,7 @@ def build_runtime(settings: Settings) -> Runtime:
         open_tickers=lambda: engine.open_tickers,
     )
 
-    for trigger_time, action in (
-        (DAILY_RESET_TIME, "daily_reset"),
-        (settings.recommend_time, "recommend"),
-        (settings.buy_time, "buy"),
-        (CANCEL_UNFILLED_TIME, "cancel_unfilled"),
-        (FORCE_CLOSE_TIME, "close_out"),
-        (REPORT_TIME, "daily_report"),
-        (REVIEW_EXITS_TIME, "review_exits"),
-        (MINUTE_COLLECT_TIME, "collect_minute_bars"),
-    ):
-        scheduler.add_job(
-            trigger_time,
-            _trading_days_only(_submit(runtime, action), action),
-            name=action,
-        )
-    scheduler.add_job(
-        RULE_EVAL_TIME,
-        _trading_days_only(
-            _on_weekday(RULE_EVAL_WEEKDAY, _submit(runtime, "evaluate_rules")), "evaluate_rules"
-        ),
-        name="evaluate_rules",
-    )
+    register_jobs(scheduler, runtime, settings)
 
     return runtime
 

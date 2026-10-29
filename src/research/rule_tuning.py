@@ -66,13 +66,14 @@ class RuleTuning:
 
     def current_rule(self) -> Rule:
         s = self.settings
-        return Rule(s.etf_signal_band_percent, s.etf_flip_enabled, s.recommend_time_hhmm, s.stop_loss_percent)
+        return Rule(s.etf_signal_band_percent, s.etf_flip_enabled, s.recommend_time.strftime("%H:%M"), s.stop_loss_percent)
 
     def collect_minute_bars(self) -> None:
         """마지막 저장일부터 오늘까지 1분봉을 받아 쌓는다. 종목 하나가 실패해도 다른 종목은 받는다."""
         for ticker in ETF_TICKERS:
-            since = self.minute_store.last_day(ticker)
+            since = None
             try:
+                since = self.minute_store.last_day(ticker)
                 bars = self.market_data.get_minute_candles(ticker, since)
                 saved = self.minute_store.merge(ticker, bars)
             except Exception:
@@ -159,6 +160,7 @@ class RuleTuning:
             self.email.send(subject, body)
         except Exception:
             logger.exception("규칙 평가 메일 발송 실패")
+
     def _apply(self, best: Rule, current: Rule) -> Tuple[Optional[Dict[str, Tuple[str, str]]], str]:
         """`.env`를 바꾼다. 바꾼 값 {키: (이전, 이후)}와 비고를 돌려준다. 못 바꿨으면 (None, 사유)."""
         if not self.settings.rule_auto_apply_enabled:
@@ -187,7 +189,7 @@ class RuleTuning:
             return None, f"설정 검사 실패: {e}"
 
         new_values = _env_values(best, buy_hhmm)
-        old_values = _env_values(current, self.settings.buy_time_hhmm)
+        old_values = _env_values(current, self.settings.buy_time.strftime("%H:%M"))
         changed = {key: (old_values[key], new_values[key]) for key in new_values if old_values[key] != new_values[key]}
         if not changed:
             return None, "바뀐 값 없음"

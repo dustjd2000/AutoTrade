@@ -80,8 +80,10 @@ def test_beats_needs_the_margin():
     assert not ev.beats and ev.positive
 
 
-def row(best="A", status=STATUS_EVALUATED, beats=True, positive=True, applied=False):
-    return SimpleNamespace(status=status, best_rule=best, beats=beats, positive=positive, applied=applied)
+def row(best="A", status=STATUS_EVALUATED, beats=True, positive=True, applied=False, current="X"):
+    return SimpleNamespace(
+        status=status, best_rule=best, beats=beats, positive=positive, applied=applied, current_rule=current
+    )
 
 
 def test_streak_counts_trailing_same_best_rows():
@@ -89,6 +91,13 @@ def test_streak_counts_trailing_same_best_rows():
     assert streak_count([row("A")] * 4) == 4
     assert streak_count([row("A"), row("A", beats=False)]) == 0
     assert streak_count([row("A"), row("A", status=STATUS_FAILED), row("A")]) == 1
+
+
+def test_streak_resets_when_the_current_rule_changed():
+    """사람이 현재 규칙을 바꾸면 그 전 평가는 다른 규칙 대비 결과라 연속에 넣지 않는다."""
+    rows = [row("A", current="X")] * 3 + [row("A", current="Y")]
+    assert streak_count(rows) == 1
+    assert streak_count([row("A", current="X")] * 4) == 4
 
 
 def test_cooldown_after_an_applied_row():
