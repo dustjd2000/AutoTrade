@@ -1,15 +1,21 @@
 import unicodedata
+from datetime import date
 from html import escape
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from src.core.events import (
     BuyExecution,
     BuyOutcome,
     BuyRecord,
+    TuningOutcome,
     UnsellableView,
 )
+from src.core.exit_review import OUTCOME_LABELS
+from src.llm.exit_reviewer import EXIT_REASON_LABELS
 from src.logger.trade_store import (
+    AIExitDecisionRow,
     DailySummary,
+    ExitReviewRow,
     MonthlySummary,
     TradeRow,
 )
@@ -22,6 +28,111 @@ COLOR_LOSS = "#1565c0"
 COLOR_FLAT = "#555555"
 # 매수하지 못한 종목(건너뜀·실패) — 손실색(파랑)을 쓰면 손익 표기와 헷갈린다
 COLOR_WARN = "#e65100"
+
+
+def _tuning_lines(title: str, tuning: Optional[TuningOutcome]) -> List[str]:
+    """매도 판단 검증 메일 끝의 자동 수정 결과 블록. 자동 수정 단계가 없으면(None) 싣지 않는다."""
+    if tuning is None:
+        return []
+    if tuning.changed:
+        lines = [
+            f"■ {title}",
+            f"   수정함 ({tuning.old_version} → {tuning.new_version}) — {tuning.reason}",
+            "   (전후 비교는 별도 수정 메일 참고)",
+        ]
+    else:
+        lines = [f"■ {title}", f"   수정 안 함 — {tuning.reason}"]
+    return lines + [""]
+
+
+def _ratio_text(ratio: Optional[float]) -> str:
+    return "모름" if ratio is None else f"{ratio * 100:+.2f}%"
+
+
+def exit_review_email(
+    rows: List[ExitReviewRow],
+    decisions: List[AIExitDecisionRow],
+    today: date,
+    tuning: Optional[TuningOutcome] = None,
+) -> tuple[str, str]:
+    """15:40 매도 판단 검증 이메일 (스펙 2026-09-22 3.4).
+
+    잣대는 순수익이다 — 분류(순이익 확정/놓침/기회 없음)가 맨 앞에 온다. 표가 없어
+    HTML을 함께 만들지 않는다. (제목, 평문)만 돌려준다.
+
+    `tuning`은 바로 앞에 돈 매도 프롬프트 자동 수정의 결과다 (PRD 5.15).
+    """
+    known = [r.net_pnl for r in rows if r.net_pnl is not None]
+    total = sum(known)
+    subject = f"[AutoTrade] {today:%Y-%m-%d} 매도 판단 검증 {len(rows)}종목 (순손익 {total:+,.0f}원)"
+
+    counts = {key: sum(1 for r in rows if r.outcome == key) for key in OUTCOME_LABELS}
+    lines = [
+        f"{today:%Y-%m-%d} 매도한 종목의 순손익과 AI 매도 판단 이력입니다.",
+        f"합계 순손익 {total:+,.0f}원 — "
+        + " / ".join(f"{OUTCOME_LABELS[key]} {counts[key]}" for key in OUTCOME_LABELS),
+        "",
+    ]
+    for i, row in enumerate(rows, start=1):
+        pnl = "모름" if row.net_pnl is None else f"{row.net_pnl:+,.0f}원"
+        lines.append(f"{i}. {row.label} — {OUTCOME_LABELS.get(row.outcome, row.outcome)}")
+        lines.append(f"   순손익 {pnl} ({_ratio_text(row.net_return)}), 보유 중 고점 {_ratio_text(row.peak_return)}")
+        lines.append(
+            f"   청산: {EXIT_REASON_LABELS.get(row.exit_reason, row.exit_reason or '모름')}"
+            f" · 매도 프롬프트 {row.exit_prompt_version or '-'}"
+        )
+        mine = [d for d in decisions if d.ticker == row.ticker]
+        if not mine:
+            lines.append("   AI 판단 이력: 없음")
+        for d in mine:
+            verdict = "매도" if d.sell else ("보유(판단 실패)" if not d.ok else "보유")
+            lines.append(
+                f"   - {d.at:%H:%M} {_ratio_text(d.net_return)} (고점 {_ratio_text(d.peak_return)}) "
+                f"{verdict}: {d.reason}"
+            )
+        if row.review:
+            lines.append(f"   평가: {row.review}")
+        lines.append("")
+
+    lines.extend(_tuning_lines("매도 프롬프트 자동 수정", tuning))
+    lines.append("※ 순손익은 수수료·세금을 뺀 값입니다. 고점은 엔진이 켜져 있던 동안만 잽니다.")
+    return subject, "\n".join(lines)
+
+
+def exit_prompt_tuning_email(
+    today: date,
+    old_version: str,
+    new_version: str,
+    reason: str,
+    stats: List["ExitVersionStats"],
+    before: Dict[str, str],
+    after: Dict[str, str],
+) -> tuple[str, str]:
+    """매도 프롬프트를 자동 수정한 날 나가는 이메일 (스펙 2026-09-22 4.3). 고친 날만 발송한다."""
+    subject = f"[AutoTrade] {today:%Y-%m-%d} 매도 프롬프트 수정 ({old_version} → {new_version})"
+    lines = [
+        f"{today:%Y-%m-%d} 매도 프롬프트를 자동으로 수정했습니다 ({old_version} → {new_version}).",
+        "",
+        "## 수정 이유",
+        reason or "(없음)",
+        "",
+        "## 근거 — 버전별 성과 (순손익 기준)",
+    ]
+    for s in stats:
+        lines.append(
+            f" - {s.version}: {s.count}건 | 확정 {s.captured} / 놓침 {s.missed} / 기회 없음 {s.no_chance} | "
+            f"순손익 합계 {s.net_pnl_total:+,.0f}원"
+        )
+    if not stats:
+        lines.append(" - (비교할 성과 데이터 없음)")
+    for key in sorted(after):
+        lines.extend(["", f"## 바뀐 절: {key}", "", "[이전]", before.get(key, "(없음)"), "", "[이후]", after[key]])
+    lines.extend([
+        "",
+        f"※ 되돌리려면 data/exit_prompt/history/{old_version}/ 의 파일들을 data/exit_prompt/ 로 복사하십시오.",
+        "※ 수정된 프롬프트는 다음 AI 매도 판단부터 적용됩니다 (엔진 재시작 불필요).",
+    ])
+    return subject, "\n".join(lines)
 
 
 def buy_result_email(execution: BuyExecution) -> tuple[str, str, str]:

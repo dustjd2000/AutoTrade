@@ -66,6 +66,9 @@ SCHEDULED_ACTIONS: Dict[str, str] = {
     "daily_reset": "일일 상태 초기화",
     "close_out": "마감 정리 (미체결 취소 + 전량 청산)",
     "daily_report": "최종 리포트 메일 (스케줄)",
+    # 매도 프롬프트 자동 수정은 이 검증 안에서 돈다 — 수정 여부를 검증 메일에 싣기 위해서다
+    # (2026-10-29 2호용으로 복구, PRD 5.14·5.15)
+    "review_exits": "매도 판단 검증·프롬프트 자동 수정 (스케줄)",
 }
 
 ACTION_LABELS: Dict[str, str] = {**MANUAL_ACTIONS, **SCHEDULED_ACTIONS}
@@ -161,6 +164,10 @@ def manual_steps(runtime, action: str, tickers: Iterable[str] = ()) -> List[Manu
         ],
         "daily_report": lambda: [
             ManualStep(SCHEDULED_ACTIONS["daily_report"], runtime.workflow.send_final_report)
+        ],
+        # 체결 동기화·LLM 호출·프롬프트 파일 쓰기가 걸리므로 루프 스레드를 쓰지 않는다.
+        "review_exits": lambda: [
+            ManualStep(SCHEDULED_ACTIONS["review_exits"], runtime.workflow.review_exits)
         ],
     }
     # 일괄 실행은 '진입'까지만 — 청산과 리포트는 스케줄에 맡긴다.

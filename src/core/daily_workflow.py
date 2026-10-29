@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional
 
 from src.api.account import AccountClient
+from src.core import exit_review
 from src.core.engine import TradingEngine
 from src.core.events import (
     BuyExecution,
@@ -16,8 +17,12 @@ from src.core.events import (
     OrderSide,
     OrderStatus,
     OrderType,
+    TuningOutcome,
     format_stock,
 )
+from src.llm import exit_reviewer as exit_reviewer_module
+from src.llm import exit_tuner as exit_tuner_module
+from src.llm.exit_advisor import build_exit_locked_text, make_exit_prompt_store
 from src.logger.trade_store import MonthlySummary, TradeStore
 from src.notification.email import EmailNotifier
 from src.notification import chart, templates
@@ -62,6 +67,13 @@ def _is_market_closed_rejection(message: Optional[str]) -> bool:
     return any(marker in text for marker in MARKET_CLOSED_REJECT_TEXTS)
 
 
+def _no_change_outcome(result) -> TuningOutcome:
+    """튜너가 고치지 않기로 했거나(change=False) 응답을 못 받은(None) 결과."""
+    if result is None:
+        return TuningOutcome(changed=False, reason="판단 실패")
+    return TuningOutcome(changed=False, reason=getattr(result, "reason", "") or "고칠 필요 없음")
+
+
 # 잔고 대조로 접수 행을 옮길 때 쓰는 상태 (`_settled_row`) — 부분체결은 표에 남지만
 # 체크 열은 비운다. 남은 미체결분만 골라 취소하면 이미 체결된 몫까지 덮어쓰기 때문이다.
 BUY_PARTIAL_STATUS = templates.BUY_OUTCOME_LABELS[BuyOutcome.PARTIALLY_FILLED]
@@ -86,8 +98,10 @@ class DailyWorkflow:
     결정 시각 recommend_and_notify(결정 → 곧바로 execute_buys로 시장가 매수) → 매수 시각
     execute_buys(재시작 대비 안전망) → 10:10 cancel_unfilled_buys → 15:35 send_final_report
     (보유 종목이 그 전에 전량 매도되고 체결까지 확인되면 15:35를 기다리지 않고 최종 리포트를 보낸다)
+    → 15:40 review_exits (매도 판단 검증 + 매도 프롬프트 자동 수정)
 
-    1호 전략(LLM 대형주 추천·뉴스 검증·15:35 검증과 프롬프트 자동 수정)은 2026-10-23에 폐지됐다.
+    1호 전략(LLM 대형주 추천·뉴스 검증·추천 검증과 추천 프롬프트 자동 수정)은 2026-10-23에 폐지됐다.
+    매도 판단 검증·매도 프롬프트 자동 수정은 2026-10-29에 2호(ETF)용으로 복구했다.
     """
 
     def __init__(
@@ -97,6 +111,10 @@ class DailyWorkflow:
         account: AccountClient,
         trade_store: TradeStore,
         email: EmailNotifier,
+        exit_reviewer=None,
+        exit_tuner=None,
+        exit_prompt_store=None,
+        tune_skip_monthly_return_ratio: float = 0.05,
         ws_client=None,
         report_mark_path: Optional[Path] = None,
         buy_records_path: Optional[Path] = None,
@@ -108,6 +126,15 @@ class DailyWorkflow:
         self.account = account
         self.trade_store = trade_store
         self.email = email
+        # 15:40 매도 판단 검증의 LLM 평가 모듈 (PRD 5.14). None이면 수치만 남긴다.
+        self.exit_reviewer = exit_reviewer
+        # 매도 프롬프트 자동 수정 (PRD 5.15). None이면 단계 자체를 건너뛴다.
+        self.exit_tuner = exit_tuner
+        self.exit_prompt_store = (
+            exit_prompt_store if exit_prompt_store is not None else make_exit_prompt_store()
+        )
+        # 이번 달 순수익률이 이 값 이상이면 매도 프롬프트를 고치지 않는다 (스펙 4-A)
+        self.tune_skip_monthly_return_ratio = tune_skip_monthly_return_ratio
         self.ws_client = ws_client
         # 최종 리포트를 보낸 날짜 — 전량 매도 완료와 15:35 스케줄이 중복 발송하지 않도록
         # 공유하는 표시다 (send_final_report). 매수로 보유가 다시 생기면 초기화된다.
@@ -1002,3 +1029,194 @@ class DailyWorkflow:
         monthly.base_asset = snapshot.total_asset - monthly.net_pnl
         return monthly
 
+    def _monthly_return_block_reason(self, today: date) -> Optional[str]:
+        """이번 달 순수익률이 기준 이상이면 그 사유 — 매도 프롬프트를 고치지 않는다 (스펙 4-A).
+
+        수익률을 알 수 없으면(잔고 조회 실패·기준자산 0 이하) 역시 사유를 돌려준다 — 아무것도
+        바꾸지 않는 것이 기본 상태다. 막지 않으면 None. 사유는 검증 메일에 그대로 실린다.
+        """
+        try:
+            snapshot = self.account.get_balance_snapshot()
+        except Exception:
+            logger.warning("잔고 조회 실패 — 월 순수익을 알 수 없어 프롬프트를 고치지 않습니다.", exc_info=True)
+            return "잔고 조회 실패로 이번 달 순수익을 알 수 없음"
+        monthly = self._monthly_summary_with_base(today, snapshot)
+        if monthly.base_asset <= 0:
+            logger.warning("월초 자산 추정치가 0 이하라 월 순수익을 알 수 없어 프롬프트를 고치지 않습니다.")
+            return "월초 자산 추정치가 0 이하라 이번 달 순수익을 알 수 없음"
+        ratio = monthly.net_pnl / monthly.base_asset
+        if ratio >= self.tune_skip_monthly_return_ratio:
+            logger.info(
+                "이번 달 순수익 %+.2f%% ≥ 기준 %.1f%% — 프롬프트를 고치지 않습니다 (%s).",
+                ratio * 100, self.tune_skip_monthly_return_ratio * 100, today,
+            )
+            return (
+                f"이번 달 순수익 {ratio * 100:+.2f}% ≥ 기준 "
+                f"{self.tune_skip_monthly_return_ratio * 100:.1f}%"
+            )
+        return None
+
+    @staticmethod
+    def _tune_for_review_mail(tune, today: date) -> Optional[TuningOutcome]:
+        """검증 메일에 실을 자동 수정 결과를 받는다. 예상 못 한 예외도 메일을 막지 않는다.
+
+        자동 수정은 검증과 한 단계로 묶여 있어, 여기서 삼키지 않으면 검증 메일까지 함께 사라진다.
+        """
+        try:
+            return tune(today)
+        except Exception:
+            logger.exception("프롬프트 자동 수정이 실패했습니다 — 검증 메일은 그대로 보냅니다.")
+            return TuningOutcome(changed=False, reason="판단 실패")
+
+    def review_exits(self, today: Optional[date] = None) -> None:
+        """15:40 — 오늘 매도한 ETF의 순손익을 AI 매도 판단 이력과 대조해 남기고, 매도
+        프롬프트 자동 수정을 돌린 뒤 그 결과까지 실어 메일로 보낸다 (PRD 5.14·5.15).
+
+        잣대는 순수익이다 (스펙 2026-09-22 1절). 분류는 코드가(`exit_review`), 평가문은 LLM이
+        쓴다. 매도가 없던 날은 메일이 없지만 자동 수정은 돈다 (쌓인 표본이 재료다).
+        어떤 실패도 매매에 영향이 없다. 자동 수정을 여기서 부르는 이유는 수정 여부를 검증
+        메일에 싣기 위해서다. 2호(ETF) 종목(`etf_regime.ETF_TICKERS`)만 대상이다.
+        """
+        today = today or date.today()
+        self._sync_fills(today)
+        decisions = [
+            d for d in self.trade_store.ai_exit_decisions_for(today)
+            if d.ticker in etf_regime.ETF_TICKERS
+        ]
+        trades = [
+            t for t in self.trade_store.daily_summary(today).trades
+            if t.ticker in etf_regime.ETF_TICKERS
+        ]
+        rows = exit_review.build_exit_review_rows(
+            today,
+            trades,
+            self.trade_store.position_peaks_for(today),
+            decisions,
+            self.trade_store.last_exit_reasons(today),
+            self.trade_store.tickers_with_unknown_pnl(today),
+        )
+        if rows:
+            self._fill_exit_reviews(today, rows, decisions)
+            for row in rows:
+                try:
+                    self.trade_store.save_exit_review(row)
+                except Exception:
+                    logger.exception("매도 판단 검증 저장 실패: %s", row.label)
+        else:
+            logger.info("오늘 매도한 ETF가 없습니다 — 매도 판단 검증을 건너뜁니다 (%s).", today)
+
+        # 검증 **다음**에 돈다 — 오늘 저장한 검증 결과까지 표본에 든다 (스펙 2026-09-22 3.1)
+        tuning = self._tune_for_review_mail(self.tune_exit_prompt, today)
+        if not rows:
+            return
+
+        subject, body = templates.exit_review_email(rows, decisions, today, tuning)
+        self.email.send(subject, body)
+        logger.info("매도 판단 검증 메일 발송 (%s, %d종목)", today, len(rows))
+
+    def _fill_exit_reviews(self, today: date, rows, decisions) -> None:
+        """LLM 평가문을 받아 rows에 채운다. 판정 불가(unknown) 종목은 보내지 않는다."""
+        if self.exit_reviewer is None:
+            return
+        # 아침 시나리오는 2호의 오늘 결정(메모리)에서 읽는다 — 엔진이 재시작돼 비었으면 빈 문자열이다
+        recommendations = {
+            r.ticker: r for r in getattr(self.strategy, "_recommendations", None) or []
+        }
+        items = [
+            exit_reviewer_module.ExitReviewInput(
+                row=row,
+                decisions=[d for d in decisions if d.ticker == row.ticker],
+                outlook=recommendations[row.ticker].outlook if row.ticker in recommendations else "",
+                target_sell_price=0,  # 2호는 목표 매도가가 없다
+            )
+            for row in rows
+            if row.outcome != exit_review.UNKNOWN
+        ]
+        if not items:
+            return
+        try:
+            reviews = self.exit_reviewer.review(items)
+        except Exception:
+            logger.exception("매도 판단 평가 호출이 실패했습니다 — 수치만으로 메일을 보냅니다.")
+            return
+        for row in rows:
+            row.review = (reviews or {}).get(row.ticker, "")
+
+    def tune_exit_prompt(
+        self, today: Optional[date] = None, force: bool = False
+    ) -> Optional[TuningOutcome]:
+        """15:40 — 매도 판단 검증 결과를 보고 매도 프롬프트의 편집 가능한 절을 고친다 (PRD 5.15).
+
+        매도 판단 검증(`review_exits`)이 그 끝에서 부른다. 게이트는 순서대로 월 순수익(4-A) →
+        표본 `MIN_REVIEWS_FOR_TUNING`건(4.3)이고, 둘 다 LLM 호출 전에 코드가 본다. 고친 날만 수정
+        메일이 나가고, 고치지 않는 날이 정상이다. 결과는 검증 메일에 싣도록 돌려준다.
+        표본은 ETF(2호) 행만 센다 — `exit_reviews`에 남은 옛 1호 주식 행은 들어오지 않는다.
+
+        `force`는 월 순수익 게이트만 건너뛴다 (지금은 부르는 버튼이 없다). 표본 요건은 그대로 본다.
+        """
+        today = today or date.today()
+        if self.exit_tuner is None:
+            return None
+        if not force:
+            blocked = self._monthly_return_block_reason(today)
+            if blocked:
+                return TuningOutcome(changed=False, reason=blocked)
+
+        old_version = self.exit_prompt_store.load_version()
+        verified = self.trade_store.count_exit_reviews(old_version, etf_regime.ETF_TICKERS)
+        if verified < exit_tuner_module.MIN_REVIEWS_FOR_TUNING:
+            logger.info(
+                "매도 프롬프트 %s로 검증된 종목이 %d건이라(기준 %d건) 고치지 않습니다 (%s).",
+                old_version, verified, exit_tuner_module.MIN_REVIEWS_FOR_TUNING, today,
+            )
+            return TuningOutcome(
+                changed=False,
+                reason=(
+                    f"현 버전 {old_version} 검증 {verified}건 < 기준 "
+                    f"{exit_tuner_module.MIN_REVIEWS_FOR_TUNING}건"
+                ),
+            )
+
+        rows = self.trade_store.recent_exit_reviews(tickers=etf_regime.ETF_TICKERS)
+        stats = exit_tuner_module.group_by_version(rows)
+        before = self.exit_prompt_store.load_sections()
+        # 사람이 코드로 고친 이력(v5·v6)을 앞에 붙여 튜너가 그 수정을 되돌리지 않게 한다
+        result = self.exit_tuner.tune(
+            stats,
+            rows,
+            before,
+            build_exit_locked_text(),
+            exit_tuner_module.with_code_history(self.exit_prompt_store.why_history()),
+        )
+        if result is None or not result.change:
+            logger.info(
+                "매도 프롬프트를 고치지 않습니다 (%s): %s", today, getattr(result, "reason", "판단 실패")
+            )
+            return _no_change_outcome(result)
+
+        sections = exit_tuner_module.sanitize_sections(result.sections)
+        if not sections:
+            logger.warning("매도 프롬프트 수정안이 안전장치에 전부 걸렸습니다 — 그대로 둡니다 (%s).", today)
+            return TuningOutcome(changed=False, reason="수정안이 안전장치에 전부 걸림")
+
+        try:
+            new_version = self.exit_prompt_store.save(sections, result.reason, today)
+        except OSError:
+            logger.exception("매도 프롬프트 파일 쓰기에 실패했습니다 — 그대로 둡니다.")
+            return TuningOutcome(changed=False, reason="프롬프트 파일 쓰기 실패")
+
+        after = self.exit_prompt_store.load_sections()
+        subject, body = templates.exit_prompt_tuning_email(
+            today,
+            old_version,
+            new_version,
+            result.reason,
+            stats,
+            {key: before[key] for key in sections},
+            {key: after[key] for key in sections},
+        )
+        self.email.send(subject, body)
+        logger.info("매도 프롬프트 수정 메일 발송 (%s, %s → %s)", today, old_version, new_version)
+        return TuningOutcome(
+            changed=True, reason=result.reason, old_version=old_version, new_version=new_version
+        )

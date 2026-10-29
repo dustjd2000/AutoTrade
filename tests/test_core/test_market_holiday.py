@@ -27,7 +27,7 @@ def test_scheduled_actions_are_skipped_on_a_holiday():
     submitted = []
     runtime = make_runtime(True, submitted)
 
-    for action in ("recommend", "buy", "cancel_unfilled", "daily_report"):
+    for action in ("recommend", "buy", "cancel_unfilled", "daily_report", "review_exits"):
         _submit(runtime, action)()
 
     assert submitted == []

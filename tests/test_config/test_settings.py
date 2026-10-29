@@ -4,6 +4,7 @@ import pytest
 
 from config.settings import (
     DEFAULT_RECOMMEND_TIME_HHMM,
+    TUNE_SKIP_MONTHLY_RETURN_CHOICES,
     Settings,
     parse_flag,
 )
@@ -252,3 +253,34 @@ def test_validate_rejects_too_small_ai_exit_step(monkeypatch):
     monkeypatch.setenv("AI_EXIT_STEP_PERCENT", "0.05")
     with pytest.raises(ValueError, match="AI_EXIT_STEP_PERCENT"):
         _valid_settings(monkeypatch).validate()
+
+
+# ── 프롬프트 수정 중지 기준 (스펙 2026-09-22 4-A, 2026-10-29 복구) ──────────────
+def test_tune_skip_defaults_to_5_percent(monkeypatch):
+    monkeypatch.delenv("TUNE_SKIP_MONTHLY_RETURN_PERCENT", raising=False)
+    settings = Settings()
+    assert settings.tune_skip_monthly_return_percent == 5.0
+    assert settings.tune_skip_monthly_return_ratio == 0.05
+
+
+def test_tune_skip_reads_env(monkeypatch):
+    monkeypatch.setenv("TUNE_SKIP_MONTHLY_RETURN_PERCENT", "7.5")
+    assert Settings().tune_skip_monthly_return_ratio == 0.075
+
+
+def test_tune_skip_choices_run_from_1_to_10_by_half():
+    assert TUNE_SKIP_MONTHLY_RETURN_CHOICES[0] == 1.0
+    assert TUNE_SKIP_MONTHLY_RETURN_CHOICES[-1] == 10.0
+    assert len(TUNE_SKIP_MONTHLY_RETURN_CHOICES) == 19
+
+
+@pytest.mark.parametrize("raw", ["0.5", "10.5", "3.3", "abc", " "])
+def test_bad_tune_skip_value_falls_back_to_5(monkeypatch, raw):
+    """튜닝 전용 값 하나 때문에 엔진이 뜨지 않으면 안 된다 — 경고 후 기본값."""
+    monkeypatch.setenv("TUNE_SKIP_MONTHLY_RETURN_PERCENT", raw)
+    assert Settings().tune_skip_monthly_return_percent == 5.0
+
+
+def test_bad_tune_skip_value_does_not_stop_the_engine(monkeypatch):
+    monkeypatch.setenv("TUNE_SKIP_MONTHLY_RETURN_PERCENT", "7.3")
+    _valid_settings(monkeypatch).validate()

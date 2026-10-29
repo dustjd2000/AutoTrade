@@ -1,7 +1,14 @@
 from datetime import date, datetime
 
-from src.core.events import BuyExecution, BuyOutcome, BuyRecord, UnsellableView
-from src.logger.trade_store import DailySummary, MonthlySummary, TradeRow
+from src.core.events import BuyExecution, BuyOutcome, BuyRecord, TuningOutcome, UnsellableView
+from src.llm.exit_tuner import ExitVersionStats
+from src.logger.trade_store import (
+    AIExitDecisionRow,
+    DailySummary,
+    ExitReviewRow,
+    MonthlySummary,
+    TradeRow,
+)
 from src.notification import templates
 
 DAY = date(2026, 7, 29)
@@ -417,3 +424,63 @@ def test_monthly_chart_is_embedded_only_when_given():
     assert "<img" not in without
 
 
+
+
+# ── 매도 판단 검증 · 매도 프롬프트 수정 메일 (2026-10-29 복구, PRD 5.14·5.15) ──
+def _exit_row(review=""):
+    return ExitReviewRow(
+        day=date(2026, 10, 29), ticker="069500", name="KODEX 200", exit_prompt_version="v6",
+        net_pnl=-2_180.0, net_return=-0.0061, peak_return=0.0156, outcome="missed",
+        exit_reason="day_end", decision_count=2, review=review,
+    )
+
+
+def _exit_decision():
+    return AIExitDecisionRow(
+        day=date(2026, 10, 29), at=datetime(2026, 10, 29, 9, 54), ticker="069500", name="KODEX 200",
+        sell=False, ok=True, reason="이익이 남아 있다", net_return=0.0021, peak_return=0.0156,
+        current_price=36_100.0, exit_prompt_version="v6",
+    )
+
+
+def test_exit_review_email_lists_numbers_decisions_and_review():
+    subject, body = templates.exit_review_email(
+        [_exit_row("09:54 이익이 녹는 중에도 보유했다.")], [_exit_decision()], date(2026, 10, 29)
+    )
+    assert "매도 판단 검증 1종목" in subject and "-2,180원" in subject
+    assert "순이익 기회를 놓침 1" in body
+    assert "15:15 강제청산" in body
+    assert "09:54" in body and "이익이 남아 있다" in body
+    assert "평가: 09:54 이익이 녹는 중에도 보유했다." in body
+
+
+def test_exit_review_email_reports_the_prompt_change():
+    tuning = TuningOutcome(changed=True, reason="놓침 5건", old_version="v6", new_version="20261030")
+    _, body = templates.exit_review_email([_exit_row()], [], date(2026, 10, 30), tuning=tuning)
+    assert "■ 매도 프롬프트 자동 수정" in body
+    assert "수정함 (v6 → 20261030)" in body and "놓침 5건" in body
+
+
+def test_exit_review_email_reports_why_the_prompt_was_not_changed():
+    tuning = TuningOutcome(changed=False, reason="이번 달 순수익 +6.10% ≥ 기준 5.0%")
+    _, body = templates.exit_review_email([_exit_row()], [], date(2026, 10, 30), tuning=tuning)
+    assert "수정 안 함 — 이번 달 순수익 +6.10% ≥ 기준 5.0%" in body
+
+
+def test_exit_review_email_has_no_tuning_block_without_an_outcome():
+    _, body = templates.exit_review_email([_exit_row()], [], date(2026, 10, 30))
+    assert "프롬프트 자동 수정" not in body
+
+
+def test_exit_prompt_tuning_email_shows_versions_reason_and_diff():
+    subject, body = templates.exit_prompt_tuning_email(
+        date(2026, 10, 30), "v6", "20261030", "놓침 5건 중 4건이라 이익 확정을 앞당겼습니다.",
+        [ExitVersionStats("v6", 5, 1, 4, 0, -2_500.0, -0.005, 0.012)],
+        before={"time": "## 시간\n예전 내용"},
+        after={"time": "## 시간\n새 내용"},
+    )
+    assert "매도 프롬프트 수정 (v6 → 20261030)" in subject
+    assert "놓침 5건 중 4건" in body
+    assert "v6: 5건" in body
+    assert "예전 내용" in body and "새 내용" in body
+    assert "data/exit_prompt/history/v6/" in body

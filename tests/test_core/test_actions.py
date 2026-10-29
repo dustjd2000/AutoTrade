@@ -20,6 +20,7 @@ def make_runtime(calls):
         cancel_unfilled_buys=lambda: calls.append("cancel_unfilled"),
         send_daily_report=lambda: calls.append("report"),
         send_final_report=lambda: calls.append("final_report"),
+        review_exits=lambda: calls.append("review_exits"),
         drop_buy_plans=lambda tickers: calls.append(f"drop_plan:{','.join(tickers)}"),
     )
     engine = SimpleNamespace(
@@ -39,6 +40,7 @@ def make_runtime(calls):
         ("daily_reset", ["daily_reset"]),
         ("close_out", ["cancel_unfilled", "sell_all:day_end"]),
         ("daily_report", ["final_report"]),
+        ("review_exits", ["review_exits"]),
     ],
 )
 def test_scheduled_action_runs_matching_step(action, expected):
@@ -70,6 +72,14 @@ def test_daily_reset_and_close_out_run_on_the_engine_loop():
     runtime = make_runtime([])
     assert [s.touches_orders for s in manual_steps(runtime, "daily_reset")] == [True]
     assert [s.touches_orders for s in manual_steps(runtime, "close_out")] == [True]
+
+
+def test_review_exits_is_scheduled_only_and_off_the_loop():
+    """LLM 호출·체결 동기화가 걸리므로 루프 스레드를 쓰지 않는다. 주문을 내지 않는다 (PRD 5.14)."""
+    assert "review_exits" in SCHEDULED_ACTIONS
+    assert "review_exits" not in MANUAL_ACTIONS
+    assert "review_exits" not in ORDER_ACTIONS
+    assert [s.touches_orders for s in manual_steps(make_runtime([]), "review_exits")] == [False]
 
 
 def test_daily_report_runs_off_the_loop():
@@ -231,6 +241,7 @@ SCHEDULED_KEYS = [
     "cancel_unfilled",
     "close_out",
     "daily_report",
+    "review_exits",
 ]
 
 
@@ -239,7 +250,7 @@ def test_every_scheduled_key_is_a_known_action():
 
 
 def test_submitting_every_scheduled_key_runs_the_daily_flow():
-    """스케줄러가 넣는 여섯 키가 전부 접수되고 하루 흐름 순서대로 돈다."""
+    """스케줄러가 넣는 일곱 키가 전부 접수되고 하루 흐름 순서대로 돈다."""
     calls = []
     runner = ActionRunner(make_runtime(calls))
 
@@ -253,4 +264,5 @@ def test_submitting_every_scheduled_key_runs_the_daily_flow():
         "cancel_unfilled",
         "sell_all:day_end",
         "final_report",
+        "review_exits",
     ]

@@ -45,7 +45,7 @@ pytest tests/test_strategy/test_etf_regime.py -k name    # 테스트 단위 (-k 
   함께 정지한다.
 - `EngineThread`가 자신만의 asyncio 이벤트 루프를 새로 만들어 소유하고, 그 위에서
   `src/core/runtime.py`의 `TimeScheduler`(시간 기반 08:40 초기화/결정 시각/매수 시각/10:10
-  미체결 취소/15:15 강제청산/15:35 일일 리포트)와 `WebSocketClient` 콜백(실시간 시세 기반)이 함께
+  미체결 취소/15:15 강제청산/15:35 일일 리포트/15:40 매도 판단 검증·프롬프트 자동 수정)와 `WebSocketClient` 콜백(실시간 시세 기반)이 함께
   돈다. 이 중 **결정 시각과 매수 시각만 설정값**이고 (`settings.recommend_time`/`buy_time`,
   `.env`의 `RECOMMEND_TIME`·`BUY_TIME` — 이름은 1호 시절 그대로다) 나머지는 코드 상수다. 결정
   시각에 ETF를 정하고 **같은 실행에서 곧바로 시장가로 산다**. 매수 시각은 그 사이 엔진이 재시작돼
@@ -93,10 +93,15 @@ pytest tests/test_strategy/test_etf_regime.py -k name    # 테스트 단위 (-k 
 - `config/settings.py`의 `Settings` dataclass가 `os.getenv` 기본값 조합으로 모든 설정을
   담는다. 별도 JSON/YAML 설정 파일은 쓰지 않는다.
 - **예외가 하나 있다: `data/exit_prompt/`.** 매도 프롬프트의 편집 가능한 세 절(손실 중인 종목·
-  시간·판단 기준)이 여기 파일로 있다 — 1호 시절 15:35 자동 수정 에이전트가 덧쓰던 런타임 상태다.
-  자동 수정은 2026-10-23에 폐지돼 이제 `PromptStore`는 **읽기 전용**이고, 매 AI 매도 판단마다
-  파일을 읽으며, 파일이 없으면 코드의 `DEFAULT_EXIT_PROMPT_SECTIONS`로 폴백한다 — `/data/`는
-  gitignore 대상이라 코드 쪽이 정본이다.
+  시간·판단 기준)이 여기 파일로 있다 — 15:40 자동 수정 에이전트가 덧쓰는 런타임 상태다. 1호와 함께
+  2026-10-23에 폐지됐던 **매도 판단 검증(`DailyWorkflow.review_exits`)과 매도 프롬프트 자동 수정
+  (`tune_exit_prompt`)이 2026-10-29에 2호용으로 복구됐다**(ETF 행만 표본, 게이트 5건, PRD 5.14·5.15).
+  `PromptStore`는 매 AI 매도 판단마다 파일을 읽고, 파일이 없으면 코드의 `DEFAULT_EXIT_PROMPT_SECTIONS`로
+  폴백한다 — `/data/`는 gitignore 대상이라 코드 쪽이 정본이다. **파일은 코드 프롬프트 버전이 같을 때만
+  쓰인다**: 저장할 때 `base` 파일에 기반 버전(`EXIT_PROMPT_TEMPLATE_VERSION`)을 함께 남기고, 코드 버전이
+  올라 `base`와 어긋나면(또는 `base`가 없으면) 파일을 무시하고 코드 기본값을 쓴다 — 사람이 코드
+  프롬프트를 고친 것을 옛 자동 수정 파일이 덮어쓰지 않게 하는 장치다. 프롬프트 버전을 올릴 때는
+  `exit_advisor.CODE_CHANGE_HISTORY`에도 한 항목을 더한다(튜너가 사람의 변경을 되돌리지 않게).
 - UI가 다루는 값은 `src/ui/env_store.py`(`load_env`/`save_env`)로 `.env`를 직접 파싱해
   읽고 쓴다 — `python-dotenv`는 파일 쓰기를 지원하지 않아 자체 구현한 것.
 - 엔진은 **시작 시점에 읽은 `Settings`를 그대로 들고 돈다.** 그래서 "설정 저장" 시 값이

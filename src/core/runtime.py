@@ -34,6 +34,8 @@ from src.core.engine import TradingEngine
 from src.core.events import ExitReason, OrderSide
 from src.core.etf_exit_trigger import StepTrigger
 from src.llm.exit_advisor import ExitAdvisor, HoldingView, UserSell, make_exit_prompt_store
+from src.llm.exit_reviewer import ExitReviewer
+from src.llm.exit_tuner import ExitPromptTuner
 from src.logger.trade_store import AIExitDecisionRow, TradeStore
 from src.notification.alert import AlertNotifier
 from src.notification.email import EmailNotifier
@@ -57,6 +59,9 @@ CANCEL_UNFILLED_TIME = dt_time(10, 10)  # 미체결 매수 취소 → 매수 결
 # 리포트는 반대로 마감 뒤로 5분 물려, 마감 동시호가 체결분까지 체결내역에 잡힌 뒤 집계한다.
 FORCE_CLOSE_TIME = dt_time(15, 15)  # 당일 매도 원칙에 따른 미청산 포지션 정리
 REPORT_TIME = dt_time(15, 35)       # 일일/월간 성과 리포트 이메일 (정규장 마감 15:30 이후)
+# 매도 판단 검증·매도 프롬프트 자동 수정 — 리포트 다음이다. 마감 동시호가 체결분까지 체결내역에
+# 잡힌 뒤라야 순손익을 제대로 대조한다 (PRD 5.14). 같은 큐를 타므로 리포트와 겹치면 순서대로 돈다.
+REVIEW_EXITS_TIME = dt_time(15, 40)
 
 # 시세 끊김 감시 — 손절이 실시간 시세에만 의존하므로(키움 REST 스탑오더 미지원),
 # 보유 종목이 있는데 시세가 끊기면 손절이 조용히 멈춘다. 그 공백을 알린다.
@@ -199,17 +204,23 @@ def build_runtime(settings: Settings) -> Runtime:
     )
     ws_client.on_data(engine.on_market_data)
 
+    # 매도 프롬프트 저장소는 AI 매도 판단(읽기)과 15:40 자동 수정(쓰기)이 함께 쓴다
+    exit_prompt_store = make_exit_prompt_store()
     workflow = DailyWorkflow(
         strategy=strategy,
         engine=engine,
         account=account,
         trade_store=trade_store,
         email=email,
+        exit_reviewer=ExitReviewer(settings),
+        exit_tuner=ExitPromptTuner(settings),
+        exit_prompt_store=exit_prompt_store,
+        tune_skip_monthly_return_ratio=settings.tune_skip_monthly_return_ratio,
         ws_client=ws_client,
         etf_kill_loss_percent=settings.etf_kill_loss_percent,
         etf_start_date=date.fromisoformat(settings.etf_start_date) if settings.etf_start_date else None,
     )
-    exit_advisor = ExitAdvisor(settings, prompt_store=make_exit_prompt_store())
+    exit_advisor = ExitAdvisor(settings, prompt_store=exit_prompt_store)
 
     # 매수/강제청산은 실시간 손절 감시와 직렬화되도록 루프 스레드에서 그대로 실행하고,
     # 오래 걸리는 수집·LLM·리포트는 루프를 막지 않도록 별도 스레드로 넘긴다 — 이 배분은
@@ -235,6 +246,7 @@ def build_runtime(settings: Settings) -> Runtime:
         (CANCEL_UNFILLED_TIME, "cancel_unfilled"),
         (FORCE_CLOSE_TIME, "close_out"),
         (REPORT_TIME, "daily_report"),
+        (REVIEW_EXITS_TIME, "review_exits"),
     ):
         scheduler.add_job(
             trigger_time,

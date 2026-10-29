@@ -580,6 +580,7 @@ def test_advisor_reads_the_store_on_every_call(tmp_path):
     folder.mkdir()
     (folder / "time.md").write_text("## 시간\n" + "새 시간 지침 " * 10, encoding="utf-8")
     (folder / "version").write_text("20260929", encoding="utf-8")
+    (folder / "base").write_text(EXIT_PROMPT_TEMPLATE_VERSION, encoding="utf-8")
 
     assert advisor.prompt_version == "20260929"
     assert "새 시간 지침" in build_exit_system_prompt(advisor.prompt_store.load_sections())
