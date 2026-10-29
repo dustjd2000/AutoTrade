@@ -69,17 +69,20 @@ def test_regime_signal_is_mean_of_intraday_returns():
     assert abs(regime_signal(rows, TODAY) - 0.25) < 1e-9
 
 
-def test_pick_etf_follows_the_signal_direction_beyond_the_threshold():
+def test_pick_etf_follows_the_signal_sign():
     assert pick_etf(0.2) == LONG_ETF
     assert pick_etf(0.6) == LONG_ETF
     assert pick_etf(-0.2) == INVERSE_ETF
     assert pick_etf(-0.6) == INVERSE_ETF
 
 
-def test_pick_etf_rests_inside_the_threshold_or_without_signal():
-    assert pick_etf(0.19) is None
-    assert pick_etf(-0.19) is None
-    assert pick_etf(0.0) is None
+def test_pick_etf_has_no_dead_band():
+    assert pick_etf(0.1) == LONG_ETF
+    assert pick_etf(-0.1) == INVERSE_ETF
+    assert pick_etf(0.0) == LONG_ETF
+
+
+def test_pick_etf_rests_only_without_signal():
     assert pick_etf(None) is None
 
 
@@ -108,13 +111,14 @@ def test_etf_tickers_are_the_two_etfs():
 def test_pick_etf_flips_when_today_moves_against_the_signal():
     assert pick_etf(-0.6, day_return=0.3) == LONG_ETF       # 인버스 신호인데 오늘 지수가 올랐다
     assert pick_etf(0.6, day_return=-0.3) == INVERSE_ETF    # 반대도 같다
-    assert pick_etf(-0.6, day_return=0.19) == INVERSE_ETF   # 문턱 안쪽이면 그대로
+    assert pick_etf(-0.6, day_return=0.19) == INVERSE_ETF   # 뒤집기 기준 안쪽이면 그대로
+    assert pick_etf(0.05, day_return=-0.3) == INVERSE_ETF   # 약한 신호도 뒤집힌다
+    assert pick_etf(-0.05, day_return=0.3) == LONG_ETF
     assert pick_etf(-0.6, day_return=-0.5) == INVERSE_ETF   # 같은 방향이면 그대로
     assert pick_etf(-0.6, day_return=None) == INVERSE_ETF   # 오늘 값을 모르면 신호대로
 
 
-def test_pick_etf_does_not_flip_a_resting_day():
-    assert pick_etf(0.1, day_return=-1.0) is None
+def test_pick_etf_does_not_flip_without_signal():
     assert pick_etf(None, day_return=1.0) is None
 
 

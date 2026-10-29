@@ -75,10 +75,10 @@ pytest tests/test_strategy/test_etf_regime.py -k name    # 테스트 단위 (-k 
 - **2호 전략**(`src/strategy/etf_regime.py`의 `ETFRegimeStrategy`, PRD 5.5-C, 신설 2026-10-22)은
   시간 기반 전략이라 `generate_signal`은 항상 `HOLD`만 반환한다. 실제 진입은 `DailyWorkflow`가
   결정 시각에 `recommend_and_notify`(→ `_recommend_etf`) → `execute_buys`(→ `_execute_etf_buy`)를
-  부른다. 직전 20거래일 KODEX 200 장중(시가→종가) 수익률 평균이 +0.2% 이상이면 KODEX 200
-  (069500), -0.2% 이하이면 KODEX 인버스(114800)를 1종목, 투입 비율만큼 **시장가**로 산다
-  (시장가 증거금이 상한가로 잡혀 수량은 `MARKET_BUY_MARGIN`=1.3으로 나눈 예수금까지). 그 사이면
-  쉰다. 결정은 메모리(`_recommendations`)에 있고, 매수 기록 파일로 같은 날 중복 매수를 막는다.
+  부른다. 직전 20거래일 KODEX 200 장중(시가→종가) 수익률 평균이 0 이상이면 KODEX 200
+  (069500), 음수이면 KODEX 인버스(114800)를 1종목, 투입 비율만큼 **시장가**로 산다
+  (시장가 증거금이 상한가로 잡혀 수량은 `MARKET_BUY_MARGIN`=1.3으로 나눈 예수금까지). 쉬는 구간은
+  없다(2026-10-29) — 신호를 못 구할 때(일봉 20개 미만)만 쉰다. 결정은 메모리(`_recommendations`)에 있고, 매수 기록 파일로 같은 날 중복 매수를 막는다.
   ETF 매매 건별 순수익률 누적합이 `-ETF_KILL_LOSS_PERCENT`(기본 5)에 닿으면 매수를 멈추고, 풀려면
   사람이 `ETF_START_DATE`나 한도를 바꾼다. 근거는 2024년 이후 국면뿐이다(27년 장기로는 손실) —
   1호 방식이 1분봉 검증에서 어떤 조정으로도 음수였던 것이 도입 계기다(PRD 5.5-B 추세 추종 철회 항목).

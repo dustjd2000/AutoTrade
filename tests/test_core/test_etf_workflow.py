@@ -22,6 +22,15 @@ def isolated_files(tmp_path, monkeypatch):
     monkeypatch.setattr(daily_workflow, "DEFAULT_BUY_RECORDS_PATH", tmp_path / "buy_records.json")
 
 
+    # 매수 기록 파일은 date.today()로 날짜를 찍는다 — 실제 날짜가 TODAY와 다르면 '오늘 것이 아니다'로 무시된다
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return TODAY
+
+    monkeypatch.setattr(daily_workflow, "date", FixedDate)
+
+
 class FakeEmail:
     def __init__(self):
         self.sent = []
@@ -156,8 +165,16 @@ def test_signal_reads_two_queries_so_twenty_past_days_are_available():
     ]
 
 
-def test_weak_signal_rests_and_says_so():
+def test_weak_signal_still_buys():
     t = make_workflow(candles(0.1))
+
+    t.workflow.recommend_and_notify(today=TODAY)
+
+    assert [r.ticker for r in t.strategy._recommendations] == [LONG_ETF[0]]
+
+
+def test_no_signal_rests_and_says_so():
+    t = make_workflow(candles(0.5, days=10))
 
     t.workflow.recommend_and_notify(today=TODAY)
 
@@ -248,7 +265,7 @@ def test_buy_decides_again_when_the_decision_was_lost_by_a_restart():
 
 
 def test_rest_day_is_not_decided_twice():
-    t = make_workflow(candles(0.1))
+    t = make_workflow(candles(0.5, days=10))
     t.workflow.recommend_and_notify(today=TODAY)
 
     t.workflow._execute_etf_buy(TODAY)

@@ -1,7 +1,7 @@
 """2호 전략 — 지수 ETF 국면 추종 당일 매매 (PRD 5.5-C, 실험 단계).
 
-직전 20거래일 KODEX 200의 장중 수익률(시가→종가) 평균이 +0.2% 이상이면 KODEX 200을,
--0.2% 이하이면 KODEX 인버스를 산다. 그 사이면 쉰다. 여기서는 오늘 무엇을 살지만 정하고,
+직전 20거래일 KODEX 200의 장중 수익률(시가→종가) 평균이 0 이상이면 KODEX 200을,
+음수이면 KODEX 인버스를 산다. 매일 둘 중 하나를 사고, 신호를 못 구할 때만 쉰다. 여기서는 오늘 무엇을 살지만 정하고,
 매수·손절·AI 매도 판단·15:15 청산은 `DailyWorkflow`·엔진이 맡는다. 1호 전략(LLM 대형주 추천)은
 2026-10-23에 폐지됐다 (PRD 5.5-B).
 
@@ -25,13 +25,14 @@ ETF_TICKERS = (LONG_ETF[0], INVERSE_ETF[0])
 # 결정의 유형 표기 (`StockRecommendation.setup`)
 SETUP = "etf_regime"
 
-# 판단 구간과 문턱 — 둘 다 2026-10-22 검증에서 고른 값이다. 문턱이 없으면(매일 매매)
-# 2024~2026에서도 연 -4%였다 (PRD 5.5-C).
+# 판단 구간 — 2026-10-22 검증에서 고른 값이다.
+# 2026-10-29: 신호 ±0.2% 쉬는 구간을 사용자 결정으로 없앴다(부호만 본다). 2025-10~2026-10 1분봉
+# 백테스트에서 옛 쉬는 날(239일 중 65일)은 슬리피지 포함 -0.36%/일이었고, 구간을 없애면 누적이
+# +15.7%에서 -7.6%로 내려갔다. 검증된 규칙이 아니라 알려진 위험을 안고 가는 결정이다 (PRD 5.5-C).
 LOOKBACK_DAYS = 20
-MIN_SIGNAL_PERCENT = 0.2
 # 오늘 KODEX 200이 시가 대비 신호의 반대 방향으로 이만큼 움직였으면 방향을 뒤집는다 (2026-10-28).
 # 20일 신호만 보면 장중에 다시 정해도 아침과 같은 답이 나온다 — 10/28 인버스가 -3%를 맞고 팔린 뒤
-# 같은 신호로 인버스를 다시 샀다. 검증된 값이 아니라 신호 문턱과 같은 값을 임시로 쓴다.
+# 같은 신호로 인버스를 다시 샀다. 검증된 값이 아니라 임시로 정한 값이다.
 FLIP_PERCENT = 0.2
 
 
@@ -95,22 +96,21 @@ def today_return(candles: Iterable[Dict], today: date) -> Optional[float]:
 def pick_etf(
     signal: Optional[float], day_return: Optional[float] = None
 ) -> Optional[Tuple[str, str]]:
-    """신호로 오늘 살 ETF를 정한다. 문턱 안쪽이거나 신호가 없으면 None(쉼).
+    """신호로 오늘 살 ETF를 정한다. 신호가 없으면 None(쉼).
 
+    신호 0 이상이면 KODEX 200, 음수이면 KODEX 인버스 — 쉬는 구간은 없다 (2026-10-29).
     `day_return`(오늘 KODEX 200 시가 대비 %)이 신호와 반대로 `FLIP_PERCENT` 이상 움직였으면
-    방향을 뒤집는다. 신호가 약해 쉬는 날은 뒤집지 않는다 — 뒤집기는 정한 방향을 바꾸는 규칙이다.
+    방향을 뒤집는다.
     """
     if signal is None:
         return None
-    if signal >= MIN_SIGNAL_PERCENT:
+    if signal >= 0:
         if day_return is not None and day_return <= -FLIP_PERCENT:
             return INVERSE_ETF
         return LONG_ETF
-    if signal <= -MIN_SIGNAL_PERCENT:
-        if day_return is not None and day_return >= FLIP_PERCENT:
-            return LONG_ETF
-        return INVERSE_ETF
-    return None
+    if day_return is not None and day_return >= FLIP_PERCENT:
+        return LONG_ETF
+    return INVERSE_ETF
 
 
 def traded_today(candles: Iterable[Dict], today: date) -> bool:

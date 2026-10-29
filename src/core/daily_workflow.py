@@ -386,7 +386,7 @@ class DailyWorkflow:
         # 신호만으로 정한 방향과 다르면 오늘 장중 흐름 때문에 뒤집힌 것이다
         flipped = pick is not None and pick != etf_regime.pick_etf(signal)
         if pick is None:
-            logger.info("2호 전략: 오늘은 쉽니다 (신호 %s)", "없음" if signal is None else f"{signal:+.3f}%")
+            logger.info("2호 전략: 오늘은 쉽니다 (신호 계산 불가 — 일봉 부족)")
             self.strategy.set_recommendations([])
             self._etf_decided_on = today
             self._send_etf_mail(today, signal, None, None)
@@ -554,7 +554,7 @@ class DailyWorkflow:
             subject = f"[2호 전략] {today} 오늘은 쉽니다"
             body = (
                 f"직전 {etf_regime.LOOKBACK_DAYS}거래일 장중 평균 {signal_text} — "
-                f"문턱 ±{etf_regime.MIN_SIGNAL_PERCENT}% 안쪽이라 매수하지 않습니다."
+                f"일봉이 모자라 신호를 계산하지 못해 매수하지 않습니다."
             )
         else:
             subject = f"[2호 전략] {today} {recommendation.name} 시장가 매수"

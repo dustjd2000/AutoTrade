@@ -520,8 +520,8 @@ class MainWindow(QMainWindow):
 
         # 무엇을 사는지가 화면 어디에도 없으면 '추천'이 사라진 이유를 알 수 없다 (PRD 5.5-C)
         strategy_hint = QLabel(
-            "직전 20거래일 KODEX 200 장중 평균이 +0.2% 이상이면 KODEX 200, -0.2% 이하이면 "
-            "KODEX 인버스를 결정 시각에 시장가로 삽니다. 그 사이면 그날은 쉽니다. "
+            "직전 20거래일 KODEX 200 장중 평균이 0 이상이면 KODEX 200, 음수이면 "
+            "KODEX 인버스를 결정 시각에 시장가로 삽니다. 매일 둘 중 하나를 삽니다. "
             "ETF 매매 누적 순수익률이 -ETF_KILL_LOSS_PERCENT에 닿으면 매수가 자동으로 멈춥니다(.env)."
         )
         strategy_hint.setWordWrap(True)
@@ -1546,7 +1546,7 @@ class MainWindow(QMainWindow):
     def _confirm_action(self, action: str, tickers: tuple = ()) -> bool:
         decide_and_buy = (
             "직전 20거래일 장중 흐름으로 오늘 살 ETF(KODEX 200 / KODEX 인버스)를 정하고, "
-            "곧바로 시장가로 매수합니다. 신호가 약하면 그날은 쉽니다.\n"
+            "곧바로 시장가로 매수합니다. 부호대로 둘 중 하나를 매일 삽니다.\n"
             "오늘 이미 매수 주문을 냈으면 다시 사지 않습니다.\n"
             f"{self._exit_watch_text()}\n"
             "청산(15:15)과 최종 리포트(15:35)는 지금 실행하지 않고 예정 시각에 맡깁니다."
