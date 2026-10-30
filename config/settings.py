@@ -169,6 +169,9 @@ class Settings:
     # 손절 라인 — UI/환경변수에는 %(예: 2)로 저장, 내부 계산은 비율(0.02)로 환산.
     # 수수료·세금·슬리피지를 뺀 순손익률 기준이다 (PRD 5.5-B).
     stop_loss_percent: float = field(default_factory=lambda: float(os.getenv("STOP_LOSS_PERCENT", "2")))
+    # 익절 라인 — 종목별 순손익률이 이 값 이상이면 그 종목을 시장가로 판다 (재도입 2026-10-30).
+    # 0이면 끈다. 손절과 같은 순손익률 기준이다.
+    take_profit_percent: float = field(default_factory=lambda: float(os.getenv("TAKE_PROFIT_PERCENT", "2")))
     # AI 매도 판단 프롬프트에 '고점 대비 반납' 수치를 실을 최소 고점(%) — 이보다 낮은 고점은
     # 노이즈라 반납 수치를 주지 않는다 (`exit_advisor._peak_text`). `.env` 전용.
     ai_exit_drawdown_percent: float = field(
@@ -198,6 +201,10 @@ class Settings:
     @property
     def stop_loss_ratio(self) -> float:
         return self.stop_loss_percent / 100
+
+    @property
+    def take_profit_ratio(self) -> float:
+        return self.take_profit_percent / 100
 
     # 청산 경로 적용 여부 — UI 체크박스가 켜고 끄며, 바뀔 때마다 `.env`에 저장된다
     # (확정 2026-09-09, PRD 5.5-B "청산 적용 여부"). 다른 리스크 설정과 달리 엔진을
@@ -270,6 +277,8 @@ class Settings:
                 f"AI_EXIT_STEP_PERCENT는 {MIN_AI_EXIT_STEP_PERCENT} 이상이어야 합니다: "
                 f"{self.ai_exit_step_percent}"
             )
+        if self.take_profit_percent < 0:
+            raise ValueError(f"TAKE_PROFIT_PERCENT는 0 이상이어야 합니다: {self.take_profit_percent}")
         if self.etf_start_date:
             try:
                 date.fromisoformat(self.etf_start_date)

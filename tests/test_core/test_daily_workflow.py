@@ -90,6 +90,7 @@ def make_workflow(recommendations=None, cash=12_000_000):
             approve=lambda *a, **kw: True,
             record_order=lambda *a, **kw: None,
             stop_loss_ratio=0.02,
+            take_profit_ratio=0.0,
             commission_rate=0.00015,
             tax_rate=0.0018,
             slippage_rate=0.001,

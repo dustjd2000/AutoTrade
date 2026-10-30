@@ -508,12 +508,15 @@ def _buy_facts(execution: BuyExecution) -> List[tuple[str, str]]:
         if execution.cash > 0
         else ""
     )
-    return [
+    rows = [
         ("주문가능금액", _balance(execution.cash)),
         ("종목당 배정", f"{_balance(execution.amount_per_stock)}{share}"),
         ("총 투입금액", _balance(execution.invested)),
         ("손절 라인 (순손익 기준, 종목별 판정)", f"-{execution.stop_loss_percent:.2f}%"),
     ]
+    if execution.take_profit_percent > 0:
+        rows.append(("익절 라인 (순손익 기준, 종목별 판정)", f"+{execution.take_profit_percent:.2f}%"))
+    return rows
 
 
 def _buy_row_cells(record: BuyRecord, execution: BuyExecution) -> tuple[str, ...]:

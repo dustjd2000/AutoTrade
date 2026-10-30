@@ -322,3 +322,37 @@ def test_engine_sells_only_the_broken_position():
     engine.on_market_data(MarketData(ticker="000660", price=93_000, volume=1))
 
     assert [o.ticker for o in orders] == ["000660"]
+
+
+# ── 종목별 익절 재도입 (2026-10-30) ──────────────────────────
+def test_engine_take_profit_sells_only_the_winner_and_records_reason():
+    """익절선(+2%)에 닿은 종목만 TAKE_PROFIT 사유로 팔고 나머지는 보유한다."""
+    store = RecordingStore()
+    engine, orders, _ = make_engine(two_holdings(price_a=1000.0, price_b=1000.0), trade_store=store)
+    engine.risk_manager.take_profit_ratio = 0.02
+
+    engine.on_market_data(MarketData(ticker="005930", price=1030.0, volume=1))  # +3%
+
+    assert [o.ticker for o in orders] == ["005930"]
+    assert store.reasons == [("005930", "take_profit")]
+
+
+def test_engine_take_profit_does_nothing_below_the_line():
+    engine, orders, _ = make_engine(two_holdings(price_a=1000.0, price_b=1000.0))
+    engine.risk_manager.take_profit_ratio = 0.02
+
+    engine.on_market_data(MarketData(ticker="005930", price=1015.0, volume=1))  # +1.5%
+
+    assert orders == []
+
+
+def test_engine_stop_loss_takes_precedence_over_take_profit():
+    """같은 틱에 손절·익절이 함께 걸리면 손절만 나간다 (익절은 다음 판정으로 미룬다)."""
+    store = RecordingStore()
+    engine, orders, _ = make_engine(two_holdings(price_a=1030.0, price_b=940.0), trade_store=store)
+    engine.risk_manager.take_profit_ratio = 0.02
+
+    engine.on_market_data(MarketData(ticker="000660", price=940.0, volume=1))  # -6% / 005930 +3%
+
+    assert [o.ticker for o in orders] == ["000660"]
+    assert store.reasons == [("000660", "stop_loss")]

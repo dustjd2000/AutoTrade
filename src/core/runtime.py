@@ -231,6 +231,7 @@ def build_runtime(settings: Settings) -> Runtime:
         max_daily_loss_ratio=settings.max_daily_loss_ratio,
         stop_loss_ratio=settings.stop_loss_ratio,
         stop_loss_enabled=settings.stop_loss_enabled,
+        take_profit_ratio=settings.take_profit_ratio,
         max_total_exposure_ratio=settings.max_total_exposure_ratio,
         commission_rate=settings.commission_ratio,
         tax_rate=ETF_TAX_RATIO,

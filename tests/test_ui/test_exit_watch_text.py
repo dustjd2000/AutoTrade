@@ -55,14 +55,16 @@ class FakeLabel:
         self.text = value
 
 
-def make_fake_window(*, ai_exit=True, stop_loss=True, exit_percent="2"):
-    """`_exit_watch_text`가 읽는 위젯만 흉내낸 가짜 `MainWindow`."""
+def make_fake_window(*, ai_exit=True, stop_loss=True, exit_percent="2", take_profit="0"):
+    """`_exit_watch_text`·`_exit_progress`가 읽는 위젯만 흉내낸 가짜 `MainWindow`."""
     fake = SimpleNamespace(
         _ai_exit_enabled=FakeCheckable(ai_exit),
         _stop_loss_enabled=FakeCheckable(stop_loss),
         _exit_percent=FakeTextField(exit_percent),
+        _take_profit_percent=FakeTextField(take_profit),
     )
     fake._exit_watch_text = MethodType(MainWindow._exit_watch_text, fake)
+    fake._exit_progress = MethodType(MainWindow._exit_progress, fake)
     return fake
 
 
@@ -122,6 +124,34 @@ def test_exit_watch_text_describes_ai_exit_as_a_step_triggered_judgement_not_an_
     assert "손절 -2%" in text
     assert "'AI 판단 단계' 폭" in text and "이익·손실 단계" in text
     assert "자동으로 팔리지" in text
+
+
+def test_exit_watch_text_mentions_take_profit_only_when_set():
+    assert "익절" not in make_fake_window(take_profit="0")._exit_watch_text()
+
+    text = make_fake_window(take_profit="2")._exit_watch_text()
+
+    assert "익절: 순손익 +2%" in text
+
+
+def test_exit_watch_text_does_not_claim_no_exit_when_only_take_profit_remains():
+    text = make_fake_window(ai_exit=False, stop_loss=False, take_profit="2")._exit_watch_text()
+
+    assert "실시간 청산이 동작하지 않습니다" not in text
+    assert "익절: 순손익 +2%" in text
+
+
+# ── _exit_progress ──────────────────────────────────────────
+
+
+def test_exit_progress_shows_stop_and_take_profit():
+    assert make_fake_window(take_profit="2")._exit_progress() == " · 손절 -2% · 익절 +2%"
+
+
+def test_exit_progress_omits_disabled_parts():
+    assert make_fake_window(take_profit="0")._exit_progress() == " · 손절 -2%"
+    assert make_fake_window(stop_loss=False, take_profit="2")._exit_progress() == " · 익절 +2%"
+    assert make_fake_window(stop_loss=False, take_profit="0")._exit_progress() == ""
 
 
 # ── _refresh_exit_flag_hint ─────────────────────────────────

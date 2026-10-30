@@ -172,6 +172,47 @@ def test_stop_loss_can_still_be_disabled():
     assert manager.check_position_exits(losing) == []
 
 
+def _tp_manager(ratio, **kwargs):
+    return RiskManager(
+        take_profit_ratio=ratio, commission_rate=0.0, tax_rate=0.0, slippage_rate=0.0, **kwargs
+    )
+
+
+def test_take_profits_fire_at_and_above_the_ratio_only():
+    """종목별 순손익률이 익절선 이상인 종목만 돌려준다 (재도입 2026-10-30)."""
+    manager = _tp_manager(0.02)
+    positions = [
+        held("A", 1, 1000.0, 1020.0),  # +2.0% — 경계 포함
+        held("B", 1, 1000.0, 1019.0),  # +1.9% — 미달
+        held("C", 1, 1000.0, 1100.0),  # +10%
+    ]
+
+    assert manager.check_take_profits(positions) == ["A", "C"]
+
+
+def test_take_profits_empty_when_ratio_is_zero():
+    assert _tp_manager(0.0).check_take_profits([held("A", 1, 1000.0, 1500.0)]) == []
+
+
+def test_take_profits_use_net_return_with_costs():
+    """수수료·슬리피지를 빼면 가격 +2%는 순손익 +2%에 못 미친다."""
+    manager = RiskManager(
+        take_profit_ratio=0.02, commission_rate=0.00015, tax_rate=0.0, slippage_rate=0.001
+    )
+
+    assert manager.check_take_profits([held("A", 1, 1000.0, 1020.0)]) == []
+
+
+def test_take_profits_ignore_the_stop_loss_switch():
+    manager = _tp_manager(0.02, stop_loss_enabled=False)
+
+    assert manager.check_take_profits([held("A", 1, 1000.0, 1030.0)]) == ["A"]
+
+
+def test_take_profits_skip_positions_without_a_price():
+    assert _tp_manager(0.02).check_take_profits([held("A", 1, 1000.0, 0.0)]) == []
+
+
 def test_simple_take_profit_is_gone():
     """단순익절(종목별 0% 익절) 모드는 2026-09-09에 걷어냈다 (PRD 10절).
 

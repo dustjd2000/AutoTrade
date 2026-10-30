@@ -868,10 +868,11 @@ class TradingEngine:
     def _check_portfolio_exit(self, positions: Dict[str, Position]) -> bool:
         """청산 조건에 닿았으면 매도한다. 매도를 시도했으면 True.
 
-        판정은 **종목별 손절** 하나다 (PRD 5.5-B, 확정 2026-09-18). 손절선에 닿은 종목만
-        판다 — 나머지는 그대로 들고 간다. 2026-08-10부터 2026-09-18까지는 합산으로 판정해
-        전량을 팔았다. 익절 자동 청산은 2026-09-09에, 익절 설정 자체는 2026-09-18에
-        걷어냈다 (PRD 10절).
+        판정은 **종목별 손절**이 먼저고, 손절에 닿은 종목이 없으면 **종목별 익절**이다
+        (PRD 5.5-B, 손절 확정 2026-09-18). 선에 닿은 종목만 판다 — 나머지는 그대로 들고
+        간다. 2026-08-10부터 2026-09-18까지는 합산으로 판정해 전량을 팔았다. 익절 자동
+        청산은 2026-09-09에 걷어냈다가 2026-10-30에 사용자 지시로 종목별 순손익 기준으로
+        재도입했다 (PRD 10절).
 
         AI 매도 판단은 종목마다 따로 판정한다(확정 2026-09-19) — 그쪽은 "이 종목을 지금
         팔 상황인가"를 종목별로 묻는 별개 경로이고, 판정된 종목만 `_execute_portfolio_exit`으로
@@ -889,6 +890,13 @@ class TradingEngine:
             broken_tickers = set(broken)
             targets = [p for p in holdings if p.ticker in broken_tickers]
             self._execute_portfolio_exit(targets, ExitReason.STOP_LOSS)
+            return True
+
+        profits = self.risk_manager.check_take_profits(holdings)
+        if profits:
+            profit_tickers = set(profits)
+            targets = [p for p in holdings if p.ticker in profit_tickers]
+            self._execute_portfolio_exit(targets, ExitReason.TAKE_PROFIT)
             return True
 
         return False

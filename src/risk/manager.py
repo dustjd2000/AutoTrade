@@ -153,7 +153,9 @@ class RiskManager:
         tax_rate: float = 0.002,              # 증권거래세+농특세 (매도 시만)
         slippage_rate: float = 0.001,         # 시장가 청산 슬리피지 추정치
         stop_loss_enabled: bool = True,       # 손절 적용 여부 (UI 체크박스)
+        take_profit_ratio: float = 0.0,       # 익절 라인 (순손익률, 0=끔)
     ):
+        self.take_profit_ratio = take_profit_ratio
         self.max_position_ratio = max_position_ratio
         self.max_daily_loss_ratio = max_daily_loss_ratio
         self.stop_loss_ratio = stop_loss_ratio
@@ -250,6 +252,30 @@ class RiskManager:
             if ret <= -self.stop_loss_ratio:
                 broken.append(position.ticker)
         return broken
+
+    def check_take_profits(self, positions: Iterable[Position]) -> List[str]:
+        """익절선에 닿은 **종목**을 골라 돌려준다 (사용자 지시로 재도입 2026-10-30).
+
+        `check_position_exits`와 같은 종목별 순손익률(`net_return`, 슬리피지 포함) 기준이다.
+        `take_profit_ratio`가 0 이하면 빈 목록이고, 손절 체크박스(`stop_loss_enabled`)와는
+        무관하다. 손절이 항상 먼저 판정된다 (`TradingEngine._check_portfolio_exit`).
+        """
+        if self.take_profit_ratio <= 0:
+            return []
+        hit = []
+        for position in positions:
+            if position.avg_price <= 0 or position.quantity <= 0 or position.current_price <= 0:
+                continue
+            ret = net_return(
+                position.current_price,
+                position.avg_price,
+                self.commission_rate,
+                self.tax_rate,
+                self.slippage_rate,
+            )
+            if ret >= self.take_profit_ratio:
+                hit.append(position.ticker)
+        return hit
 
     def record_order(self, result: OrderResult, avg_price: Optional[float] = None) -> None:
         if (

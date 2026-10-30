@@ -170,6 +170,14 @@ def _in_scroll(page: QWidget) -> QScrollArea:
     return scroll
 
 
+def _parse_take_profit(text: str) -> float:
+    """익절 입력란 문자열 → % 값. 비었으면 저장 때와 같이 기본 2, 깨졌으면 0(끔)."""
+    try:
+        return max(float(text.strip().replace(",", ".") or 2), 0.0)
+    except ValueError:
+        return 0.0
+
+
 def _with_toggle(field: QLineEdit, *toggles: QCheckBox) -> QWidget:
     """입력란 오른쪽에 적용 여부 체크박스를 붙여 폼의 한 줄로 만든다.
 
@@ -568,13 +576,18 @@ class MainWindow(QMainWindow):
 
         # 손절 전용 입력란이다 (2026-09-18부터 — 그 전에는 이 칸의 값이
         # `TAKE_PROFIT_PERCENT`/`STOP_LOSS_PERCENT` 두 키에 같은 값으로 들어갔지만, 이제
-        # `STOP_LOSS_PERCENT` 하나만 쓴다). 기존 값이 그대로 손절값으로 이어지므로 다시
-        # 입력할 필요는 없다.
+        # `STOP_LOSS_PERCENT` 하나만 쓴다; 익절은 아래 별도 칸). 기존 값이 그대로 손절값으로
+        # 이어지므로 다시 입력할 필요는 없다.
         # 수수료·세금·슬리피지를 뺀 '순손익률' 기준이며, 종목별로 판정한다
         # (2026-09-18부터 — 그 전에는 보유 종목 합산이었다).
         self._exit_percent = QLineEdit()
         self._exit_percent.setPlaceholderText("예: 5 (순손익 -5%에 닿은 종목을 자동 매도)")
         self._exit_percent.setValidator(QDoubleValidator(0.0, 100.0, 2))
+
+        # 익절 입력란 (2026-10-30 재도입) — 손절과 같은 순손익률 기준, 종목별 판정, 0이면 끔.
+        self._take_profit_percent = QLineEdit()
+        self._take_profit_percent.setPlaceholderText("예: 2 (순손익 +2%에 닿은 종목을 자동 매도, 0=끔)")
+        self._take_profit_percent.setValidator(QDoubleValidator(0.0, 100.0, 2))
 
         # AI 매도 판단 호출 단계 폭 — 바꾸면 엔진 재시작이 필요하다 (`_save_settings` 대상)
         self._ai_exit_step = _NoScrollComboBox()
@@ -586,8 +599,10 @@ class MainWindow(QMainWindow):
         # 저장해 다시 시작해도 마지막 상태가 이어지지만(확정 2026-09-09), 저장했다고 엔진을
         # 재시작하지는 않는다 — 끄고 싶은 순간에 감시 공백이 생기면 안 된다.
         # **`.env`에 값이 없을 때의 기본은 AI 매도 판단 + 손절이다** (PRD 5.5-B "AI 매도 판단").
-        # 익절 자동 청산과 단순익절은 걷어냈다 — 고정 익절선이 상방을 자른다는 것이 실매매
-        # 27건 대조에서 관찰됐고(PRD 10절), 그 자리를 주기적 AI 판단이 대신한다.
+        # 익절 자동 청산은 2026-09-09에 걷어냈다(고정 익절선이 상방을 자른다는 것이 실매매
+        # 27건 대조에서 관찰됐다, PRD 10절). 2026-10-30에 사용자 지시로 종목별 순손익 익절
+        # (`TAKE_PROFIT_PERCENT`)만 재도입했다 — 켜고 끄는 체크박스는 없고 0이면 끈다.
+        # AI 매도 판단은 그 선 아래에서 그대로 돈다.
         self._ai_exit_enabled = QCheckBox("AI 매도 판단")
         self._ai_exit_enabled.setChecked(True)
         self._stop_loss_enabled = QCheckBox("손절")
@@ -610,11 +625,13 @@ class MainWindow(QMainWindow):
                 self._stop_loss_enabled,
             ),
         )
+        risk_form.addRow("익절 (%)", self._take_profit_percent)
         risk_form.addRow("AI 판단 단계 (%p)", self._ai_exit_step)
         # 종목별 판정이라는 점과 AI 판단을 언제 부르는지를 입력란 바로 아래에서 알린다
         exit_hint = QLabel(
             "손절선입니다. 순손익률이 이 값에 닿으면 실시간으로 시장가 매도합니다. 순손익률은 "
             "수수료·슬리피지를 뺀 값이라 화면의 평가손익률보다 낮습니다(ETF는 거래세 면제).\n"
+            "익절은 종목별 순손익률이 익절선 이상이면 그 종목만 시장가로 매도합니다(0=끔, 손절이 먼저 판정).\n"
             "AI 매도 판단은 주기가 아니라 순손익률이 'AI 판단 단계' 폭의 단계를 새로 넘을 때마다 불러, "
             "팔기로 정한 경우에만 매도합니다. 나머지는 15:15에 강제청산됩니다."
         )
@@ -954,15 +971,20 @@ class MainWindow(QMainWindow):
         return f"{len(rows)}종목 · 순손익 {amount:+,.0f}원{percent}{self._exit_progress()}"
 
     def _exit_progress(self) -> str:
-        """손절선 표시 (손절 판정은 종목별로 따로 한다, 2026-09-18부터).
+        """손절선·익절선 표시 (판정은 둘 다 종목별로 따로 한다).
 
         슬리피지를 뺀 합산 순손익률('합산 순손익', 이어 '손절 기준')도 함께 보였지만, 앞의 순손익과
-        슬리피지 추정치만큼만 다른 숫자라 헷갈려서 2026-10-29에 뺐다 — 손절선만 남긴다.
-        손절을 끈 상태면 아무것도 붙이지 않는다 — 체크박스가 이미 보여 준다.
+        슬리피지 추정치만큼만 다른 숫자라 헷갈려서 2026-10-29에 뺐다 — 선만 남긴다.
+        손절을 끈 상태면 손절 부분을 붙이지 않는다 — 체크박스가 이미 보여 준다.
+        익절선(2026-10-30 재도입)은 값이 0보다 클 때만 붙인다.
         """
-        if not self._stop_loss_enabled.isChecked():
-            return ""
-        return f" · 손절 -{self._exit_percent.text().strip() or '2'}%"
+        text = ""
+        if self._stop_loss_enabled.isChecked():
+            text += f" · 손절 -{self._exit_percent.text().strip() or '2'}%"
+        take_profit = _parse_take_profit(self._take_profit_percent.text())
+        if take_profit > 0:
+            text += f" · 익절 +{take_profit:g}%"
+        return text
 
     # ── 매도 불가 ────────────────────────────────────────────
     def _build_buy_plan_box(self) -> QGroupBox:
@@ -1244,7 +1266,9 @@ class MainWindow(QMainWindow):
         ai_exit = self._ai_exit_enabled.isChecked()
         stop_loss = self._stop_loss_enabled.isChecked()
 
-        if not ai_exit and not stop_loss:
+        take_profit = _parse_take_profit(self._take_profit_percent.text())
+
+        if not ai_exit and not stop_loss and take_profit <= 0:
             return (
                 "⚠ AI 매도 판단과 손절이 모두 해제되어 있어 매수 후 실시간 청산이 동작하지 "
                 "않습니다.\n15:15 강제청산까지 보유합니다."
@@ -1257,6 +1281,11 @@ class MainWindow(QMainWindow):
             )
         else:
             lines.append("⚠ 손절이 꺼져 있어 손실 쪽 실시간 청산이 없습니다.")
+
+        if take_profit > 0:
+            lines.append(
+                f"익절: 순손익 +{take_profit:g}%에 닿은 종목을 실시간 매도합니다."
+            )
 
         if ai_exit:
             lines.append(
@@ -1302,6 +1331,7 @@ class MainWindow(QMainWindow):
         self._email_from.setText(env.get("EMAIL_FROM", ""))
         self._email_to.setText(env.get("EMAIL_TO", ""))
         self._exit_percent.setText(env.get("STOP_LOSS_PERCENT", "2"))
+        self._take_profit_percent.setText(env.get("TAKE_PROFIT_PERCENT", "2"))
         self._select_step_value(env.get("AI_EXIT_STEP_PERCENT"))
         self._select_combo_value(self._investable_ratio, env.get("INVESTABLE_RATIO_PERCENT"), default=50)
         # 청산 체크박스는 마지막으로 켜고 끈 상태를 그대로 되살린다. 복원하는 동안에는
@@ -1367,6 +1397,7 @@ class MainWindow(QMainWindow):
             "EMAIL_FROM": self._email_from.text().strip(),
             "EMAIL_TO": self._email_to.text().strip(),
             "STOP_LOSS_PERCENT": self._exit_percent.text().strip() or "2",
+            "TAKE_PROFIT_PERCENT": self._take_profit_percent.text().strip() or "2",
             "AI_EXIT_STEP_PERCENT": self._ai_exit_step.currentData(),
             "INVESTABLE_RATIO_PERCENT": str(self._investable_ratio.currentData()),
         }

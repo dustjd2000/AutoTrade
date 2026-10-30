@@ -36,6 +36,7 @@ def make_engine(positions, sell_status=OrderStatus.FILLED):
             # check_position_exits(종목별)를 부른다. 이 파일은 손절 감시를 다루지 않으므로
             # 항상 빈 목록(아무도 닿지 않음)이면 충분하다.
             check_position_exits=lambda ps: [],
+            check_take_profits=lambda ps: [],
             commission_rate=0.0,
             tax_rate=0.0,
             position_net_pnl=lambda p: (p.current_price - p.avg_price) * p.quantity,

@@ -30,8 +30,8 @@ class OrderStatus(Enum):
 
 class ExitReason(Enum):
     """전략과 무관하게 시스템이 강제 청산하는 사유."""
-    # 익절 자동 청산은 2026-09-09에 걷어냈지만 이 값은 남긴다 — 과거 `trades` 기록에 그대로
-    # 남아 있고 리포트가 읽는다.
+    # 종목별 순손익 익절 (2026-09-09에 걷어냈다가 2026-10-30에 사용자 지시로 재도입).
+    # 과거 `trades` 기록에도 남아 있고 리포트가 읽는다.
     TAKE_PROFIT = "take_profit"
     STOP_LOSS = "stop_loss"
     # AI 매도 판단 (PRD 5.5-B). 익절 자동 청산이 빠진 자리를 대신한다 — 나중에 성과를
@@ -150,6 +150,7 @@ class BuyExecution:
     amount_per_stock: float           # 종목당 배정액
     records: List[BuyRecord] = field(default_factory=list)
     stop_loss_percent: float = 0.0
+    take_profit_percent: float = 0.0  # 0이면 익절을 끈 것 — 메일에 싣지 않는다
     commission_percent: float = 0.0
     tax_percent: float = 0.0
     slippage_percent: float = 0.0
