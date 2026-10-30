@@ -570,6 +570,28 @@ class TradeStore:
             ).fetchall()
         return {row["order_id"] for row in rows}
 
+    def has_buy_order(self, day: date, tickers: Iterable[str]) -> bool:
+        """그날 `tickers` 중 하나라도 거부되지 않은 매수 주문 기록이 있는가 (2026-10-30).
+
+        2호 전략 매수 중복 방지의 두 번째 표시다. 매수 기록 파일은 매수 결과 메일을 보내면서
+        지워지는데(`cancel_unfilled_buys`), 2026-10-30에는 결과 메일이 09:10에 먼저 나가 파일이
+        사라진 뒤 09:13 매수 시각 안전망이 같은 ETF를 한 번 더 샀다. 이 기록은 지워지지 않는다.
+        """
+        codes = list(tickers)
+        if not codes:
+            return False
+        start, end = _day_range(day)
+        marks = ",".join("?" for _ in codes)
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                f"""SELECT 1 FROM trades
+                    WHERE timestamp BETWEEN ? AND ? AND side = 'buy' AND status != 'rejected'
+                      AND ticker IN ({marks})
+                    LIMIT 1""",
+                (start, end, *codes),
+            ).fetchone()
+        return row is not None
+
     def same_day_buy_price(self, ticker: str, day: date) -> Optional[float]:
         """그날 그 종목 매수 체결의 가중평균가. 없으면 None (전일 이월분 등)."""
         start, end = _day_range(day)

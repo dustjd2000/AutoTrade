@@ -172,6 +172,10 @@ class Settings:
     # 익절 라인 — 종목별 순손익률이 이 값 이상이면 그 종목을 시장가로 판다 (재도입 2026-10-30).
     # 0이면 끈다. 손절과 같은 순손익률 기준이다.
     take_profit_percent: float = field(default_factory=lambda: float(os.getenv("TAKE_PROFIT_PERCENT", "2")))
+    # 고점 반납 매도 (신설 2026-10-30) — 종목별 당일 순손익 고점이 trail_activate 이상이 된 뒤
+    # 고점에서 trail_giveback(%p)만큼 내려오면 시장가로 판다. giveback 0이면 끈다.
+    trail_activate_percent: float = field(default_factory=lambda: float(os.getenv("TRAIL_ACTIVATE_PERCENT", "0.5")))
+    trail_giveback_percent: float = field(default_factory=lambda: float(os.getenv("TRAIL_GIVEBACK_PERCENT", "0.25")))
     # AI 매도 판단 프롬프트에 '고점 대비 반납' 수치를 실을 최소 고점(%) — 이보다 낮은 고점은
     # 노이즈라 반납 수치를 주지 않는다 (`exit_advisor._peak_text`). `.env` 전용.
     ai_exit_drawdown_percent: float = field(
@@ -205,6 +209,14 @@ class Settings:
     @property
     def take_profit_ratio(self) -> float:
         return self.take_profit_percent / 100
+
+    @property
+    def trail_activate_ratio(self) -> float:
+        return self.trail_activate_percent / 100
+
+    @property
+    def trail_giveback_ratio(self) -> float:
+        return self.trail_giveback_percent / 100
 
     # 청산 경로 적용 여부 — UI 체크박스가 켜고 끄며, 바뀔 때마다 `.env`에 저장된다
     # (확정 2026-09-09, PRD 5.5-B "청산 적용 여부"). 다른 리스크 설정과 달리 엔진을
@@ -279,6 +291,10 @@ class Settings:
             )
         if self.take_profit_percent < 0:
             raise ValueError(f"TAKE_PROFIT_PERCENT는 0 이상이어야 합니다: {self.take_profit_percent}")
+        if self.trail_activate_percent < 0:
+            raise ValueError(f"TRAIL_ACTIVATE_PERCENT는 0 이상이어야 합니다: {self.trail_activate_percent}")
+        if self.trail_giveback_percent < 0:
+            raise ValueError(f"TRAIL_GIVEBACK_PERCENT는 0 이상이어야 합니다: {self.trail_giveback_percent}")
         if self.etf_start_date:
             try:
                 date.fromisoformat(self.etf_start_date)

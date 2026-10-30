@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -26,8 +26,34 @@ class ExitTrace:
 
     def __init__(self):
         self._points: List[TracePoint] = []
+        # AI 판단 사이클이 점을 남긴 적이 있는가 — 엔진의 주기 샘플(`sample`)은 세지 않는다
+        self._judged = False
+
+    def sample(
+        self,
+        at: datetime,
+        portfolio_return: float,
+        per_ticker: Dict[str, float],
+        prices: Dict[str, float],
+    ) -> None:
+        """AI 판단과 무관한 주기 샘플 (2026-10-30) — 판단 사이의 하락이 궤적에 남게 한다.
+
+        `partial`을 건드리지 않는다: 샘플이 쌓여도 엔진 시작 전의 과거는 여전히 없고,
+        그 사실을 첫 판단 사이클에서 한 번 알리는 것이 `partial`의 일이다.
+        """
+        self._add(at, portfolio_return, per_ticker, prices)
 
     def append(
+        self,
+        at: datetime,
+        portfolio_return: float,
+        per_ticker: Dict[str, float],
+        prices: Dict[str, float],
+    ) -> None:
+        self._judged = True
+        self._add(at, portfolio_return, per_ticker, prices)
+
+    def _add(
         self,
         at: datetime,
         portfolio_return: float,
@@ -53,10 +79,16 @@ class ExitTrace:
         return len(self._points)
 
     @property
+    def last_at(self) -> Optional[datetime]:
+        """마지막 점의 시각 (없으면 None) — 주기 샘플이 간격을 잴 때 쓴다."""
+        return self._points[-1].at if self._points else None
+
+    @property
     def partial(self) -> bool:
-        """궤적이 비어 있는가 — 엔진을 장중에 다시 켠 직후가 그 상태다."""
-        return not self._points
+        """AI 판단이 점을 남긴 적이 없는가 — 엔진을 장중에 다시 켠 직후가 그 상태다."""
+        return not self._judged
 
     def clear(self) -> None:
         """일일 초기화(08:40)에서 비운다."""
         self._points.clear()
+        self._judged = False

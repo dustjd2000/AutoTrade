@@ -608,3 +608,19 @@ def test_closed_trade_returns_subtracts_fees(tmp_path):
     _etf_trade(store, "069500", date(2026, 10, 20), 10000, 10100, fees=500.0)  # (1000-500)/100000
 
     assert [round(r, 6) for r in store.closed_trade_returns(None, date(2026, 10, 22), ("069500",))] == [0.5]
+
+
+def test_has_buy_order_sees_only_non_rejected_buys_of_the_day(tmp_path):
+    """2호 매수 중복 방지 (2026-10-30) — 거부된 주문·다른 날·매도·다른 종목은 세지 않는다."""
+    store = make_store(tmp_path)
+    day = date(2026, 10, 30)
+    store.record_fill(make_result(OrderSide.BUY, OrderStatus.REJECTED, None, datetime(2026, 10, 30, 9, 10)))
+    store.record_fill(make_result(OrderSide.BUY, OrderStatus.FILLED, 1000.0, datetime(2026, 10, 29, 9, 10)))
+    store.record_fill(make_result(OrderSide.SELL, OrderStatus.FILLED, 1000.0, datetime(2026, 10, 30, 12, 0)),
+                      avg_price=1000.0)
+    assert not store.has_buy_order(day, ["005930"])
+
+    store.record_fill(make_result(OrderSide.BUY, OrderStatus.PENDING, None, datetime(2026, 10, 30, 9, 10)))
+    assert store.has_buy_order(day, ["005930"])
+    assert not store.has_buy_order(day, ["114800"])
+    assert not store.has_buy_order(day, [])

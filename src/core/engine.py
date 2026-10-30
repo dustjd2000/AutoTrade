@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 # 스레드가 디스크를 기다린다. 사이에 찍힌 더 높은 고점은 다음 쓰기에 실린다 — 그래서
 # 기록되는 고점 시각·가격은 최대 이만큼 늦다 (스펙 2026-09-22 2.2).
 PEAK_FLUSH_SECONDS = 5.0
+# 순손익 궤적에 AI 판단과 무관하게 한 점을 남기는 간격(분) — `_sample_exit_trace`
+TRACE_SAMPLE_MINUTES = 10
 
 # 실시간 체결 틱마다 잔고 REST(kt00005)를 호출하면 키움 유량 제한(429)에 걸린다.
 # 그 예외는 콜백 전체를 중단시키므로 손절 판정이 통째로 건너뛰어지는데,
@@ -777,6 +779,7 @@ class TradingEngine:
             self.flush_exit_peaks(positions)
             return
         self.flush_exit_peaks(positions)
+        self._sample_exit_trace(positions)
 
         signal = self.strategy.generate_signal(data)
 
@@ -827,6 +830,29 @@ class TradingEngine:
             result.order_id,
         )
 
+    def _sample_exit_trace(self, positions: Dict[str, Position]) -> None:
+        """순손익 궤적에 `TRACE_SAMPLE_MINUTES`마다 한 점을 남긴다 (2026-10-30).
+
+        궤적이 AI 판단 시각에만 찍히면 판단 사이의 긴 하락이 프롬프트에 안 보인다.
+        손절 판정 뒤에 부르고, 마지막 점이 충분히 오래됐을 때만 계산한다(틱마다 도는 경로).
+        """
+        now = datetime.now()
+        last_at = self.exit_trace.last_at
+        if last_at is not None and (now - last_at).total_seconds() < TRACE_SAMPLE_MINUTES * 60:
+            return
+        holdings = [p for t, p in positions.items() if t not in self._exiting]
+        if not holdings:
+            return
+        portfolio_return = self.risk_manager.portfolio_return(holdings)
+        if portfolio_return is None:
+            return
+        self.exit_trace.sample(
+            now,
+            portfolio_return,
+            {p.ticker: self.position_net_return(p) for p in holdings},
+            {p.ticker: p.current_price for p in holdings},
+        )
+
     def _track_exit_drawdown(self, positions: Dict[str, Position]) -> None:
         """당일 순손익 고점을 메모리에서 갱신하고, 반납폭이 임계치를 넘으면 AI 판단을 앞당긴다.
 
@@ -868,7 +894,8 @@ class TradingEngine:
     def _check_portfolio_exit(self, positions: Dict[str, Position]) -> bool:
         """청산 조건에 닿았으면 매도한다. 매도를 시도했으면 True.
 
-        판정은 **종목별 손절**이 먼저고, 손절에 닿은 종목이 없으면 **종목별 익절**이다
+        판정은 **종목별 손절**이 먼저고, 손절에 닿은 종목이 없으면 **종목별 익절**, 그것도
+        없으면 **종목별 고점 반납 매도**(신설 2026-10-30)다
         (PRD 5.5-B, 손절 확정 2026-09-18). 선에 닿은 종목만 판다 — 나머지는 그대로 들고
         간다. 2026-08-10부터 2026-09-18까지는 합산으로 판정해 전량을 팔았다. 익절 자동
         청산은 2026-09-09에 걷어냈다가 2026-10-30에 사용자 지시로 종목별 순손익 기준으로
@@ -897,6 +924,24 @@ class TradingEngine:
             profit_tickers = set(profits)
             targets = [p for p in holdings if p.ticker in profit_tickers]
             self._execute_portfolio_exit(targets, ExitReason.TAKE_PROFIT)
+            return True
+
+        # 고점 반납 매도 — 고점과 현재값은 둘 다 position_net_return 기준이다(`_track_exit_drawdown`이
+        # 이 틱의 고점을 이미 갱신했다). 재시작 뒤 DB에서 복원한 고점(seed)이 이미 반납된 상태면
+        # 첫 틱에 바로 팔 수 있다 — 재시작 전에 팔았어야 할 반납이라 의도된 동작이다.
+        current = {p.ticker: self.position_net_return(p) for p in holdings}
+        peaks = self.exit_drawdown.peaks()
+        trailing = self.risk_manager.check_trailing_exits(current, peaks)
+        if trailing:
+            trailing_tickers = set(trailing)
+            targets = [p for p in holdings if p.ticker in trailing_tickers]
+            note = "; ".join(
+                f"{p.ticker} 당일 고점 {peaks[p.ticker] * 100:+.2f}% → 현재 "
+                f"{current[p.ticker] * 100:+.2f}% "
+                f"({(peaks[p.ticker] - current[p.ticker]) * 100:.2f}%p 반납)"
+                for p in targets
+            )
+            self._execute_portfolio_exit(targets, ExitReason.TRAILING_STOP, note=note)
             return True
 
         return False

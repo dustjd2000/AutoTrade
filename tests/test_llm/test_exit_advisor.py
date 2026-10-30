@@ -246,11 +246,12 @@ def test_prompt_says_when_the_sell_target_is_not_reached():
 
 
 def test_prompt_reports_the_giveback_as_a_number():
-    """2026-09-10 현대중공업 궤적 — 고점 +4.46%에서 +1.41%면 3.05%p, 고점 이익의 68%다."""
+    """2026-09-10 현대중공업 궤적 — 고점 +4.46%에서 +1.41%면 3.05%p다. v7부터 반납 비율은 싣지 않는다."""
     view = holding(net_return=0.0141, peak_return=0.0446)
     prompt = build_exit_user_prompt([view], trace_points(), 330, False)
 
-    assert "되돌림: 당일 고점 +4.46% → 현재 +1.41% (3.05%p 반납, 고점 이익의 68%를 반납)" in prompt
+    assert "되돌림: 당일 고점 +4.46% → 현재 +1.41% (3.05%p 반납)" in prompt
+    assert "고점 이익의" not in prompt
 
 
 def test_prompt_says_so_when_now_is_the_peak():
@@ -261,10 +262,10 @@ def test_prompt_says_so_when_now_is_the_peak():
 
 
 def test_system_prompt_has_no_giveback_threshold_and_bans_index_direction_as_hold_reason():
-    """v6 (2026-10-29) — "절반 미만 반납"·"지수 방향 유리"는 보유 근거가 아니다."""
+    """v6 (2026-10-29) — "절반 미만 반납"·"지수 방향 유리"는 보유 근거가 아니다. v7에서 버전만 올랐다."""
     system = build_exit_system_prompt()
 
-    assert EXIT_PROMPT_TEMPLATE_VERSION == "v6"
+    assert EXIT_PROMPT_TEMPLATE_VERSION == "v7"
     assert "절반 이상을 반납했다면 그것 자체가 매도 근거" not in system
     assert "문턱은 없습니다" in system
     assert "반납이 아직 절반 미만" in system
@@ -306,7 +307,7 @@ def test_prompt_still_reports_a_real_giveback_above_the_threshold():
     view = holding(net_return=0.0141, peak_return=0.0446)
     prompt = build_exit_user_prompt([view], trace_points(), 330, False, min_peak=0.01)
 
-    assert "되돌림: 당일 고점 +4.46% → 현재 +1.41% (3.05%p 반납, 고점 이익의 68%를 반납)" in prompt
+    assert "되돌림: 당일 고점 +4.46% → 현재 +1.41% (3.05%p 반납)" in prompt
 
 
 def test_system_prompt_tells_the_model_what_no_peak_means():
@@ -614,11 +615,13 @@ def test_user_prompt_marks_inverse_holding_as_against_when_index_rises():
     assert "지수 방향: KODEX 200 시가 대비 +0.80% — **보유 방향에 불리**" in prompt
 
 
-def test_user_prompt_marks_long_holding_as_favorable_when_index_rises():
+def test_user_prompt_gives_only_the_number_when_index_favors_the_holding():
+    """v7 (2026-10-30) — "유리합니다" 판정 문구는 보유 근거로 쓰여서 뺐다. 수치만 남는다."""
     prompt = build_exit_user_prompt(
         [holding(ticker="069500")], trace_points(), 330, False, index_return=0.8
     )
-    assert "보유 방향에 유리합니다" in prompt
+    assert "지수 방향: KODEX 200 시가 대비 +0.80%\n" in prompt
+    assert "유리" not in prompt.split("지수 방향:")[1].split("\n")[0]
 
 
 def test_user_prompt_says_small_adverse_move_is_below_the_threshold():

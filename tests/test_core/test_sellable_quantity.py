@@ -58,6 +58,7 @@ def make_engine(account, exit_reason=None):
             # exit_reason이 있으면 그 한 종목을 그대로 "닿았다"고 흉내 낸다.
             check_position_exits=lambda ps: [p.ticker for p in ps] if exit_reason is not None else [],
             check_take_profits=lambda ps: [],
+            check_trailing_exits=lambda c, p: [],
             commission_rate=0.0,
             tax_rate=0.0,
             position_net_pnl=lambda p: (p.current_price - p.avg_price) * p.quantity,

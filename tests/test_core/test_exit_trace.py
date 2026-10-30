@@ -71,3 +71,22 @@ def test_ai_judgment_exit_reason_exists_alongside_the_old_ones():
     assert ExitReason.AI_JUDGMENT.value == "ai_judgment"
     assert ExitReason.TAKE_PROFIT.value == "take_profit"
     assert ExitReason.STOP_LOSS.value == "stop_loss"
+
+
+def test_sample_adds_a_point_without_clearing_partial():
+    """엔진의 10분 샘플은 궤적을 채우지만, 엔진 시작 전 과거가 없다는 표시는 그대로다."""
+    trace = ExitTrace()
+    trace.sample(datetime(2026, 10, 30, 10, 0), 0.004, {"114800": 0.004}, {"114800": 7000.0})
+
+    assert trace.count == 1
+    assert trace.last_at == datetime(2026, 10, 30, 10, 0)
+    assert trace.partial is True
+
+    trace.append(datetime(2026, 10, 30, 10, 5), 0.003, {}, {})
+
+    assert trace.partial is False
+    assert [p.at.minute for p in trace.points()] == [0, 5]
+
+    trace.clear()
+    assert trace.partial is True
+    assert trace.last_at is None

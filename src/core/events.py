@@ -34,6 +34,9 @@ class ExitReason(Enum):
     # 과거 `trades` 기록에도 남아 있고 리포트가 읽는다.
     TAKE_PROFIT = "take_profit"
     STOP_LOSS = "stop_loss"
+    # 고점 반납 매도 (2026-10-30 신설) — 당일 순손익 고점이 일정 이상이던 종목이 고점에서
+    # 설정 폭만큼 내려오면 기계적으로 판다. AI가 반납 중에도 보유를 거듭한 것이 계기다.
+    TRAILING_STOP = "trailing_stop"
     # AI 매도 판단 (PRD 5.5-B). 익절 자동 청산이 빠진 자리를 대신한다 — 나중에 성과를
     # 되짚을 때 손절·강제청산과 갈라서 보려고 별도 값으로 남긴다.
     AI_JUDGMENT = "ai_judgment"

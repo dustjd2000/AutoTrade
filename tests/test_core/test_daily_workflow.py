@@ -111,7 +111,7 @@ def make_workflow(recommendations=None, cash=12_000_000):
             get_positions=lambda: {},
             get_balance_snapshot=lambda: SimpleNamespace(total_asset=cash, cash=cash),
         ),
-        trade_store=SimpleNamespace(record_fill=lambda *a, **kw: None),
+        trade_store=SimpleNamespace(record_fill=lambda *a, **kw: None, has_buy_order=lambda *a: False),
         email=email,
     )
     workflow._etf_decided_on = date.today()

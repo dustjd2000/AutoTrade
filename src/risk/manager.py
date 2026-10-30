@@ -7,6 +7,9 @@ from src.core.events import OrderRequest, OrderResult, OrderSide, OrderStatus
 
 logger = logging.getLogger(__name__)
 
+# 비율 비교의 부동소수점 여유 — 0.0174 - 0.0149 가 0.0025보다 미세하게 작게 나오는 경우를 막는다
+_EPSILON = 1e-9
+
 
 def net_return(
     current_price: float,
@@ -154,7 +157,11 @@ class RiskManager:
         slippage_rate: float = 0.001,         # 시장가 청산 슬리피지 추정치
         stop_loss_enabled: bool = True,       # 손절 적용 여부 (UI 체크박스)
         take_profit_ratio: float = 0.0,       # 익절 라인 (순손익률, 0=끔)
+        trail_activate_ratio: float = 0.0,    # 고점 반납 감시를 시작할 최소 고점 (순손익률)
+        trail_giveback_ratio: float = 0.0,    # 고점에서 이만큼 내려오면 매도 (0=끔)
     ):
+        self.trail_activate_ratio = trail_activate_ratio
+        self.trail_giveback_ratio = trail_giveback_ratio
         self.take_profit_ratio = take_profit_ratio
         self.max_position_ratio = max_position_ratio
         self.max_daily_loss_ratio = max_daily_loss_ratio
@@ -275,6 +282,33 @@ class RiskManager:
             )
             if ret >= self.take_profit_ratio:
                 hit.append(position.ticker)
+        return hit
+
+    def check_trailing_exits(self, current: Dict[str, float], peaks: Dict[str, float]) -> List[str]:
+        """당일 고점에서 설정 폭 이상 반납한 **종목**을 골라 돌려준다 (신설 2026-10-30).
+
+        2026-10-30 KODEX 인버스가 순손익 +1.74%까지 갔다가 +0.48%로 내려오는 동안 AI 판단이
+        세 번 연속 보유했다. 이익을 지키는 장치가 AI 판단 하나뿐이라 생긴 일이어서, 고점이
+        `trail_activate_ratio` 이상이던 종목이 `trail_giveback_ratio`만큼 내려오면 기계적으로 판다.
+
+        고점과 현재값은 **같은 기준**이어야 한다 — 호출측이 `TradingEngine.position_net_return`
+        값을 넘기고, `DrawdownTracker`가 고점을 같은 값으로 쌓는다(슬리피지 미반영). 고점을
+        모르는 종목은 건너뛴다. `trail_giveback_ratio`가 0 이하면 빈 목록이고, 손절
+        체크박스(`stop_loss_enabled`)와는 무관하다.
+        """
+        if self.trail_giveback_ratio <= 0:
+            return []
+        hit = []
+        for ticker, value in current.items():
+            peak = peaks.get(ticker)
+            if peak is None:
+                continue
+            # 부동소수점 오차로 정확히 경계(예: 0.25%p)에서 빠지지 않게 아주 작은 여유를 둔다
+            if (
+                peak >= self.trail_activate_ratio - _EPSILON
+                and peak - value >= self.trail_giveback_ratio - _EPSILON
+            ):
+                hit.append(ticker)
         return hit
 
     def record_order(self, result: OrderResult, avg_price: Optional[float] = None) -> None:

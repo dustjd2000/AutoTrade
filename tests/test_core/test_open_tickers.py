@@ -37,6 +37,7 @@ def make_engine(positions, sell_status=OrderStatus.FILLED):
             # 항상 빈 목록(아무도 닿지 않음)이면 충분하다.
             check_position_exits=lambda ps: [],
             check_take_profits=lambda ps: [],
+            check_trailing_exits=lambda c, p: [],
             commission_rate=0.0,
             tax_rate=0.0,
             position_net_pnl=lambda p: (p.current_price - p.avg_price) * p.quantity,

@@ -91,6 +91,7 @@ def make_workflow(rows, returns=(), kill_percent=5.0, start=None, cash=1_000_000
     opened = []
     strategy = ETFRegimeStrategy(investable_ratio=0.5)
     store_calls = []
+    recorded = []
 
     def closed_trade_returns(start_day, up_to, tickers):
         store_calls.append((start_day, up_to, tuple(tickers)))
@@ -110,7 +111,11 @@ def make_workflow(rows, returns=(), kill_percent=5.0, start=None, cash=1_000_000
         account=SimpleNamespace(get_cash=lambda: cash, get_positions=lambda: {}),
         trade_store=SimpleNamespace(
             closed_trade_returns=closed_trade_returns,
-            record_fill=lambda *a, **kw: None,
+            record_fill=recorded.append,
+            # 실제 TradeStore.has_buy_order처럼 거부되지 않은 매수 기록만 본다
+            has_buy_order=lambda day, tickers: any(
+                r.ticker in tickers and r.status != OrderStatus.REJECTED for r in recorded
+            ),
         ),
         email=email,
         etf_kill_loss_percent=kill_percent,
@@ -252,6 +257,19 @@ def test_buy_is_not_repeated_once_ordered_today():
     t.workflow.recommend_and_notify(today=TODAY)
 
     t.workflow._execute_etf_buy(TODAY)
+    t.workflow._execute_etf_buy(TODAY)
+
+    assert len(t.order_client.orders) == 1
+
+
+def test_buy_is_not_repeated_after_the_result_mail_cleared_the_record_file():
+    """2026-10-30 — 09:10 매수가 곧 체결돼 결과 메일이 먼저 나가며 기록 파일을 지웠고, 09:13
+    안전망이 같은 ETF를 한 번 더 샀다. DB 매수 기록이 남아 있으면 사지 않는다."""
+    t = make_workflow(candles(0.5))
+    t.workflow.recommend_and_notify(today=TODAY)
+    t.workflow._execute_etf_buy(TODAY)
+
+    t.workflow._clear_buy_records()       # cancel_unfilled_buys가 결과 메일을 보내며 하는 일
     t.workflow._execute_etf_buy(TODAY)
 
     assert len(t.order_client.orders) == 1

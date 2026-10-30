@@ -384,3 +384,43 @@ def test_net_pnl_ignores_slippage():
     position = fill_position("047050", 1000.0, 1100.0, 10)
 
     assert manager.position_net_pnl(position) == pytest.approx(1000.0)
+
+
+# ── 고점 반납 매도 (신설 2026-10-30) ────────────────────────
+def _trail_manager(activate=0.005, giveback=0.0025):
+    return RiskManager(trail_activate_ratio=activate, trail_giveback_ratio=giveback)
+
+
+def test_trailing_exits_fire_only_when_peak_is_high_enough_and_giveback_is_wide_enough():
+    manager = _trail_manager()
+    peaks = {"A": 0.0174, "B": 0.0174, "C": 0.004, "D": 0.0050}
+    current = {
+        "A": 0.0148,  # 고점 +1.74% → 0.26%p 반납: 발동
+        "B": 0.0151,  # 0.23%p 반납: 미달
+        "C": -0.001,  # 고점이 시작값 미만: 감시 대상 아님
+        "D": 0.0025,  # 고점 +0.5%(경계 포함) → 0.25%p 반납: 발동
+    }
+
+    assert manager.check_trailing_exits(current, peaks) == ["A", "D"]
+
+
+def test_trailing_exits_empty_when_giveback_ratio_is_zero():
+    assert _trail_manager(giveback=0.0).check_trailing_exits({"A": -0.05}, {"A": 0.05}) == []
+
+
+def test_trailing_exits_ignore_tickers_without_a_known_peak():
+    assert _trail_manager().check_trailing_exits({"A": -0.05}, {}) == []
+
+
+def test_trailing_exits_do_not_depend_on_the_stop_loss_switch():
+    manager = RiskManager(
+        trail_activate_ratio=0.005, trail_giveback_ratio=0.0025, stop_loss_enabled=False
+    )
+
+    assert manager.check_trailing_exits({"A": 0.0}, {"A": 0.01}) == ["A"]
+
+
+def test_trailing_exit_fires_exactly_at_the_giveback_width():
+    """+1.74% → +1.49%는 부동소수점으로 0.25%p보다 미세하게 작게 계산될 수 있다 — 그래도 판다."""
+    rm = RiskManager(trail_activate_ratio=0.005, trail_giveback_ratio=0.0025)
+    assert rm.check_trailing_exits({"114800": 0.0149}, {"114800": 0.0174}) == ["114800"]

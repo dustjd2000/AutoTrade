@@ -356,3 +356,96 @@ def test_engine_stop_loss_takes_precedence_over_take_profit():
 
     assert [o.ticker for o in orders] == ["000660"]
     assert store.reasons == [("000660", "stop_loss")]
+
+
+# ── 고점 반납 매도 (신설 2026-10-30) ─────────────────────────
+def _arm_trailing(engine):
+    engine.risk_manager.trail_activate_ratio = 0.005
+    engine.risk_manager.trail_giveback_ratio = 0.0025
+
+
+def test_engine_trailing_exit_sells_only_the_ticker_that_gave_back_and_records_reason():
+    store = RecordingStore()
+    engine, orders, alerts = make_engine(
+        two_holdings(price_a=1000.0, price_b=1000.0), trade_store=store
+    )
+    _arm_trailing(engine)
+
+    engine.on_market_data(MarketData(ticker="005930", price=1010.0, volume=1))  # 고점 +1%
+    assert orders == []
+    engine.on_market_data(MarketData(ticker="000660", price=1002.0, volume=1))  # 고점 +0.2%: 대상 아님
+    engine.on_market_data(MarketData(ticker="005930", price=1008.0, volume=1))  # 0.2%p 반납: 미달
+    assert orders == []
+    engine.on_market_data(MarketData(ticker="005930", price=1007.0, volume=1))  # 0.3%p 반납
+
+    assert [o.ticker for o in orders] == ["005930"]
+    assert store.reasons == [("005930", "trailing_stop")]
+    assert any("+1.00%" in a and "+0.70%" in a for a in alerts)
+
+
+def test_engine_trailing_exit_is_off_when_giveback_is_zero():
+    engine, orders, _ = make_engine(two_holdings(price_a=1000.0, price_b=1000.0))
+
+    engine.on_market_data(MarketData(ticker="005930", price=1010.0, volume=1))
+    engine.on_market_data(MarketData(ticker="005930", price=1000.0, volume=1))
+
+    assert orders == []
+
+
+def test_engine_stop_loss_takes_precedence_over_trailing():
+    store = RecordingStore()
+    engine, orders, _ = make_engine(
+        two_holdings(price_a=1000.0, price_b=1000.0), trade_store=store
+    )
+    _arm_trailing(engine)
+
+    engine.on_market_data(MarketData(ticker="005930", price=1010.0, volume=1))  # 고점 +1%
+    engine.on_market_data(MarketData(ticker="000660", price=940.0, volume=1))  # 손절 -6%
+    # 이 틱에서 005930은 0.5%p 반납했지만 손절이 먼저라 000660만 나간다
+
+    assert [o.ticker for o in orders] == ["000660"]
+    assert store.reasons == [("000660", "stop_loss")]
+
+
+def test_engine_take_profit_takes_precedence_over_trailing():
+    store = RecordingStore()
+    engine, orders, _ = make_engine(
+        two_holdings(price_a=1000.0, price_b=1000.0), trade_store=store
+    )
+    _arm_trailing(engine)
+    engine.risk_manager.take_profit_ratio = 0.02
+
+    engine.on_market_data(MarketData(ticker="000660", price=1010.0, volume=1))  # 000660 고점 +1%
+    # 000660이 0.5%p 반납한 상태를 만든다 (시세 없이 캐시만 — 트레일링은 다음 틱에 판정된다)
+    engine._positions["000660"].current_price = 1005.0
+    engine.on_market_data(MarketData(ticker="005930", price=1030.0, volume=1))  # 005930 익절 +3%
+
+    assert [o.ticker for o in orders] == ["005930"]
+    assert store.reasons == [("005930", "take_profit")]
+
+
+# ── 궤적 주기 샘플 (2026-10-30) ──────────────────────────────
+def test_engine_samples_the_exit_trace_every_ten_minutes_and_keeps_partial():
+    from datetime import datetime, timedelta
+
+    engine, _, _ = make_engine(two_holdings(price_a=1000.0, price_b=1000.0))
+
+    engine.on_market_data(MarketData(ticker="005930", price=1001.0, volume=1))
+    assert engine.exit_trace.count == 1
+    engine.on_market_data(MarketData(ticker="005930", price=1002.0, volume=1))
+    assert engine.exit_trace.count == 1  # 10분이 안 지났다
+    assert engine.exit_trace.partial is True  # 샘플은 AI 판단 사이클의 '첫 호출' 표시를 건드리지 않는다
+
+    engine.exit_trace._points[-1].at = datetime.now() - timedelta(minutes=11)
+    engine.on_market_data(MarketData(ticker="005930", price=1003.0, volume=1))
+
+    assert engine.exit_trace.count == 2
+    assert engine.exit_trace.points()[-1].per_ticker["005930"] == 0.003
+
+
+def test_engine_does_not_sample_the_trace_without_holdings():
+    engine, _, _ = make_engine({})
+
+    engine.on_market_data(MarketData(ticker="005930", price=1001.0, volume=1))
+
+    assert engine.exit_trace.count == 0

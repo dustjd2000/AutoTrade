@@ -43,6 +43,7 @@ EXIT_REASON_LABELS: Dict[str, str] = {
     "ai_judgment": "AI 매도 판단",
     "stop_loss": "손절",
     "take_profit": "익절",
+    "trailing_stop": "고점 반납 매도",
     "day_end": "15:15 강제청산",
     "manual": "수동 전량 매도",
     "manual_selected": "수동 선택 매도",

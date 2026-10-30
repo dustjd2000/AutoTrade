@@ -178,6 +178,14 @@ def _parse_take_profit(text: str) -> float:
         return 0.0
 
 
+def _parse_trail_giveback(text: str) -> float:
+    """고점 반납 폭 입력란 문자열 → %p 값. 비었으면 저장 때와 같이 기본 0.25, 깨졌으면 0(끔)."""
+    try:
+        return max(float(text.strip().replace(",", ".") or 0.25), 0.0)
+    except ValueError:
+        return 0.0
+
+
 def _with_toggle(field: QLineEdit, *toggles: QCheckBox) -> QWidget:
     """입력란 오른쪽에 적용 여부 체크박스를 붙여 폼의 한 줄로 만든다.
 
@@ -589,6 +597,14 @@ class MainWindow(QMainWindow):
         self._take_profit_percent.setPlaceholderText("예: 2 (순손익 +2%에 닿은 종목을 자동 매도, 0=끔)")
         self._take_profit_percent.setValidator(QDoubleValidator(0.0, 100.0, 2))
 
+        # 고점 반납 매도 입력란 (2026-10-30 신설) — 종목별 당일 순손익 고점 기준, 반납 폭 0이면 끔.
+        self._trail_activate_percent = QLineEdit()
+        self._trail_activate_percent.setPlaceholderText("예: 0.5 (순손익 고점이 이 값 이상일 때부터 감시)")
+        self._trail_activate_percent.setValidator(QDoubleValidator(0.0, 100.0, 2))
+        self._trail_giveback_percent = QLineEdit()
+        self._trail_giveback_percent.setPlaceholderText("예: 0.25 (고점에서 이만큼 내려오면 매도, 0=끔)")
+        self._trail_giveback_percent.setValidator(QDoubleValidator(0.0, 100.0, 2))
+
         # AI 매도 판단 호출 단계 폭 — 바꾸면 엔진 재시작이 필요하다 (`_save_settings` 대상)
         self._ai_exit_step = _NoScrollComboBox()
         for step in AI_EXIT_STEP_CHOICES:
@@ -626,12 +642,15 @@ class MainWindow(QMainWindow):
             ),
         )
         risk_form.addRow("익절 (%)", self._take_profit_percent)
+        risk_form.addRow("고점 반납 시작 (%)", self._trail_activate_percent)
+        risk_form.addRow("고점 반납 폭 (%p)", self._trail_giveback_percent)
         risk_form.addRow("AI 판단 단계 (%p)", self._ai_exit_step)
         # 종목별 판정이라는 점과 AI 판단을 언제 부르는지를 입력란 바로 아래에서 알린다
         exit_hint = QLabel(
             "손절선입니다. 순손익률이 이 값에 닿으면 실시간으로 시장가 매도합니다. 순손익률은 "
             "수수료·슬리피지를 뺀 값이라 화면의 평가손익률보다 낮습니다(ETF는 거래세 면제).\n"
             "익절은 종목별 순손익률이 익절선 이상이면 그 종목만 시장가로 매도합니다(0=끔, 손절이 먼저 판정).\n"
+            "고점 반납 매도는 종목별 순손익 고점이 시작값 이상이던 뒤 고점에서 반납 폭만큼 내려오면 그 종목을 시장가로 매도합니다(폭 0=끔, 손절·익절 다음 판정).\n"
             "AI 매도 판단은 주기가 아니라 순손익률이 'AI 판단 단계' 폭의 단계를 새로 넘을 때마다 불러, "
             "팔기로 정한 경우에만 매도합니다. 나머지는 15:15에 강제청산됩니다."
         )
@@ -984,6 +1003,9 @@ class MainWindow(QMainWindow):
         take_profit = _parse_take_profit(self._take_profit_percent.text())
         if take_profit > 0:
             text += f" · 익절 +{take_profit:g}%"
+        giveback = _parse_trail_giveback(self._trail_giveback_percent.text())
+        if giveback > 0:
+            text += f" · 고점반납 {giveback:g}%p"
         return text
 
     # ── 매도 불가 ────────────────────────────────────────────
@@ -1268,7 +1290,10 @@ class MainWindow(QMainWindow):
 
         take_profit = _parse_take_profit(self._take_profit_percent.text())
 
-        if not ai_exit and not stop_loss and take_profit <= 0:
+        trail_giveback = _parse_trail_giveback(self._trail_giveback_percent.text())
+        trail_activate = self._trail_activate_percent.text().strip() or "0.5"
+
+        if not ai_exit and not stop_loss and take_profit <= 0 and trail_giveback <= 0:
             return (
                 "⚠ AI 매도 판단과 손절이 모두 해제되어 있어 매수 후 실시간 청산이 동작하지 "
                 "않습니다.\n15:15 강제청산까지 보유합니다."
@@ -1285,6 +1310,12 @@ class MainWindow(QMainWindow):
         if take_profit > 0:
             lines.append(
                 f"익절: 순손익 +{take_profit:g}%에 닿은 종목을 실시간 매도합니다."
+            )
+
+        if trail_giveback > 0:
+            lines.append(
+                f"고점 반납 매도: 순손익 고점이 +{trail_activate}% 이상이던 종목이 고점에서 "
+                f"{trail_giveback:g}%p 내려오면 실시간 매도합니다."
             )
 
         if ai_exit:
@@ -1332,6 +1363,8 @@ class MainWindow(QMainWindow):
         self._email_to.setText(env.get("EMAIL_TO", ""))
         self._exit_percent.setText(env.get("STOP_LOSS_PERCENT", "2"))
         self._take_profit_percent.setText(env.get("TAKE_PROFIT_PERCENT", "2"))
+        self._trail_activate_percent.setText(env.get("TRAIL_ACTIVATE_PERCENT", "0.5"))
+        self._trail_giveback_percent.setText(env.get("TRAIL_GIVEBACK_PERCENT", "0.25"))
         self._select_step_value(env.get("AI_EXIT_STEP_PERCENT"))
         self._select_combo_value(self._investable_ratio, env.get("INVESTABLE_RATIO_PERCENT"), default=50)
         # 청산 체크박스는 마지막으로 켜고 끈 상태를 그대로 되살린다. 복원하는 동안에는
@@ -1398,6 +1431,8 @@ class MainWindow(QMainWindow):
             "EMAIL_TO": self._email_to.text().strip(),
             "STOP_LOSS_PERCENT": self._exit_percent.text().strip() or "2",
             "TAKE_PROFIT_PERCENT": self._take_profit_percent.text().strip() or "2",
+            "TRAIL_ACTIVATE_PERCENT": self._trail_activate_percent.text().strip() or "0.5",
+            "TRAIL_GIVEBACK_PERCENT": self._trail_giveback_percent.text().strip() or "0.25",
             "AI_EXIT_STEP_PERCENT": self._ai_exit_step.currentData(),
             "INVESTABLE_RATIO_PERCENT": str(self._investable_ratio.currentData()),
         }

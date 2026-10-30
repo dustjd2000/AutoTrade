@@ -487,7 +487,12 @@ class DailyWorkflow:
         지정가 밴드를 쓰지 않는 이유: 2호는 가격 예측이 아니라 그날 방향에 올라타는 규칙이라,
         기준가보다 올랐다고 건너뛰면 오르는 날만 놓친다.
         """
-        if self._read_buy_records(today) is not None:
+        # 매수 기록 파일은 결과 메일 발송 때 지워지므로 DB 매수 기록도 함께 본다 —
+        # 2026-10-30에 파일만 보다가 09:13 안전망이 한 번 더 샀다 (`TradeStore.has_buy_order`)
+        if (
+            self._read_buy_records(today) is not None
+            or self.trade_store.has_buy_order(today, etf_regime.ETF_TICKERS)
+        ):
             logger.info("2호 전략: 오늘 이미 매수 주문을 냈습니다 — 건너뜁니다.")
             return
         if self._etf_decided_on != today:

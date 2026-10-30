@@ -120,6 +120,10 @@ class DrawdownTracker:
                 self._peaks[ticker] = peak
                 self._armed[ticker] = True
 
+    def peaks(self) -> Dict[str, float]:
+        """종목별 당일 고점 사본 — 고점 반납 매도(`RiskManager.check_trailing_exits`)가 읽는다."""
+        return dict(self._peaks)
+
     def take_dirty(self) -> Dict[str, float]:
         """마지막으로 꺼내 간 뒤 새로 찍은 고점을 꺼낸다 (종목당 가장 높은 값 하나)."""
         dirty = self._dirty
