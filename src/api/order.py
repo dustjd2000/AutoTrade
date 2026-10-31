@@ -2,6 +2,8 @@ import logging
 import uuid
 from typing import List, Optional
 
+import requests
+
 from config.settings import Settings
 from src.api.auth import AuthClient
 from src.api.client import KiwoomClient, to_float, to_int
@@ -59,7 +61,19 @@ class OrderClient:
                     request.quantity,
                     e,
                 )
-                if attempt == MAX_RETRIES:
+                # 매수는 요청이 서버에 닿지 않았다고 확실한 경우(연결 타임아웃·429)만 재시도한다.
+                # 읽기 타임아웃·주문번호 누락은 서버가 이미 접수했을 수 있어, 재시도하면 시장가
+                # 매수가 두 번 나간다. 매도는 이중 접수돼도 매도가능수량 부족으로 거부되므로
+                # 손절 신뢰성을 위해 그대로 재시도한다.
+                unknown_buy = request.side == OrderSide.BUY and not self._is_never_sent(e)
+                if unknown_buy:
+                    logger.error(
+                        "매수 주문 결과를 알 수 없습니다 — 재시도하지 않습니다. 잔고·체결내역을 확인하세요: %s x%d주 — %s",
+                        request.label,
+                        request.quantity,
+                        e,
+                    )
+                if unknown_buy or attempt == MAX_RETRIES:
                     # 여기서 ERROR로 남기지 않으면 거부된 주문이 error 로그에 전혀 남지 않는다
                     logger.error(
                         "주문 최종 실패 (%d회 시도): %s %s x%d주 — %s",
@@ -78,6 +92,14 @@ class OrderClient:
                         error_message=str(e),
                         name=request.name,
                     )
+
+    @staticmethod
+    def _is_never_sent(e: Exception) -> bool:
+        """요청이 서버에 닿지 않았다고 확실한 실패인지 (연결 타임아웃, 429)."""
+        if isinstance(e, requests.exceptions.ConnectTimeout):
+            return True
+        response = getattr(e, "response", None)
+        return isinstance(e, requests.HTTPError) and response is not None and response.status_code == 429
 
     def get_today_fills(self) -> List[FillRecord]:
         """당일 주문의 체결 결과를 주문번호 단위로 조회한다.

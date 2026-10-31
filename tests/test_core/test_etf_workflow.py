@@ -83,7 +83,8 @@ class FakeOrderClient:
 
 
 def make_workflow(rows, returns=(), kill_percent=5.0, start=None, cash=1_000_000, price=30000.0,
-                  order_status=OrderStatus.PENDING, order_error=None, band=0.0, flip=True):
+                  order_status=OrderStatus.PENDING, order_error=None, band=0.0, flip=True,
+                  get_positions=lambda: {}, risk_manager=None):
     email = FakeEmail()
     notifications, closed = [], []
     market_data = FakeMarketData(rows, price=price)
@@ -102,13 +103,14 @@ def make_workflow(rows, returns=(), kill_percent=5.0, start=None, cash=1_000_000
         notify=notifications.append,
         note_market_closed=closed.append,
         order_client=order_client,
-        risk_manager=SimpleNamespace(approve=lambda *a, **kw: True, record_order=lambda *a, **kw: None),
+        risk_manager=risk_manager or SimpleNamespace(
+            approve=lambda *a, **kw: True, record_order=lambda *a, **kw: None),
         note_open_position=opened.append,
     )
     workflow = DailyWorkflow(
         strategy=strategy,
         engine=engine,
-        account=SimpleNamespace(get_cash=lambda: cash, get_positions=lambda: {}),
+        account=SimpleNamespace(get_cash=lambda: cash, get_positions=get_positions),
         trade_store=SimpleNamespace(
             closed_trade_returns=closed_trade_returns,
             record_fill=recorded.append,
@@ -273,6 +275,46 @@ def test_buy_is_not_repeated_after_the_result_mail_cleared_the_record_file():
     t.workflow._execute_etf_buy(TODAY)
 
     assert len(t.order_client.orders) == 1
+
+
+def test_buy_is_skipped_when_an_etf_is_already_held():
+    """매수 주문이 모호하게 실패해 REJECTED로 기록돼도 실제로는 체결됐을 수 있다 — 보유를 본다."""
+    held = {LONG_ETF[0]: SimpleNamespace(quantity=10)}
+    t = make_workflow(candles(0.5), get_positions=lambda: held)
+    t.workflow.recommend_and_notify(today=TODAY)
+
+    t.workflow._execute_etf_buy(TODAY)
+
+    assert t.order_client.orders == []
+
+
+def test_buy_is_skipped_when_the_balance_cannot_be_read():
+    def broken():
+        raise RuntimeError("잔고 조회 실패")
+
+    t = make_workflow(candles(0.5), get_positions=broken)
+    t.workflow.recommend_and_notify(today=TODAY)
+
+    t.workflow._execute_etf_buy(TODAY)
+
+    assert t.order_client.orders == []
+    assert any("[경고]" in n for n in t.notifications)
+
+
+def test_decision_mail_lists_the_live_exit_rules():
+    rm = SimpleNamespace(
+        approve=lambda *a, **kw: True, record_order=lambda *a, **kw: None,
+        stop_loss_ratio=0.02, take_profit_ratio=0.02,
+        trail_activate_ratio=0.005, trail_giveback_ratio=0.0025,
+    )
+    t = make_workflow(candles(0.5), risk_manager=rm)
+
+    t.workflow.recommend_and_notify(today=TODAY)
+
+    body = t.email.sent[0][1]
+    assert "손절 -2%" in body and "익절 +2%" in body
+    assert "고점 반납 0.25%p(고점 +0.5% 이상)" in body
+    assert "AI 매도 판단" in body and "AI 매도 판단 없음" not in body
 
 
 def test_buy_decides_again_when_the_decision_was_lost_by_a_restart():

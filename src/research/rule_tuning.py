@@ -97,6 +97,9 @@ class RuleTuning:
                 self.minute_store.load(LONG_ETF[0]),
                 self.minute_store.load(INVERSE_ETF[0]),
                 self.settings.commission_ratio,
+                getattr(self.settings, "take_profit_percent", 0.0),
+                getattr(self.settings, "trail_activate_percent", 0.0),
+                getattr(self.settings, "trail_giveback_percent", 0.0),
             )
             evaluation = self._evaluate(backtester, current)
         except Exception:

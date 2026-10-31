@@ -39,6 +39,31 @@ def test_trade_return_stops_at_the_first_bar_past_the_stop():
     assert result == pytest.approx((9750 / 10000 - 1 - 2 * COMMISSION) * 100)   # 1001봉에서 -2.5%로 손절
 
 
+def test_trade_return_takes_profit_at_the_first_bar_past_the_line():
+    bars = flat_day(10000, {"1000": 10100, "1001": 10250, "1002": 10500})
+    result = trade_return(bars, "0910", 2.0, COMMISSION, half_tick=0.0, take_profit_percent=2.0)
+    assert result == pytest.approx((10250 / 10000 - 1 - 2 * COMMISSION) * 100)   # 1001봉에서 +2.5%로 익절
+
+
+def test_trade_return_exits_on_giveback_from_an_activated_peak():
+    bars = flat_day(10000, {"1000": 10080, "1001": 10050, "1002": 10020, "1003": 10100})
+    result = trade_return(
+        bars, "0910", 2.0, COMMISSION, half_tick=0.0,
+        trail_activate_percent=0.5, trail_giveback_percent=0.25,
+    )
+    # 고점 +0.77% 뒤 1001봉 +0.47%(반납 0.30%p)에서 판다
+    assert result == pytest.approx((10050 / 10000 - 1 - 2 * COMMISSION) * 100)
+
+
+def test_trade_return_ignores_giveback_below_the_activation_peak():
+    bars = flat_day(10000, {"1000": 10030, "1001": 10000, "1002": 10100})
+    result = trade_return(
+        bars, "0910", 2.0, COMMISSION, half_tick=0.0,
+        trail_activate_percent=0.5, trail_giveback_percent=0.25,
+    )
+    assert result == pytest.approx((10100 / 10000 - 1 - 2 * COMMISSION) * 100)   # 15:15까지 보유
+
+
 def test_trade_return_without_an_entry_bar_is_none():
     assert trade_return([("0900", 1.0)], "0910", 2.0, COMMISSION) is None
 

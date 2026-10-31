@@ -1,9 +1,12 @@
 from types import SimpleNamespace
 
+import requests
+
 from src.api.order import (
     BUY_API_ID,
     FILLS_API_ID,
     FILLS_PATH,
+    MAX_RETRIES,
     ORDER_PATH,
     SELL_API_ID,
     TRADE_TYPE_LIMIT,
@@ -181,3 +184,57 @@ def test_ticker_prefix_is_stripped():
     client, _ = make_fills_client([({"cntr": [{**BUY_FILL, "stk_cd": "A034220"}]}, {"cont-yn": "N"})])
 
     assert client.get_today_fills()[0].ticker == "034220"
+
+
+def _client_raising(exc):
+    calls = []
+    client = OrderClient.__new__(OrderClient)
+
+    def fake_call(request):
+        calls.append(request)
+        raise exc
+
+    client._call_api = fake_call
+    return client, calls
+
+
+def _market_order(side):
+    return OrderRequest(ticker="069500", side=side, order_type=OrderType.MARKET, quantity=3)
+
+
+def test_buy_read_timeout_is_not_retried():
+    # 읽기 타임아웃은 서버가 이미 접수했을 수 있어 재시도하면 이중 매수가 된다
+    client, calls = _client_raising(requests.exceptions.ReadTimeout("read timed out"))
+
+    result = client.send_order(_market_order(OrderSide.BUY))
+
+    assert len(calls) == 1
+    assert result.status == OrderStatus.REJECTED
+
+
+def test_buy_connect_timeout_is_retried():
+    client, calls = _client_raising(requests.exceptions.ConnectTimeout("connect timed out"))
+
+    result = client.send_order(_market_order(OrderSide.BUY))
+
+    assert len(calls) == MAX_RETRIES
+    assert result.status == OrderStatus.REJECTED
+
+
+def test_buy_http_429_is_retried():
+    response = requests.Response()
+    response.status_code = 429
+    client, calls = _client_raising(requests.HTTPError("429", response=response))
+
+    client.send_order(_market_order(OrderSide.BUY))
+
+    assert len(calls) == MAX_RETRIES
+
+
+def test_sell_read_timeout_is_still_retried():
+    client, calls = _client_raising(requests.exceptions.ReadTimeout("read timed out"))
+
+    result = client.send_order(_market_order(OrderSide.SELL))
+
+    assert len(calls) == MAX_RETRIES
+    assert result.status == OrderStatus.REJECTED

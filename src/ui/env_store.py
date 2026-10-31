@@ -4,6 +4,7 @@ python-dotenv는 파일 쓰기를 지원하지 않으므로 직접 파싱한다.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Dict
 
@@ -50,4 +51,7 @@ def save_env(path: Path, values: Dict[str, str]) -> None:
         for key, val in values.items():
             lines.append(f"{key}={val}")
 
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # 자격증명이 든 파일이라 쓰다 죽어도 비지 않게 임시 파일에 쓴 뒤 통째로 바꾼다
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(tmp, path)

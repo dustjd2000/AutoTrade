@@ -676,5 +676,5 @@ def rule_evaluation_email(
         lines.extend(f" - {key}: {old} → {new}" for key, (old, new) in applied_values.items())
     if row.note:
         lines.extend(["", f"비고: {row.note}"])
-    lines.extend(["", "※ 평가는 손절과 15:15 청산만으로 한다 — AI 매도 판단은 재현하지 않는다."])
+    lines.extend(["", "※ 평가는 손절·익절·고점 반납·15:15 청산으로 한다 — AI 매도 판단은 재현하지 않는다."])
     return subject, "\n".join(lines)

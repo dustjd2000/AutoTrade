@@ -169,4 +169,4 @@ class WebSocketClient:
             try:
                 cb(data)
             except Exception as e:
-                logger.error("Market data callback error: %s", e)
+                logger.exception("Market data callback error: %s", e)

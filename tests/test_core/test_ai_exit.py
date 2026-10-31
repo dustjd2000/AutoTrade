@@ -893,3 +893,34 @@ def test_cycle_passes_index_return_to_advisor(monkeypatch):
     asyncio.run(run_ai_exit_cycle(runtime, IN_WINDOW))
 
     assert advisor.calls[0]["index_return"] == 0.8
+
+
+def test_watch_ai_exit_survives_an_exception_in_the_cycle(monkeypatch):
+    """한 번 예외가 나도 워처가 죽지 않고 다음 폴링에서 다시 사이클을 부른다."""
+    import src.core.runtime as runtime_module
+
+    runtime, _, _ = make_runtime(holdings=[])
+    calls = []
+
+    async def flaky_cycle(rt, now, last_called_at):
+        calls.append(now)
+        if len(calls) == 1:
+            raise RuntimeError("잔고 조회 실패")
+        return last_called_at
+
+    monkeypatch.setattr(runtime_module, "maybe_run_ai_exit_cycle", flaky_cycle)
+
+    async def scenario():
+        task = asyncio.create_task(watch_ai_exit(runtime, poll_seconds=0))
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if len(calls) >= 2:
+                break
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(scenario())
+    assert len(calls) >= 2

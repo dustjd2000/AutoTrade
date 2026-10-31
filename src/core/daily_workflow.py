@@ -495,6 +495,18 @@ class DailyWorkflow:
         ):
             logger.info("2호 전략: 오늘 이미 매수 주문을 냈습니다 — 건너뜁니다.")
             return
+        # 모호한 실패로 거부 처리된 주문은 위 기록에 안 잡히지만 실제로는 체결됐을 수 있다 —
+        # 실제 보유를 한 번 더 본다. 잔고를 못 읽으면 이중 매수 위험이 더 커서 사지 않는다.
+        try:
+            positions = self.account.get_positions()
+        except Exception:
+            logger.exception("2호 전략 매수 직전 잔고 조회 실패 — 이중 매수를 막으려고 건너뜁니다")
+            self.engine.notify("[경고] 2호 전략 매수 직전 잔고 조회에 실패해 매수를 건너뛰었습니다")
+            return
+        held = [t for t in etf_regime.ETF_TICKERS if t in positions and positions[t].quantity > 0]
+        if held:
+            logger.info("2호 전략: 이미 ETF를 보유 중입니다 (%s) — 매수를 건너뜁니다.", ", ".join(held))
+            return
         if self._etf_decided_on != today:
             self._recommend_etf(today)
 
@@ -527,7 +539,6 @@ class DailyWorkflow:
                 ticker=plan.ticker, side=OrderSide.BUY, order_type=OrderType.MARKET,
                 quantity=quantity, price=None, name=plan.name,
             )
-            positions = self.account.get_positions()
             if not self.engine.risk_manager.approve(request, positions, reference_price=price):
                 record = replace(record, outcome=BuyOutcome.FAILED, note="리스크 관리 규칙에 걸려 주문하지 않았습니다")
                 self.engine.notify(f"매수 거부 (리스크 관리): {label}")
@@ -604,12 +615,22 @@ class DailyWorkflow:
             )
         else:
             subject = f"[2호 전략] {today} {recommendation.name} 시장가 매수"
+            rm = self.engine.risk_manager
+            exits = [f"손절 -{getattr(rm, 'stop_loss_ratio', 0.0) * 100:g}%"]
+            if getattr(rm, "take_profit_ratio", 0.0) > 0:
+                exits.append(f"익절 +{rm.take_profit_ratio * 100:g}%")
+            if getattr(rm, "trail_giveback_ratio", 0.0) > 0:
+                exits.append(
+                    f"고점 반납 {rm.trail_giveback_ratio * 100:g}%p"
+                    f"(고점 +{getattr(rm, 'trail_activate_ratio', 0.0) * 100:g}% 이상)"
+                )
+            exits += ["AI 매도 판단", "15:15 강제청산"]
             body = (
                 f"직전 {etf_regime.LOOKBACK_DAYS}거래일 장중 평균 {signal_text}\n"
                 f"매수 종목: {format_stock(recommendation.ticker, recommendation.name)} — 곧바로 시장가 주문\n"
                 f"결정 시점 현재가: {recommendation.target_price:,}원\n"
                 f"투입: 예수금의 {self.strategy.investable_ratio * 100:.0f}%, "
-                f"청산: 손절 또는 15:15 (AI 매도 판단 없음)"
+                f"청산: {' · '.join(exits)}"
             )
         self.email.send(subject, body)
 

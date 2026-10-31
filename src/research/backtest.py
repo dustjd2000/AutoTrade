@@ -2,7 +2,7 @@
 
 실전과 어긋나지 않도록 방향은 실전 함수(`etf_regime.pick_etf`)로 정한다. 신호는 직전 20거래일
 KODEX 200의 장중(첫 봉 → 마지막 봉) 수익률 평균이다 — 실전은 일봉 시가·종가를 쓰므로 첫 봉 종가만큼
-차이가 난다. AI 매도 판단은 재현하지 않는다: 청산은 손절과 15:15뿐이다.
+차이가 난다. 청산은 실전처럼 손절·익절·고점 반납·15:15를 재현한다. AI 매도 판단은 재현하지 않는다.
 """
 import json
 from dataclasses import asdict, dataclass
@@ -55,8 +55,14 @@ def trade_return(
     stop_percent: float,
     commission_ratio: float,
     half_tick: float = HALF_TICK_WON,
+    take_profit_percent: float = 0.0,
+    trail_activate_percent: float = 0.0,
+    trail_giveback_percent: float = 0.0,
 ) -> Optional[float]:
-    """`entry_hhmm`(HHMM) 이후 첫 봉에 사서, 순손익률이 −손절 이하가 된 첫 봉이나 15:15 이후 첫 봉에 판다.
+    """`entry_hhmm`(HHMM) 이후 첫 봉에 사서, 청산 조건에 처음 닿은 봉에 판다.
+
+    청산 조건(실전과 같은 순서): 순손익률 ≤ −손절, ≥ +익절, 고점(≥ 활성 문턱)에서 반납폭만큼 하락,
+    15:15 이후 첫 봉. 익절·고점 반납은 0이면 끈다.
 
     순손익률(%) = (매도가 − 반호가) / (매수가 + 반호가) − 1 − 수수료 양방향. 진입할 봉이 없으면 None.
     """
@@ -65,9 +71,17 @@ def trade_return(
         return None
     entry = bars[entry_index][1] + half_tick
     net = None
+    peak = float("-inf")
     for t, price in bars[entry_index + 1:]:
         net = ((price - half_tick) / entry - 1 - 2 * commission_ratio) * 100
-        if net <= -stop_percent or t >= CLOSE_OUT_HHMM:
+        peak = max(peak, net)
+        if (
+            net <= -stop_percent
+            or (take_profit_percent > 0 and net >= take_profit_percent)
+            or (trail_giveback_percent > 0 and peak >= trail_activate_percent
+                and peak - net >= trail_giveback_percent)
+            or t >= CLOSE_OUT_HHMM
+        ):
             return net
     return net
 
@@ -75,7 +89,18 @@ def trade_return(
 class Backtester:
     """분봉 한 벌로 여러 규칙을 평가한다. 같은 (날짜, 종목, 진입 시각, 손절) 매매는 한 번만 계산한다."""
 
-    def __init__(self, long_bars: DayBars, inverse_bars: DayBars, commission_ratio: float):
+    def __init__(
+        self,
+        long_bars: DayBars,
+        inverse_bars: DayBars,
+        commission_ratio: float,
+        take_profit_percent: float = 0.0,
+        trail_activate_percent: float = 0.0,
+        trail_giveback_percent: float = 0.0,
+    ):
+        self._take_profit = take_profit_percent
+        self._trail_activate = trail_activate_percent
+        self._trail_giveback = trail_giveback_percent
         self._long = long_bars
         self._inverse = inverse_bars
         self._commission = commission_ratio
@@ -93,7 +118,12 @@ class Backtester:
         key = (day, ticker, hhmm, stop_percent)
         if key not in self._trades:
             bars = self._long[day] if ticker == LONG_ETF[0] else self._inverse[day]
-            self._trades[key] = trade_return(bars, hhmm, stop_percent, self._commission)
+            self._trades[key] = trade_return(
+                bars, hhmm, stop_percent, self._commission,
+                take_profit_percent=self._take_profit,
+                trail_activate_percent=self._trail_activate,
+                trail_giveback_percent=self._trail_giveback,
+            )
         return self._trades[key]
 
     def day_return(self, day: str, rule: Rule) -> float:

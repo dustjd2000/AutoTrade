@@ -816,7 +816,12 @@ async def watch_ai_exit(runtime: Runtime, poll_seconds: float = AI_EXIT_POLL_SEC
     last_called_at: Optional[datetime] = None
     while True:
         await asyncio.sleep(poll_seconds)
-        last_called_at = await maybe_run_ai_exit_cycle(runtime, datetime.now(), last_called_at)
+        # 한 번의 예외(잔고 REST 실패, DB 오류 등)로 워처가 죽으면 그날 남은 시간 내내 이익 실현이
+        # 멈춘다 — 기록만 남기고 다음 폴링에서 이어 간다
+        try:
+            last_called_at = await maybe_run_ai_exit_cycle(runtime, datetime.now(), last_called_at)
+        except Exception:
+            logger.exception("AI 매도 판단 주기 실행 중 예외 — 다음 폴링에서 계속합니다")
 
 
 def adopt_carried_over_positions(runtime: Runtime) -> List[str]:

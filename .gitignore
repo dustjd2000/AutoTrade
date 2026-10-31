@@ -25,3 +25,4 @@ build/
 
 # Claude Code 로컬 설정 (개인 환경별 권한 설정)
 .claude/settings.local.json
+.env.tmp
