@@ -34,8 +34,8 @@ def _env_values(rule: Rule, buy_hhmm: str) -> Dict[str, str]:
     return {
         "ETF_SIGNAL_BAND_PERCENT": f"{rule.band_percent:g}",
         "ETF_FLIP_ENABLED": "1" if rule.flip_enabled else "0",
-        "RECOMMEND_TIME": rule.decision_hhmm,
-        "BUY_TIME": buy_hhmm,
+        "DECISION_TIME": rule.decision_hhmm,
+        "BUY_FALLBACK_TIME": buy_hhmm,
         "STOP_LOSS_PERCENT": f"{rule.stop_percent:g}",
     }
 

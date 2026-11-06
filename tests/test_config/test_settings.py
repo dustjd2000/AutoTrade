@@ -13,8 +13,8 @@ from config.settings import (
 @pytest.fixture(autouse=True)
 def clear_schedule_times(monkeypatch):
     """다른 테스트나 실제 .env가 남긴 값이 섞이지 않도록 매번 비운 상태에서 시작한다."""
-    monkeypatch.delenv("RECOMMEND_TIME", raising=False)
-    monkeypatch.delenv("BUY_TIME", raising=False)
+    monkeypatch.delenv("DECISION_TIME", raising=False)
+    monkeypatch.delenv("BUY_FALLBACK_TIME", raising=False)
 
 
 def _strategy_settings(monkeypatch, **env):
@@ -56,7 +56,7 @@ def test_recommend_time_defaults_to_0905():
     ],
 )
 def test_recommend_time_reads_env_value(monkeypatch, raw, expected):
-    monkeypatch.setenv("RECOMMEND_TIME", raw)
+    monkeypatch.setenv("DECISION_TIME", raw)
 
     assert Settings().recommend_time == expected
 
@@ -64,7 +64,7 @@ def test_recommend_time_reads_env_value(monkeypatch, raw, expected):
 @pytest.mark.parametrize("raw", ["", "oops", "9시05분", "09:05:00", "99:99"])
 def test_recommend_time_falls_back_when_value_is_broken(monkeypatch, raw):
     """오타 하나로 엔진이 뜨지 않는 것보다 기본값으로 도는 편이 낫다 (Settings.recommend_time)."""
-    monkeypatch.setenv("RECOMMEND_TIME", raw)
+    monkeypatch.setenv("DECISION_TIME", raw)
 
     settings = Settings()
 
@@ -99,19 +99,19 @@ def test_buy_time_defaults_to_0910(monkeypatch):
 
 def test_buy_time_defaults_to_nine_ten(monkeypatch):
     """추천 09:02 + 검증·재추천 여유 8분 (2026-10-01, 09:05에서 이동)."""
-    monkeypatch.delenv("BUY_TIME", raising=False)
+    monkeypatch.delenv("BUY_FALLBACK_TIME", raising=False)
     assert Settings().buy_time_hhmm == "09:10"
 
 
 def test_buy_time_reads_env_value(monkeypatch):
-    monkeypatch.setenv("BUY_TIME", "09:15")
+    monkeypatch.setenv("BUY_FALLBACK_TIME", "09:15")
 
     assert Settings().buy_time == dt_time(9, 15)
 
 
 def test_buy_time_falls_back_when_value_is_broken(monkeypatch):
     """오타 하나로 엔진이 뜨지 않는 것보다 기본값으로 도는 편이 낫다 (Settings.buy_time)."""
-    monkeypatch.setenv("BUY_TIME", "구시")
+    monkeypatch.setenv("BUY_FALLBACK_TIME", "구시")
 
     assert Settings().buy_time == dt_time(9, 10)
 
@@ -140,24 +140,24 @@ def _valid_settings(monkeypatch) -> Settings:
 
 def test_validate_rejects_buy_time_too_close_to_recommendation(monkeypatch):
     """순서가 뒤집히면 추천 없이 매수가 돌아 그날이 조용히 빈다 — 시작 자체를 막는다."""
-    monkeypatch.setenv("RECOMMEND_TIME", "09:05")
-    monkeypatch.setenv("BUY_TIME", "09:07")
+    monkeypatch.setenv("DECISION_TIME", "09:05")
+    monkeypatch.setenv("BUY_FALLBACK_TIME", "09:07")
 
-    with pytest.raises(ValueError, match="BUY_TIME"):
+    with pytest.raises(ValueError, match="BUY_FALLBACK_TIME"):
         _valid_settings(monkeypatch).validate()
 
 
 def test_validate_rejects_recommend_time_before_open(monkeypatch):
     """개장 전에는 당일 지표가 오지 않아 후보 선정이 성립하지 않는다."""
-    monkeypatch.setenv("RECOMMEND_TIME", "08:45")
+    monkeypatch.setenv("DECISION_TIME", "08:45")
 
-    with pytest.raises(ValueError, match="RECOMMEND_TIME"):
+    with pytest.raises(ValueError, match="DECISION_TIME"):
         _valid_settings(monkeypatch).validate()
 
 
 def test_validate_accepts_a_later_pair(monkeypatch):
-    monkeypatch.setenv("RECOMMEND_TIME", "09:05")
-    monkeypatch.setenv("BUY_TIME", "09:20")
+    monkeypatch.setenv("DECISION_TIME", "09:05")
+    monkeypatch.setenv("BUY_FALLBACK_TIME", "09:20")
 
     _valid_settings(monkeypatch).validate()
 

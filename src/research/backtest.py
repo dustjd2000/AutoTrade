@@ -23,7 +23,7 @@ HALF_TICK_WON = 2.5
 class Rule:
     band_percent: float
     flip_enabled: bool
-    decision_hhmm: str      # "HH:MM" — `.env`의 RECOMMEND_TIME 꼴
+    decision_hhmm: str      # "HH:MM" — `.env`의 DECISION_TIME 꼴
     stop_percent: float
 
     def to_json(self) -> str:

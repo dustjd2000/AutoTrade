@@ -88,7 +88,7 @@ def test_applies_after_four_consecutive_wins(tmp_path):
 
     assert written == [{
         "ETF_SIGNAL_BAND_PERCENT": "0.2", "ETF_FLIP_ENABLED": "0",
-        "RECOMMEND_TIME": "09:30", "BUY_TIME": "09:33",
+        "DECISION_TIME": "09:30", "BUY_FALLBACK_TIME": "09:33",
     }]
     assert tuning.applied_pending
     rows = tuning.trade_store.rule_evaluations()

@@ -7,7 +7,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# 결정 시각(`RECOMMEND_TIME`)과 매수 안전망 시각(`BUY_TIME`) 기본값 — 둘 다 `.env`로만 바꾼다
+# 결정 시각(`DECISION_TIME`)과 매수 안전망 시각(`BUY_FALLBACK_TIME`) 기본값 — 둘 다 `.env`로만 바꾼다
 # (UI에서는 값을 보여주기만 한다). 결정 시각에 당일 거래 여부(휴장 판정)를 보므로 개장 뒤여야
 # 하고, 결정 직후 시장가 매수가 같은 실행에서 나간다 (PRD 5.5-C). 매수 시각은 그 사이 엔진이
 # 재시작돼 결정이 사라진 날의 안전망이라, 결정보다 `MIN_RECOMMEND_TO_BUY_MINUTES`분 이상 뒤다.
@@ -148,23 +148,23 @@ class Settings:
     # 결정·매수 안전망 시각 — .env에는 "HH:MM" 문자열로 두고, 스케줄러가 쓰는
     # datetime.time은 프로퍼티로 환산한다
     recommend_time_hhmm: str = field(
-        default_factory=lambda: os.getenv("RECOMMEND_TIME", DEFAULT_RECOMMEND_TIME_HHMM)
+        default_factory=lambda: os.getenv("DECISION_TIME", DEFAULT_RECOMMEND_TIME_HHMM)
     )
     buy_time_hhmm: str = field(
-        default_factory=lambda: os.getenv("BUY_TIME", DEFAULT_BUY_TIME_HHMM)
+        default_factory=lambda: os.getenv("BUY_FALLBACK_TIME", DEFAULT_BUY_TIME_HHMM)
     )
 
     @property
     def recommend_time(self) -> dt_time:
         """스케줄러에 넘길 결정 시각 (ETF 국면 신호 → 결정 메일 → 곧바로 시장가 매수)."""
         return _parse_hhmm(
-            self.recommend_time_hhmm, DEFAULT_RECOMMEND_TIME_HHMM, "RECOMMEND_TIME"
+            self.recommend_time_hhmm, DEFAULT_RECOMMEND_TIME_HHMM, "DECISION_TIME"
         )
 
     @property
     def buy_time(self) -> dt_time:
         """스케줄러에 넘길 매수 안전망 시각 — 오늘 아직 주문하지 않았으면 결정부터 다시 해서 산다."""
-        return _parse_hhmm(self.buy_time_hhmm, DEFAULT_BUY_TIME_HHMM, "BUY_TIME")
+        return _parse_hhmm(self.buy_time_hhmm, DEFAULT_BUY_TIME_HHMM, "BUY_FALLBACK_TIME")
 
     # 손절 라인 — UI/환경변수에는 %(예: 2)로 저장, 내부 계산은 비율(0.02)로 환산.
     # 수수료·세금·슬리피지를 뺀 순손익률 기준이다 (PRD 5.5-B).
@@ -276,12 +276,12 @@ class Settings:
         open_time = _parse_hhmm(MARKET_OPEN_HHMM, MARKET_OPEN_HHMM, "MARKET_OPEN")
         if _minutes(self.recommend_time) < _minutes(open_time):
             raise ValueError(
-                f"RECOMMEND_TIME은 개장({MARKET_OPEN_HHMM}) 이후여야 합니다: {self.recommend_time_hhmm}"
+                f"DECISION_TIME은 개장({MARKET_OPEN_HHMM}) 이후여야 합니다: {self.recommend_time_hhmm}"
             )
         gap = _minutes(self.buy_time) - _minutes(self.recommend_time)
         if gap < MIN_RECOMMEND_TO_BUY_MINUTES:
             raise ValueError(
-                f"BUY_TIME은 RECOMMEND_TIME보다 {MIN_RECOMMEND_TO_BUY_MINUTES}분 이상 뒤여야 "
+                f"BUY_FALLBACK_TIME은 DECISION_TIME보다 {MIN_RECOMMEND_TO_BUY_MINUTES}분 이상 뒤여야 "
                 f"합니다: 추천 {self.recommend_time_hhmm} / 매수 {self.buy_time_hhmm}"
             )
         if self.ai_exit_step_percent < MIN_AI_EXIT_STEP_PERCENT:

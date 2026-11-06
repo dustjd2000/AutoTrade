@@ -1377,8 +1377,8 @@ class MainWindow(QMainWindow):
         finally:
             self._syncing_exit_flags = False
         self._schedule_times.setText(
-            f"결정·시장가 매수 {env.get('RECOMMEND_TIME', DEFAULT_RECOMMEND_TIME_HHMM)}"
-            f" (안전망 {env.get('BUY_TIME', DEFAULT_BUY_TIME_HHMM)})"
+            f"결정·시장가 매수 {env.get('DECISION_TIME', DEFAULT_RECOMMEND_TIME_HHMM)}"
+            f" (안전망 {env.get('BUY_FALLBACK_TIME', DEFAULT_BUY_TIME_HHMM)})"
             "  ·  매수 결과 메일 10:10  ·  청산 15:15"
             "  —  시각은 .env에서 바꾸고 다시 시작해야 반영됩니다"
         )

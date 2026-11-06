@@ -47,7 +47,7 @@ pytest tests/test_strategy/test_etf_regime.py -k name    # 테스트 단위 (-k 
   `src/core/runtime.py`의 `TimeScheduler`(시간 기반 08:40 초기화/결정 시각/매수 시각/10:10
   미체결 취소/15:15 강제청산/15:35 일일 리포트/15:40 매도 판단 검증·프롬프트 자동 수정/15:45 1분봉 수집/금요일 16:00 2호 규칙 평가·자동 적용)와 `WebSocketClient` 콜백(실시간 시세 기반)이 함께
   돈다. 이 중 **결정 시각과 매수 시각만 설정값**이고 (`settings.recommend_time`/`buy_time`,
-  `.env`의 `RECOMMEND_TIME`·`BUY_TIME` — 이름은 1호 시절 그대로다) 나머지는 코드 상수다. 결정
+  `.env`의 `DECISION_TIME`·`BUY_FALLBACK_TIME` — 2026-11-06에 1호 시절 이름 `RECOMMEND_TIME`·`BUY_TIME`에서 바꿨다) 나머지는 코드 상수다. 결정
   시각에 ETF를 정하고 **같은 실행에서 곧바로 시장가로 산다**. 매수 시각은 그 사이 엔진이 재시작돼
   결정이 사라진 날의 안전망이다(이미 주문했으면 건너뛴다). 두 값은 UI에서 고를 수 없고 라벨로
   보여주기만 하며, "결정은 개장 후, 매수는 결정 +3분 이상"을 `Settings.validate()`가 엔진 시작
@@ -110,7 +110,7 @@ pytest tests/test_strategy/test_etf_regime.py -k name    # 테스트 단위 (-k 
   감시 공백을 알리고 확인을 받는다.
 - 퍼센트 단위 설정(`STOP_LOSS_PERCENT` 등)은 `_percent` 필드(원값, `.env`에 저장)와
   `_ratio` 프로퍼티(0~1 환산, 계산에 사용) 쌍으로 두는 패턴을 따른다 — 새 설정을 추가할
-  때도 이 패턴을 따른다. 시각 설정(`RECOMMEND_TIME`·`BUY_TIME`)도 같은 꼴로 `_hhmm`
+  때도 이 패턴을 따른다. 시각 설정(`DECISION_TIME`·`BUY_FALLBACK_TIME`)도 같은 꼴로 `_hhmm`
   필드(`"HH:MM"` 원값)와 프로퍼티(`datetime.time` 환산) 쌍이며, 환산은 `_parse_hhmm`이 맡는다.
 - `mode`(`paper`/`live`)에 따라 `api_base_url`/`websocket_url`이 자동 분기된다. 실전
   전환은 `.env`에 `LIVE_TRADE_CONFIRMED=YES_I_UNDERSTAND`가 없으면 `Settings.validate()`가
