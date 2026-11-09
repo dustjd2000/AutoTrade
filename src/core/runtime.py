@@ -274,8 +274,9 @@ def build_runtime(settings: Settings) -> Runtime:
         etf_start_date=date.fromisoformat(settings.etf_start_date) if settings.etf_start_date else None,
         signal_band_percent=settings.etf_signal_band_percent,
         flip_enabled=settings.etf_flip_enabled,
+        buy_fallback_hhmm=settings.buy_time_hhmm,
     )
-    exit_advisor = ExitAdvisor(settings, prompt_store=exit_prompt_store)
+    exit_advisor =ExitAdvisor(settings, prompt_store=exit_prompt_store)
 
     # 매수/강제청산은 실시간 손절 감시와 직렬화되도록 루프 스레드에서 그대로 실행하고,
     # 오래 걸리는 수집·LLM·리포트는 루프를 막지 않도록 별도 스레드로 넘긴다 — 이 배분은

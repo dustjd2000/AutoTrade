@@ -253,6 +253,24 @@ def test_buy_sends_a_market_order_right_after_the_decision():
     assert t.opened == [INVERSE_ETF[0]]
 
 
+def test_failed_daily_query_says_the_fallback_retries_and_it_does():
+    # 2026-11-09: 09:02 502로 "오늘 매수를 스킵합니다" 메일만 받아 하루가 빠진 줄 알았다
+    t = make_workflow(candles(-0.5), cash=1_000_000, price=1250.0)
+    t.workflow.buy_fallback_hhmm = "09:05"
+    rows = t.market_data.rows
+    t.market_data.rows = None          # list(None) → TypeError로 조회 실패를 흉내 낸다
+    t.workflow.recommend_and_notify(today=TODAY)
+
+    assert t.order_client.orders == []
+    assert "09:05 매수 안전망에서 다시 시도합니다" in t.notifications[-1]
+
+    t.market_data.rows = rows
+    t.workflow._execute_etf_buy(TODAY)
+
+    [order] = t.order_client.orders
+    assert order.ticker == INVERSE_ETF[0]
+
+
 def test_buy_is_not_repeated_once_ordered_today():
     """매수 시각 안전망이 같은 날 두 번 사지 않는다 — 매수 기록 파일이 표시다."""
     t = make_workflow(candles(0.5))

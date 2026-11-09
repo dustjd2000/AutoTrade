@@ -122,6 +122,7 @@ class DailyWorkflow:
         etf_start_date: Optional[date] = None,
         signal_band_percent: float = 0.0,
         flip_enabled: bool = True,
+        buy_fallback_hhmm: Optional[str] = None,
     ):
         self.strategy = strategy
         self.engine = engine
@@ -162,6 +163,10 @@ class DailyWorkflow:
         self.etf_start_date = etf_start_date
         self.signal_band_percent = signal_band_percent
         self.flip_enabled = flip_enabled
+        # 조회 실패 알림에 "언제 다시 시도하는지"를 적는 데만 쓴다 — 실패한 결정·매수는 매수 시각
+        # 안전망이 다시 한다. 2026-11-09 09:02 502 오류 때 "오늘 매수를 스킵합니다" 메일만 받고
+        # 하루가 빠진 줄 알았다
+        self.buy_fallback_hhmm = buy_fallback_hhmm
         # 오늘 2호 결정(매수/쉼/중단)을 마친 날짜 — 매수 시각 안전망이 결정을 되풀이하지 않게 한다.
         # 인메모리라 엔진이 재시작되면 비고, 그때는 안전망이 다시 정한다 (`_execute_etf_buy`).
         self._etf_decided_on: Optional[date] = None
@@ -381,6 +386,12 @@ class DailyWorkflow:
         """매수(버튼 ②, 매수 시각 안전망) — 정한 ETF를 시장가로 즉시 산다 (`_execute_etf_buy`)."""
         self._execute_etf_buy(date.today())
 
+    def _retry_note(self) -> str:
+        """조회 실패 알림 끝에 붙일 재시도 안내 — 오늘 아직 주문하지 않았으면 안전망이 다시 산다."""
+        if self.buy_fallback_hhmm is None:
+            return "매수 시각 안전망에서 다시 시도합니다 (이미 지났으면 오늘은 건너뜁니다)"
+        return f"{self.buy_fallback_hhmm} 매수 안전망에서 다시 시도합니다 (이미 지났으면 오늘은 건너뜁니다)"
+
     def _recommend_etf(self, today: date) -> None:
         """결정 시각 — 자동 중단 확인 → 휴장 확인 → 국면 신호 → 오늘 살 ETF 1종목을 정해 메일로 알린다.
 
@@ -403,8 +414,8 @@ class DailyWorkflow:
             recent = market_data.get_ohlcv(ticker, base_date=today)
             earlier = market_data.get_ohlcv(ticker, base_date=today - timedelta(days=1))
         except Exception:
-            logger.exception("2호 전략 신호용 일봉 조회 실패 — 오늘 매수를 스킵합니다.")
-            self.engine.notify("[경고] 2호 전략 일봉 조회 실패 — 오늘 매수를 스킵합니다.")
+            logger.exception("2호 전략 신호용 일봉 조회 실패 — %s", self._retry_note())
+            self.engine.notify(f"[경고] 2호 전략 일봉 조회 실패 — {self._retry_note()}")
             return
 
         if not etf_regime.traded_today(recent, today):
@@ -432,8 +443,8 @@ class DailyWorkflow:
         try:
             price = market_data.get_current_price(pick_ticker).price
         except Exception:
-            logger.exception("2호 전략 현재가 조회 실패 — 오늘 매수를 스킵합니다: %s", pick_ticker)
-            self.engine.notify(f"[경고] 2호 전략 현재가 조회 실패 ({pick_name}) — 오늘 매수를 스킵합니다.")
+            logger.exception("2호 전략 현재가 조회 실패 (%s) — %s", pick_ticker, self._retry_note())
+            self.engine.notify(f"[경고] 2호 전략 현재가 조회 실패 ({pick_name}) — {self._retry_note()}")
             return
         if price <= 0:
             logger.error("2호 전략 현재가가 0입니다 — 오늘 매수를 스킵합니다: %s", pick_ticker)
@@ -500,8 +511,10 @@ class DailyWorkflow:
         try:
             positions = self.account.get_positions()
         except Exception:
-            logger.exception("2호 전략 매수 직전 잔고 조회 실패 — 이중 매수를 막으려고 건너뜁니다")
-            self.engine.notify("[경고] 2호 전략 매수 직전 잔고 조회에 실패해 매수를 건너뛰었습니다")
+            logger.exception("2호 전략 매수 직전 잔고 조회 실패 — 이중 매수를 막으려고 건너뜁니다. %s", self._retry_note())
+            self.engine.notify(
+                f"[경고] 2호 전략 매수 직전 잔고 조회에 실패해 매수를 건너뛰었습니다 — {self._retry_note()}"
+            )
             return
         held = [t for t in etf_regime.ETF_TICKERS if t in positions and positions[t].quantity > 0]
         if held:
