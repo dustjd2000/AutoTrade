@@ -40,6 +40,9 @@ class ExitReason(Enum):
     # AI 매도 판단 (PRD 5.5-B). 익절 자동 청산이 빠진 자리를 대신한다 — 나중에 성과를
     # 되짚을 때 손절·강제청산과 갈라서 보려고 별도 값으로 남긴다.
     AI_JUDGMENT = "ai_judgment"
+    # 2호 장중 전환 (스펙 2026-11-11) — 산 ETF가 틀린 방향이라 팔았다. 1번째 종목이면 반대 ETF를
+    # 이어서 사고, 2번째 종목이면 매도만 한다 (둘 다 이 사유로 남긴다).
+    ETF_SWITCH = "etf_switch"
 
 
 def format_stock(ticker: str, name: Optional[str] = None) -> str:
@@ -58,6 +61,10 @@ class MarketData:
     timestamp: datetime = field(default_factory=datetime.now)
     bid: Optional[float] = None
     ask: Optional[float] = None
+    # 0B 체결 틱의 부호 있는 체결량(양수 = 매수 체결, 음수 = 매도 체결)과 키움 누적 체결강도.
+    # 체결강도 계산(`TradeStrength`)과 실측 대조 로그에만 쓴다. 필드가 없으면 None.
+    signed_volume: Optional[int] = None
+    strength_cum: Optional[float] = None
 
 
 @dataclass
@@ -87,6 +94,9 @@ class OrderResult:
     timestamp: datetime = field(default_factory=datetime.now)
     error_message: Optional[str] = None
     name: Optional[str] = None
+    # 거부로 기록했지만 서버가 접수했을 수도 있는 매수 (읽기 타임아웃·502 등, `OrderClient.send_order`).
+    # 이 표시가 서면 호출부는 재시도하지 않는다 — 이중 매수가 된다.
+    outcome_unknown: bool = False
 
     @property
     def label(self) -> str:

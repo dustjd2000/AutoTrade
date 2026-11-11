@@ -72,3 +72,23 @@ def test_subscribe_skips_tickers_already_registered():
     client.subscribe(["005930", "035720"])
 
     assert client._tickers == ["005930", "035720"]
+
+
+# ── 0B 체결 파싱: 부호 있는 체결량(15)·누적 체결강도(228) (스펙 2026-11-11 4.4) ──
+def trade_item(values):
+    return {"type": "0B", "item": "A069500", "values": {"10": "-35000", "13": "1000", **values}}
+
+
+def test_parse_trade_reads_signed_volume_and_cumulative_strength():
+    data = make_client()._parse_trade(trade_item({"15": "-12", "228": "98.50"}))
+
+    assert (data.ticker, data.price, data.volume) == ("069500", 35000.0, 1000)
+    assert data.signed_volume == -12
+    assert data.strength_cum == 98.5
+
+
+def test_parse_trade_leaves_missing_fields_as_none():
+    data = make_client()._parse_trade(trade_item({"15": ""}))
+
+    assert data.signed_volume is None
+    assert data.strength_cum is None

@@ -238,3 +238,15 @@ def test_sell_read_timeout_is_still_retried():
 
     assert len(calls) == MAX_RETRIES
     assert result.status == OrderStatus.REJECTED
+
+
+def test_unknown_buy_result_is_flagged_and_a_definite_failure_is_not():
+    """전환 매수는 결과를 모르는 실패와 확실한 실패를 달리 다룬다 (스펙 2026-11-11 5.3)."""
+    client, _ = _client_raising(requests.exceptions.ReadTimeout("read timed out"))
+    assert client.send_order(_market_order(OrderSide.BUY)).outcome_unknown is True
+
+    client, _ = _client_raising(requests.exceptions.ConnectTimeout("connect timed out"))
+    assert client.send_order(_market_order(OrderSide.BUY)).outcome_unknown is False
+
+    client, _ = _client_raising(requests.exceptions.ReadTimeout("read timed out"))
+    assert client.send_order(_market_order(OrderSide.SELL)).outcome_unknown is False

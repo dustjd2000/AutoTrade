@@ -158,11 +158,20 @@ class WebSocketClient:
         ticker = (item.get("item") or "").strip().lstrip("A")
         if not ticker:
             return None
-        # 10: 현재가(부호 포함), 13: 누적거래량
+        # 10: 현재가(부호 포함), 13: 누적거래량, 15: 체결량(부호 = 매수/매도 체결), 228: 누적 체결강도.
+        # 15·228의 필드 번호는 실측 전 가정이다 (스펙 2026-11-11 8절) — 없으면 None으로 둔다.
         price = abs(to_float(values.get("10")))
         if price <= 0:
             return None
-        return MarketData(ticker=ticker, price=price, volume=to_int(values.get("13")))
+        signed = values.get("15")
+        strength = values.get("228")
+        return MarketData(
+            ticker=ticker,
+            price=price,
+            volume=to_int(values.get("13")),
+            signed_volume=to_int(signed) if signed not in (None, "") else None,
+            strength_cum=to_float(strength) if strength not in (None, "") else None,
+        )
 
     def _dispatch(self, data: MarketData) -> None:
         for cb in self._on_market_data:

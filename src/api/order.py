@@ -91,6 +91,7 @@ class OrderClient:
                         quantity=request.quantity,
                         error_message=str(e),
                         name=request.name,
+                        outcome_unknown=unknown_buy,
                     )
 
     @staticmethod

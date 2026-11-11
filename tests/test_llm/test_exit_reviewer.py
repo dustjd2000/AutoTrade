@@ -77,3 +77,10 @@ def test_reviewer_parses_a_normal_response():
         with_options=lambda **kw: SimpleNamespace(messages=SimpleNamespace(create=lambda **k: response))
     )
     assert reviewer.review([item()]) == {"032830": "평가"}
+
+
+def test_switch_exit_reason_has_a_label():
+    from src.core.events import ExitReason
+    from src.llm.exit_reviewer import EXIT_REASON_LABELS
+
+    assert EXIT_REASON_LABELS[ExitReason.ETF_SWITCH.value] == "장중 전환"
