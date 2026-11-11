@@ -303,3 +303,33 @@ def test_rule_tuning_settings_read_env(monkeypatch):
     assert settings.etf_signal_band_percent == 0.2
     assert settings.etf_flip_enabled is False
     assert settings.rule_auto_apply_enabled is False
+
+
+# ── 2호 장중 전환 (스펙 2026-11-11) ─────────────────────────
+SWITCH_KEYS = ("ETF_SWITCH_ENABLED", "ETF_SWITCH_INDEX_PERCENT", "ETF_SWITCH_STRENGTH_MINUTES")
+
+
+def test_etf_switch_defaults(monkeypatch):
+    for key in SWITCH_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    settings = Settings()
+    assert settings.etf_switch_enabled is True
+    assert settings.etf_switch_index_percent == 0.5
+    assert settings.etf_switch_strength_minutes == 5.0
+
+
+def test_etf_switch_reads_env(monkeypatch):
+    settings = _strategy_settings(
+        monkeypatch,
+        ETF_SWITCH_ENABLED="0", ETF_SWITCH_INDEX_PERCENT="0.7", ETF_SWITCH_STRENGTH_MINUTES="3",
+    )
+    assert settings.etf_switch_enabled is False
+    assert settings.etf_switch_index_percent == 0.7
+    assert settings.etf_switch_strength_minutes == 3.0
+    settings.validate()
+
+
+@pytest.mark.parametrize("key", ["ETF_SWITCH_INDEX_PERCENT", "ETF_SWITCH_STRENGTH_MINUTES"])
+def test_etf_switch_values_must_be_positive(monkeypatch, key):
+    with pytest.raises(ValueError, match=key):
+        _strategy_settings(monkeypatch, **{key: "0"}).validate()

@@ -250,6 +250,20 @@ class Settings:
         default_factory=lambda: parse_flag(os.getenv("RULE_AUTO_APPLY_ENABLED"), True)
     )
 
+    # 2호 장중 전환 (스펙 2026-11-11) — 산 ETF가 틀린 방향이면 팔고 반대 ETF로 갈아탄다.
+    # 0이면 판정만 끈다 (KODEX 200 구독과 체결강도 계산은 그대로 돈다). `.env` 전용.
+    etf_switch_enabled: bool = field(
+        default_factory=lambda: parse_flag(os.getenv("ETF_SWITCH_ENABLED"), True)
+    )
+    # KODEX 200이 산 시점 대비 보유 방향과 반대로 이만큼(%) 움직여야 전환한다
+    etf_switch_index_percent: float = field(
+        default_factory=lambda: float(os.getenv("ETF_SWITCH_INDEX_PERCENT", "0.5"))
+    )
+    # 체결강도(매수 체결량 ÷ 매도 체결량)를 재는 구간(분). 이만큼 차기 전에는 판정하지 않는다
+    etf_switch_strength_minutes: float = field(
+        default_factory=lambda: float(os.getenv("ETF_SWITCH_STRENGTH_MINUTES", "5"))
+    )
+
     # 손절 판정(및 AI 매도 판단 프롬프트·UI의 합산 순손익 표시)에 반영할 비용 —
     # 매매수수료(매수·매도 동일), 세금(매도 시만), 슬리피지(추정)
     commission_percent: float = field(default_factory=lambda: float(os.getenv("COMMISSION_PERCENT", "0.015")))
@@ -295,6 +309,14 @@ class Settings:
             raise ValueError(f"TRAIL_ACTIVATE_PERCENT는 0 이상이어야 합니다: {self.trail_activate_percent}")
         if self.trail_giveback_percent < 0:
             raise ValueError(f"TRAIL_GIVEBACK_PERCENT는 0 이상이어야 합니다: {self.trail_giveback_percent}")
+        if self.etf_switch_index_percent <= 0:
+            raise ValueError(
+                f"ETF_SWITCH_INDEX_PERCENT는 0보다 커야 합니다: {self.etf_switch_index_percent}"
+            )
+        if self.etf_switch_strength_minutes <= 0:
+            raise ValueError(
+                f"ETF_SWITCH_STRENGTH_MINUTES는 0보다 커야 합니다: {self.etf_switch_strength_minutes}"
+            )
         if self.etf_start_date:
             try:
                 date.fromisoformat(self.etf_start_date)
