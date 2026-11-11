@@ -68,6 +68,7 @@ pytest tests/test_strategy/test_etf_regime.py -k name    # 테스트 단위 (-k 
   스레드를 정한다. 버튼 ①(`recommend`)과 일괄 실행(`full`)은 같은 단계(결정 → 시장가 매수)다.
   단, 버튼 ⑤와 15:35 스케줄은 **다른 함수**를 부른다 — 버튼은 `send_daily_report`(항상 발송),
   스케줄은 `send_final_report`(하루 한 번).
+  장중 전환의 매수 단계(`switch_buy`)도 이 큐를 탄다 — 유일한 **코루틴 단계**라 매도 체결을 기다리는 동안(최대 15:14까지) 루프는 막지 않지만 큐는 잡고 있다.
 
 ### 전략 프레임워크
 - `src/strategy/base.py`의 `BaseStrategy`(`generate_signal(MarketData) -> Signal`)가 실시간
@@ -134,6 +135,7 @@ pytest tests/test_strategy/test_etf_regime.py -k name    # 테스트 단위 (-k 
   다를 수 있으니 동작을 따질 때는 **`.env`를 직접 확인한다**.
 - **종목별 고정 익절이 있다** (2026-10-30 재도입, 사용자 지시). 종목 순손익률(손절과 같은 `net_return`)이 `TAKE_PROFIT_PERCENT`(기본 2, 0=끔) 이상이면 그 종목만 시장가 매도하고 사유는 `take_profit`이다 (`RiskManager.check_take_profits`, `_check_portfolio_exit`에서 손절 뒤에 판정 — 손절이 먼저). 자동 청산은 2026-09-09에 걷어냈고 설정은 2026-09-18에 지웠었다 — 실매매 27건 대조에서 어떤 익절선도 "익절 없음"보다 낫지 않았다는 PRD 10절 분석이 근거였다. 주간 규칙 자동 검증 백테스트는 익절을 모델링하지 않는다.
 - **고점 반납 매도가 있다** (2026-10-30 신설, 사용자 승인). 종목 순손익(`position_net_return`) 고점이 `TRAIL_ACTIVATE_PERCENT`(기본 0.5) 이상이던 종목이 고점에서 `TRAIL_GIVEBACK_PERCENT`(기본 0.25%p, 0=끔)만큼 내려오면 그 종목만 시장가 매도하고 사유는 `trailing_stop`이다 (`RiskManager.check_trailing_exits`, `_check_portfolio_exit`에서 손절 → 익절 → 고점 반납 순). 고점은 `DrawdownTracker.peaks()`라 슬리피지 미반영 기준이다. 근거와 백테스트(-0.321 → -0.235%/일, 뒤집기 끄면 오히려 불리)는 PRD 5.5-B. 주간 규칙 자동 검증 백테스트는 이 규칙도 모델링하지 않는다.
+- **장중 전환이 있다** (2026-11-12 신설, 스펙 2026-11-11, `.env`의 `ETF_SWITCH_ENABLED`·`ETF_SWITCH_INDEX_PERCENT`·`ETF_SWITCH_STRENGTH_MINUTES`, UI 없음). 보유 ETF가 **틀린 방향**이면 — KODEX 200 가격이 산 시점 대비 반대로 0.5% 이상 AND KODEX 200 최근 5분 체결강도(`src/core/trade_strength.py`)도 반대 AND 순손익 < 0 — 판다(`TradingEngine._check_etf_switch`, 사유 `etf_switch`). 판정은 `_check_portfolio_exit` **뒤**라 손절·익절·고점 반납이 먼저다. 1번째 종목이면 매도 체결을 기다렸다가 반대 ETF를 시장가로 사고(`src/core/switch_flow.py`, 실행 큐의 `switch_buy` 코루틴 단계, 하루 1회), 2번째 종목이면 매도만 한다. 069500은 항상 구독한다(`runtime.subscribe_index`). 다리 기록은 `etf_switch_legs`. 전환 매수를 기다리는 동안 "전량 매도 완료" 리포트는 보류된다. **근거가 음수인 실험이다** — 지수 조건만의 백테스트는 모든 문턱에서 현행보다 나빴고 체결강도는 검증되지 않았다 (PRD 5.5 "장중 전환").
 - **익절선 아래 구간은 AI 매도 판단이 맡는다** (`runtime.watch_ai_exit` → `src/llm/exit_advisor.py`).
   보유 종목이 있을 때만, 거래일에, 개장 ~ 15:00 사이에 **종목 순손익률이 +0.5%·+1%… 또는
   -0.5%·-1%… 단계를 새로 넘을 때마다**(이익 고점에서 단계를 새로 내려올 때도, 0단계까지 — 2026-10-29)(`src/core/etf_exit_trigger.py`의 `StepTrigger` →
