@@ -1,7 +1,7 @@
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from src.api.auth import AuthClient
 from src.api.client import KiwoomAPIError
@@ -24,6 +24,16 @@ from src.core.events import (
 )
 from src.core.exit_drawdown import DrawdownTracker
 from src.core.exit_trace import ExitTrace
+from src.core.etf_switch import (
+    INDEX_STALE_SECONDS,
+    Decision,
+    PendingSwitch,
+    SwitchKind,
+    SwitchState,
+    opposite_etf,
+)
+from src.core.trade_strength import TradeStrength
+from src.strategy.etf_regime import ETF_TICKERS, LONG_ETF
 from src.logger.trade_store import TradeStore
 from src.notification.alert import AlertNotifier
 
@@ -35,6 +45,10 @@ logger = logging.getLogger(__name__)
 PEAK_FLUSH_SECONDS = 5.0
 # 순손익 궤적에 AI 판단과 무관하게 한 점을 남기는 간격(분) — `_sample_exit_trace`
 TRACE_SAMPLE_MINUTES = 10
+
+# KODEX 200 틱과 체결강도를 로그에 남기는 간격(초) — 필드 15·228 실측과 우리 5분 값의 대조용
+# (스펙 2026-11-11 8절). 틱마다 남기면 로그가 초당 여러 줄씩 쌓인다.
+INDEX_LOG_SECONDS = 60.0
 
 # 실시간 체결 틱마다 잔고 REST(kt00005)를 호출하면 키움 유량 제한(429)에 걸린다.
 # 그 예외는 콜백 전체를 중단시키므로 손절 판정이 통째로 건너뛰어지는데,
@@ -139,6 +153,9 @@ class TradingEngine:
         emergency_action: str = "hold",
         ai_exit_enabled: bool = True,
         ai_exit_drawdown_ratio: float = 0.0,
+        etf_switch_enabled: bool = False,
+        etf_switch_index_percent: float = 0.5,
+        etf_switch_strength_minutes: float = 5.0,
     ):
         self.auth = auth
         self.market_data = market_data
@@ -197,6 +214,22 @@ class TradingEngine:
         self._ai_exit_calls = 0
         # 마지막 AI 매도 판단 결과 (UI 표시용). 주문에는 쓰이지 않는 사후 기록이다.
         self._last_ai_exit: Optional[AIExitView] = None
+        # 2호 장중 전환 (스펙 2026-11-11) — KODEX 200 틱에서 지수 가격과 체결강도를 쌓고,
+        # 기존 청산이 걸리지 않은 틱에서 전환을 판정한다 (`_check_etf_switch`).
+        # 판정을 꺼도(enabled=False) 수집은 돈다 — 켜는 순간 5분을 다시 기다리지 않게.
+        self.etf_switch_enabled = etf_switch_enabled
+        self.switch_state = SwitchState(etf_switch_index_percent)
+        self.trade_strength = TradeStrength(etf_switch_strength_minutes)
+        self._index_price: Optional[float] = None
+        self._index_at: Optional[datetime] = None
+        self._index_logged_at: Optional[datetime] = None
+        # 종목별 마지막 청산 주문번호 — 전환이 그 매도의 체결을 기다릴 때 쓴다
+        self._exit_order_ids: Dict[str, str] = {}
+        # 전환 매도는 나갔고 반대 ETF 매수는 아직인 상태. 이 동안 '전량 매도 완료' 리포트를
+        # 보류한다 (`runtime.closeout_report_due`).
+        self.pending_switch: Optional[PendingSwitch] = None
+        # 전환 매도가 접수된 직후 부른다 — 런타임이 매수 단계를 실행 큐에 넣는다
+        self.on_switch: Optional[Callable[[], None]] = None
 
     @property
     def open_tickers(self) -> List[str]:
@@ -541,6 +574,55 @@ class TradingEngine:
             return 0.0
         return self.risk_manager.position_net_pnl(position) / cost
 
+    @property
+    def switch_pending(self) -> bool:
+        """전환 매도 뒤 반대 ETF 매수가 끝나지 않았는지 (UI·런타임 스레드에서 읽는다)."""
+        return self.pending_switch is not None
+
+    def finish_switch(self) -> None:
+        """전환 매수 단계가 끝났다(성공·실패·포기 모두) — 리포트 보류를 푼다."""
+        self.pending_switch = None
+
+    def begin_switch_leg(
+        self,
+        leg: int,
+        ticker: str,
+        index_entry: Optional[float] = None,
+        at: Optional[datetime] = None,
+    ) -> None:
+        """매수 주문이 접수된 종목을 전환 판정 대상으로 연다 (스펙 2026-11-11 3.4).
+
+        기준 지수 가격을 넘기지 않으면 KODEX 200 최근 틱을, 틱이 없으면 현재가 조회를 쓴다.
+        그것도 실패하면 기록하지 않는다 — 그날은 이 종목의 전환 판정이 돌지 않는다.
+        같은 다리를 두 번 열지 않는다 (매수 시각 안전망이 다시 불러도 처음 값이 남는다).
+        """
+        at = at or datetime.now()
+        if self.switch_state.has_leg(leg, at.date()):
+            return
+        if index_entry is None:
+            index_entry = self._fresh_index_price(at)
+        if index_entry is None and self.market_data is not None:
+            try:
+                index_entry = self.market_data.get_current_price(LONG_ETF[0]).price
+            except Exception:
+                logger.warning("전환 기준 지수 가격 조회 실패", exc_info=True)
+        if not index_entry or index_entry <= 0:
+            logger.warning(
+                "전환 기준 지수 가격을 구하지 못했습니다 — 오늘은 이 종목의 전환 판정이 돌지 않습니다: %s",
+                ticker,
+            )
+            return
+        self.switch_state.begin_leg(leg, ticker, index_entry, at)
+        logger.info(
+            "전환 판정 시작: %d번째 종목 %s, 기준 KODEX 200 %s원", leg, ticker, f"{index_entry:,.0f}"
+        )
+        if self.trade_store is None:
+            return
+        try:
+            self.trade_store.save_switch_leg(at.date(), leg, ticker, at, index_entry)
+        except Exception:
+            logger.warning("전환 다리 기록 실패 — 재시작하면 판정 상태가 사라집니다.", exc_info=True)
+
     def reset_for_new_day(self) -> None:
         """장 시작 전 일일 리스크 카운터를 초기화한다.
 
@@ -569,6 +651,9 @@ class TradingEngine:
         self._ai_exit_calls = 0
         # 어제 판단이 오늘 표에 남아 있으면 오늘 이미 한 번 돈 것처럼 읽힌다
         self._last_ai_exit = None
+        # 전환 상태는 날짜가 바뀌면 `SwitchState`가 스스로 비운다 — 여기서는 엔진 쪽 잔여물만 지운다
+        self.pending_switch = None
+        self._exit_order_ids.clear()
         logger.info("새 거래일 준비 — 일일 손실 한도와 매매 중지 상태를 초기화했습니다.")
 
     def start(self) -> None:
@@ -581,6 +666,7 @@ class TradingEngine:
         self._positions_fetched_at = datetime.now()
         self._open_tickers = {t for t, p in self._positions.items() if p.quantity > 0}
         self._restore_exit_peaks()
+        self._restore_switch_state()
         if self._open_tickers:
             logger.warning(
                 "시작 시점에 이미 보유 중인 종목이 있습니다 (전일 이월 가능): %s",
@@ -588,6 +674,32 @@ class TradingEngine:
             )
         self._running = True
         logger.info("Trading engine started. Strategy: %s", self.strategy.name)
+
+    def _restore_switch_state(self) -> None:
+        """오늘의 전환 다리를 DB에서 되살린다 (스펙 2026-11-11 5.4).
+
+        체결강도 창은 되살리지 않는다 — 재접속 뒤 다시 5분이 차야 판정이 돈다.
+        """
+        if self.trade_store is None:
+            return
+        today = datetime.now().date()
+        try:
+            rows = self.trade_store.switch_legs_for(today)
+        except Exception:
+            logger.warning("전환 다리 복원 실패 — 오늘은 전환 판정이 돌지 않습니다.", exc_info=True)
+            return
+        if not rows:
+            if any(t in ETF_TICKERS for t in self._open_tickers):
+                logger.warning("보유 ETF의 전환 기준 기록이 없습니다 — 오늘은 전환 판정이 돌지 않습니다.")
+            return
+        self.switch_state.restore(rows, today)
+        logger.info("전환 다리를 복원했습니다: %s", [(r.leg, r.ticker, r.end_reason) for r in rows])
+        if self.switch_state.switched_today and not any(r.leg >= 2 for r in rows):
+            # 전환 매도 뒤·매수 전에 꺼졌다. 다시 사면 이중 매수 위험이 있어 현금으로 둔다
+            self.notify(
+                "[경고] 장중 전환 매도 뒤 반대 ETF를 사기 전에 엔진이 재시작됐습니다 — "
+                "오늘은 다시 사지 않고 현금으로 마감합니다. 잔고를 확인하세요."
+            )
 
     def _restore_exit_peaks(self) -> None:
         """오늘 남긴 당일 고점을 트래커에 되살린다 (스펙 2026-09-22 2.2).
@@ -749,6 +861,7 @@ class TradingEngine:
                 continue
 
             self._mark_exited(position.ticker)
+            self._close_switch_leg(position.ticker, reason)
             logger.warning("%s (%s): %s, 주문번호 %s", label, reason, summary, result.order_id)
             self.notify(f"{label} ({reason}): {summary}")
 
@@ -759,6 +872,9 @@ class TradingEngine:
 
         self._last_market_data_at = datetime.now()
         self._last_prices[data.ticker] = data.price
+        # KODEX 200 틱은 보유 여부와 무관하게 지수 가격·체결강도로 쌓는다 (스펙 2026-11-11 4.4)
+        if data.ticker == LONG_ETF[0]:
+            self._note_index_tick(data)
         positions = self._get_positions()
 
         position = positions.get(data.ticker)
@@ -780,6 +896,8 @@ class TradingEngine:
             return
         self.flush_exit_peaks(positions)
         self._sample_exit_trace(positions)
+        # 기존 청산(손절·익절·고점 반납)이 걸리지 않은 틱에서만 전환을 판정한다 — 손절이 항상 먼저다
+        self._check_etf_switch(positions)
 
         signal = self.strategy.generate_signal(data)
 
@@ -984,14 +1102,150 @@ class TradingEngine:
                 body += f"\n\n판단 근거: {note}"
             self.notify(body)
 
+    # ── 2호 장중 전환 (스펙 2026-11-11) ─────────────────────────
+    def _note_index_tick(self, data: MarketData) -> None:
+        """KODEX 200 틱에서 지수 가격과 체결강도를 갱신한다."""
+        now = datetime.now()
+        self._index_price = data.price
+        self._index_at = now
+        if data.signed_volume is not None:
+            self.trade_strength.add(now, data.signed_volume)
+        if (
+            self._index_logged_at is not None
+            and (now - self._index_logged_at).total_seconds() < INDEX_LOG_SECONDS
+        ):
+            return
+        self._index_logged_at = now
+        strength = self.trade_strength.value(now)
+        logger.info(
+            "KODEX 200 틱: 가격 %s원, 체결량(필드 15) %s, 키움 누적 체결강도(필드 228) %s, %g분 체결강도 %s",
+            f"{data.price:,.0f}",
+            data.signed_volume,
+            data.strength_cum,
+            self.trade_strength.window_minutes,
+            "모름" if strength is None else f"{strength:.1f}",
+        )
+
+    def _fresh_index_price(self, now: datetime) -> Optional[float]:
+        """최근 KODEX 200 틱 가격. 틱이 없거나 `INDEX_STALE_SECONDS`보다 묵었으면 None."""
+        if self._index_price is None or self._index_at is None:
+            return None
+        if (now - self._index_at).total_seconds() > INDEX_STALE_SECONDS:
+            return None
+        return self._index_price
+
+    def _check_etf_switch(self, positions: Dict[str, Position]) -> None:
+        """보유 ETF가 틀린 방향이면 판다 — 1번째 종목이면 반대 ETF 매수를 이어서 접수한다.
+
+        기존 청산이 걸리지 않은 틱에서만 불린다. 전환 매수를 기다리는 동안(`pending_switch`)과
+        판정을 끈 동안에는 돌지 않는다.
+        """
+        if not self.etf_switch_enabled or self.pending_switch is not None:
+            return
+        now = datetime.now()
+        strength = self.trade_strength.value(now)
+        for ticker, position in positions.items():
+            if ticker not in ETF_TICKERS or ticker in self._exiting or position.quantity <= 0:
+                continue
+            decision = self.switch_state.evaluate(
+                ticker,
+                self.position_net_return(position) * 100,
+                self._index_price,
+                self._index_at,
+                strength,
+                now,
+            )
+            if decision is not None:
+                self._execute_switch(position, decision, now)
+                return
+
+    def _execute_switch(self, position: Position, decision: Decision, now: datetime) -> None:
+        """전환 판정대로 판다. 매도가 거부되면 상태를 그대로 둬 다음 틱에 다시 시도한다 (손절과 같다)."""
+        note = (
+            f"KODEX 200 산 시점 대비 반대로 {decision.against:.2f}% "
+            f"(문턱 {self.switch_state.index_percent:g}%), "
+            f"{self.trade_strength.window_minutes:g}분 체결강도 {decision.strength:.0f}, "
+            f"순손익 {decision.net:+.2f}%"
+        )
+        summary = _position_summary(position)
+        quantity = position.closable_quantity
+        index_entry = self._index_price
+        if not self._execute_exit(position, ExitReason.ETF_SWITCH, switch_decision=decision):
+            return
+
+        if decision.kind is SwitchKind.SELL_ONLY:
+            logger.warning("장중 전환 2번째 종목 매도: %s — %s", summary, note)
+            self.notify(
+                f"장중 전환 2번째 종목 매도 (다시 사지 않고 현금으로 마감): {summary}\n판정: {note}"
+            )
+            return
+
+        buy_ticker, buy_name = opposite_etf(position.ticker)
+        self.pending_switch = PendingSwitch(
+            sold_ticker=position.ticker,
+            sold_summary=summary,
+            quantity=quantity,
+            sell_order_id=self._exit_order_ids.get(position.ticker, ""),
+            buy_ticker=buy_ticker,
+            buy_name=buy_name,
+            index_entry=index_entry,
+            decision=decision,
+            at=now,
+        )
+        logger.warning(
+            "장중 전환: %s 매도 주문 접수 — 체결되면 %s을(를) 시장가로 삽니다 (%s)",
+            summary, format_stock(buy_ticker, buy_name), note,
+        )
+        if self.on_switch is not None:
+            try:
+                self.on_switch()
+            except Exception:
+                logger.exception("전환 매수 접수 실패 — 오늘은 현금으로 마감합니다.")
+                self.pending_switch = None
+
+    def _close_switch_leg(
+        self, ticker: str, reason: str, decision: Optional[Decision] = None
+    ) -> None:
+        """이 종목의 전환 다리가 열려 있으면 닫는다 — 어떤 사유로 팔렸든 한 번 부른다.
+
+        시세 콜백(청산 경로)에서 불리므로 기록 실패가 예외로 새지 않게 한다.
+        """
+        now = datetime.now()
+        leg = self.switch_state.open_leg(ticker, now.date())
+        if leg is None:
+            return
+        self.switch_state.end_leg(
+            switched=decision is not None and decision.kind is SwitchKind.SWITCH
+        )
+        if self.trade_store is None:
+            return
+        try:
+            self.trade_store.close_switch_leg(
+                now.date(),
+                leg.leg,
+                now,
+                reason,
+                against=decision.against if decision is not None else None,
+                strength=decision.strength if decision is not None else None,
+                net=decision.net if decision is not None else None,
+            )
+        except Exception:
+            logger.warning("전환 다리 종료 기록 실패: %s", ticker, exc_info=True)
+
     def _execute_exit(
-        self, position: Position, reason: ExitReason, exit_reason: Optional[str] = None
+        self,
+        position: Position,
+        reason: ExitReason,
+        exit_reason: Optional[str] = None,
+        switch_decision: Optional[Decision] = None,
     ) -> bool:
         """손절 라인 도달 시 전략 신호와 무관하게 즉시 청산한다. 주문이 접수되면 True.
 
         성공 알림은 호출부(`_execute_portfolio_exit`)가 매도한 종목을 묶어 한 번에 보낸다.
 
         `exit_reason`은 기록에 남길 사유다 — 지정하지 않으면 `reason.value`를 쓴다.
+
+        `switch_decision`은 장중 전환 판정 값이다 — 전환 다리 기록에 함께 남긴다.
         """
         summary = _position_summary(position)
         quantity = self._closable_or_skip(position, reason.value)
@@ -1030,6 +1284,8 @@ class TradingEngine:
             return False
 
         self._mark_exited(position.ticker)
+        self._exit_order_ids[position.ticker] = result.order_id
+        self._close_switch_leg(position.ticker, exit_reason or reason.value, switch_decision)
         logger.warning(
             "%s 청산 주문 접수: %s, 주문번호 %s", reason.value, summary, result.order_id
         )
