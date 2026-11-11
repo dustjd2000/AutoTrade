@@ -624,3 +624,36 @@ def test_has_buy_order_sees_only_non_rejected_buys_of_the_day(tmp_path):
     assert store.has_buy_order(day, ["005930"])
     assert not store.has_buy_order(day, ["114800"])
     assert not store.has_buy_order(day, [])
+
+
+# ── 2호 장중 전환 다리 기록 (스펙 2026-11-11 4.3) ────────────
+def test_switch_legs_round_trip(tmp_path):
+    store = make_store(tmp_path)
+    day = date(2026, 11, 12)
+    bought = datetime(2026, 11, 12, 9, 5, 3)
+    switched = datetime(2026, 11, 12, 10, 20, 0)
+
+    store.save_switch_leg(day, 1, "069500", bought, 35000.0)
+    store.close_switch_leg(day, 1, switched, "etf_switch", against=0.62, strength=71.0, net=-0.58)
+    store.save_switch_leg(day, 2, "114800", switched, 34783.0)
+
+    first, second = store.switch_legs_for(day)
+    assert (first.leg, first.ticker, first.index_entry, first.started_at) == (1, "069500", 35000.0, bought)
+    assert (first.ended_at, first.end_reason) == (switched, "etf_switch")
+    assert (first.switch_against, first.switch_strength, first.switch_net) == (0.62, 71.0, -0.58)
+    assert (second.leg, second.ticker, second.ended_at, second.end_reason) == (2, "114800", None, None)
+    assert store.switch_legs_for(date(2026, 11, 13)) == []
+
+
+def test_switch_leg_is_not_overwritten_or_closed_twice(tmp_path):
+    store = make_store(tmp_path)
+    day = date(2026, 11, 12)
+    bought = datetime(2026, 11, 12, 9, 5, 3)
+    store.save_switch_leg(day, 1, "069500", bought, 35000.0)
+    store.save_switch_leg(day, 1, "114800", bought, 1.0)             # 무시된다
+    store.close_switch_leg(day, 1, datetime(2026, 11, 12, 10, 0), "stop_loss")
+    store.close_switch_leg(day, 1, datetime(2026, 11, 12, 15, 15), "day_end")   # 무시된다
+
+    [row] = store.switch_legs_for(day)
+    assert (row.ticker, row.index_entry, row.end_reason) == ("069500", 35000.0, "stop_loss")
+    assert row.switch_against is None

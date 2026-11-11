@@ -111,6 +111,25 @@ CREATE TABLE IF NOT EXISTS rule_evaluations (
 )
 """
 
+# 2호 장중 전환의 다리(leg) 기록 — 하루에 많아야 두 줄 (스펙 2026-11-11 4.3). 재시작 때 판정 상태를
+# 되살리고, 몇 주 뒤 "체결강도 조건이 되돌림 전환을 걸렀는가"를 2번째 다리 순손익으로 대조한다.
+# `trades`와 겹치는 값(체결가·수량·손익)은 넣지 않는다.
+ETF_SWITCH_LEG_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS etf_switch_legs (
+    day TEXT NOT NULL,
+    leg INTEGER NOT NULL,
+    ticker TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    index_entry REAL NOT NULL,
+    ended_at TEXT,
+    end_reason TEXT,
+    switch_against REAL,
+    switch_strength REAL,
+    switch_net REAL,
+    PRIMARY KEY (day, leg)
+)
+"""
+
 # 부분체결도 실제 매매이므로 집계에 포함한다
 FILLED_STATUSES = (OrderStatus.FILLED.value, OrderStatus.PARTIALLY_FILLED.value)
 
@@ -242,6 +261,22 @@ class AIExitDecisionRow:
 
 
 @dataclass
+class SwitchLegRow:
+    """2호 장중 전환의 다리 한 줄 — 1은 아침 매수, 2는 전환 매수."""
+    day: date
+    leg: int
+    ticker: str
+    started_at: datetime                 # 매수 주문 접수 시각
+    index_entry: float                   # 그 시점의 KODEX 200 가격
+    ended_at: Optional[datetime] = None
+    end_reason: Optional[str] = None     # `trades.exit_reason`과 같은 값
+    # 전환(또는 2번째 다리 매도) 판정 시점의 세 조건 값(%) — 전환으로 끝난 다리만
+    switch_against: Optional[float] = None
+    switch_strength: Optional[float] = None
+    switch_net: Optional[float] = None
+
+
+@dataclass
 class RuleEvaluationRow:
     """금요일 규칙 자동 평가 한 번의 기록 (스펙 2026-10-29 5.5). 규칙은 `Rule.to_json()` 문자열이다."""
 
@@ -306,6 +341,7 @@ class TradeStore:
             conn.execute(POSITION_PEAK_SCHEMA_SQL)
             conn.execute(EXIT_REVIEW_SCHEMA_SQL)
             conn.execute(RULE_EVALUATION_SCHEMA_SQL)
+            conn.execute(ETF_SWITCH_LEG_SCHEMA_SQL)
             self._migrate(conn, "trades", MIGRATIONS)
             conn.commit()
 
@@ -634,6 +670,62 @@ class TradeStore:
         for row in rows:
             reasons[row["ticker"]] = row["exit_reason"] or ""
         return reasons
+
+    def save_switch_leg(
+        self, day: date, leg: int, ticker: str, started_at: datetime, index_entry: float
+    ) -> None:
+        """전환 다리를 연다. 같은 (날짜, 다리)가 이미 있으면 그대로 둔다 — 재시작 뒤 안전망이
+        다시 불러도 처음 잡은 기준 지수 가격이 바뀌지 않는다."""
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """INSERT INTO etf_switch_legs (day, leg, ticker, started_at, index_entry)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(day, leg) DO NOTHING""",
+                (day.isoformat(), leg, ticker, started_at.isoformat(), index_entry),
+            )
+            conn.commit()
+
+    def close_switch_leg(
+        self,
+        day: date,
+        leg: int,
+        ended_at: datetime,
+        end_reason: str,
+        against: Optional[float] = None,
+        strength: Optional[float] = None,
+        net: Optional[float] = None,
+    ) -> None:
+        """전환 다리를 닫는다. 이미 닫힌 다리는 건드리지 않는다 (15:15 마감 정리가 다시 불러도 무해)."""
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """UPDATE etf_switch_legs
+                   SET ended_at = ?, end_reason = ?, switch_against = ?, switch_strength = ?,
+                       switch_net = ?
+                   WHERE day = ? AND leg = ? AND ended_at IS NULL""",
+                (ended_at.isoformat(), end_reason, against, strength, net, day.isoformat(), leg),
+            )
+            conn.commit()
+
+    def switch_legs_for(self, day: date) -> List[SwitchLegRow]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT * FROM etf_switch_legs WHERE day = ? ORDER BY leg", (day.isoformat(),)
+            ).fetchall()
+        return [
+            SwitchLegRow(
+                day=date.fromisoformat(row["day"]),
+                leg=row["leg"],
+                ticker=row["ticker"],
+                started_at=datetime.fromisoformat(row["started_at"]),
+                index_entry=row["index_entry"],
+                ended_at=datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None,
+                end_reason=row["end_reason"],
+                switch_against=row["switch_against"],
+                switch_strength=row["switch_strength"],
+                switch_net=row["switch_net"],
+            )
+            for row in rows
+        ]
 
     def save_rule_evaluation(self, row: RuleEvaluationRow) -> None:
         """평가 기록을 남긴다. 같은 날은 덮어쓴다 — 적용 여부를 정한 뒤 같은 줄을 다시 쓴다."""
