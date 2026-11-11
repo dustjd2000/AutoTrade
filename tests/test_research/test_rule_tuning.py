@@ -297,3 +297,24 @@ def test_collect_survives_last_day_failure_for_one_ticker(tmp_path):
 
     assert fetched == ["114800"]
     assert real_last_day("114800") == "20261029"
+
+
+def test_weekly_evaluation_backtests_with_the_live_switch_threshold(tmp_path):
+    """실전 규칙에서 체결강도만 뺀 것을 평가한다 — 전환을 끄면 0을 넘긴다 (스펙 2026-11-11 8절)."""
+    captured = []
+
+    def factory(*args):
+        captured.append(args)
+        return SimpleNamespace(days=list(range(200)))
+
+    for enabled, expected in ((True, 0.5), (False, 0.0)):
+        settings = FakeSettings()
+        settings.etf_switch_enabled = enabled
+        settings.etf_switch_index_percent = 0.5
+        # 같은 날을 두 번 평가하므로 DB를 따로 쓴다 (rule_evaluations.day는 UNIQUE)
+        workdir = tmp_path / ("on" if enabled else "off")
+        workdir.mkdir()
+        tuning, _ = make(workdir, good, settings=settings)
+        tuning.backtester_factory = factory
+        tuning.evaluate_rules(date(2026, 11, 13))
+        assert captured[-1][6] == expected

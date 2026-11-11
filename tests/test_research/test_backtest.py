@@ -1,6 +1,6 @@
 import pytest
 
-from src.research.backtest import Backtester, Rule, trade_return
+from src.research.backtest import Backtester, Rule, switch_day_return, trade_return
 
 COMMISSION = 0.00015
 
@@ -120,3 +120,80 @@ def test_backtester_skips_thin_days():
     long_bars["20261022"] = long_bars["20261022"][:100]
     bt = Backtester(long_bars, inverse_bars, COMMISSION)
     assert "20261022" not in bt.days
+
+
+# ── 장중 전환 (C만 — 체결강도는 분봉으로 재현하지 못한다, 스펙 2026-11-11 8절) ──
+def net(buy, sell):
+    return (sell / buy - 1 - 2 * COMMISSION) * 100
+
+
+def test_switch_sells_the_first_leg_and_rides_the_opposite_etf():
+    long_bars = flat_day(10000, {"1000": 9940})                  # 지수·롱 -0.6%
+    inverse_bars = flat_day(1000, {"1100": 1010})
+    result = switch_day_return(
+        long_bars, inverse_bars, long_bars, True, "0910", 2.0, COMMISSION, 0.5, half_tick=0.0
+    )
+    # 10:00 봉에 롱을 팔고 같은 봉의 인버스(1,000원)로 갈아타 15:15까지 보유
+    assert result == pytest.approx(net(10000, 9940) + net(1000, 1010))
+
+
+def test_second_leg_only_sells_when_the_index_turns_again():
+    long_bars = flat_day(10000, {"1000": 9940, "1100": 10010})   # 2번째 다리 기준(9,940) 대비 +0.7%
+    inverse_bars = flat_day(1000, {"1100": 995, "1200": 900})
+    result = switch_day_return(
+        long_bars, inverse_bars, long_bars, True, "0910", 2.0, COMMISSION, 0.5, half_tick=0.0
+    )
+    # 11:00 봉에 인버스를 팔고 끝낸다 — 12:00의 급락은 맞지 않고, 롱을 다시 사지도 않는다
+    assert result == pytest.approx(net(10000, 9940) + net(1000, 995))
+
+
+def test_no_switch_while_the_index_move_is_below_the_threshold():
+    long_bars = flat_day(10000, {"1000": 9960})                  # -0.4%
+    inverse_bars = flat_day(1000, {"1100": 1010})
+    result = switch_day_return(
+        long_bars, inverse_bars, long_bars, True, "0910", 2.0, COMMISSION, 0.5, half_tick=0.0
+    )
+    assert result == pytest.approx(net(10000, 9960))
+
+
+def test_no_switch_after_1514():
+    long_bars = flat_day(10000, {"1515": 9940})
+    inverse_bars = flat_day(1000, {"1520": 1100})
+    result = switch_day_return(
+        long_bars, inverse_bars, long_bars, True, "0910", 2.0, COMMISSION, 0.5, half_tick=0.0
+    )
+    assert result == pytest.approx(net(10000, 9940))             # 15:15 청산일 뿐 전환이 아니다
+
+
+def test_inverse_first_leg_switches_to_long_when_the_index_rises():
+    long_bars = flat_day(10000, {"1000": 10060, "1100": 10160})
+    inverse_bars = flat_day(1000, {"1000": 994})
+    result = switch_day_return(
+        inverse_bars, long_bars, long_bars, False, "0910", 2.0, COMMISSION, 0.5, half_tick=0.0
+    )
+    assert result == pytest.approx(net(1000, 994) + net(10060, 10160))
+
+
+def test_switch_percent_zero_matches_the_plain_trade():
+    long_bars = flat_day(10000, {"1000": 9940})
+    inverse_bars = flat_day(1000, {"1100": 1010})
+    assert switch_day_return(
+        long_bars, inverse_bars, long_bars, True, "0910", 2.0, COMMISSION, 0.0
+    ) == trade_return(long_bars, "0910", 2.0, COMMISSION)
+
+
+def test_backtester_adds_both_legs_when_switching_is_on():
+    long_bars, inverse_bars = make_history(True)
+    long_bars["20261021"] = flat_day(10000, {"1000": 9940})
+    inverse_bars["20261021"] = flat_day(1000, {"1100": 1010})
+    rule = Rule(0.0, True, "09:10", 2.0)
+
+    plain = Backtester(long_bars, inverse_bars, COMMISSION).day_return("20261021", rule)
+    switched = Backtester(long_bars, inverse_bars, COMMISSION, switch_percent=0.5).day_return(
+        "20261021", rule
+    )
+
+    first = ((9940 - 2.5) / (10000 + 2.5) - 1 - 2 * COMMISSION) * 100
+    second = ((1010 - 2.5) / (1000 + 2.5) - 1 - 2 * COMMISSION) * 100
+    assert plain == pytest.approx(first)
+    assert switched == pytest.approx(first + second)

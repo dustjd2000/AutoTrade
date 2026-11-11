@@ -68,6 +68,15 @@ class RuleTuning:
         s = self.settings
         return Rule(s.etf_signal_band_percent, s.etf_flip_enabled, s.recommend_time.strftime("%H:%M"), s.stop_loss_percent)
 
+    def _switch_percent(self) -> float:
+        """백테스트에 넣을 장중 전환 문턱(%) — 실전에서 전환을 껐으면 0 (스펙 2026-11-11 8절).
+
+        실전 규칙에서 체결강도 조건만 뺀 것을 평가한다. 문턱 자체는 자동 조정 후보가 아니다.
+        """
+        if not getattr(self.settings, "etf_switch_enabled", False):
+            return 0.0
+        return getattr(self.settings, "etf_switch_index_percent", 0.0)
+
     def collect_minute_bars(self) -> None:
         """마지막 저장일부터 오늘까지 1분봉을 받아 쌓는다. 종목 하나가 실패해도 다른 종목은 받는다."""
         for ticker in ETF_TICKERS:
@@ -100,6 +109,7 @@ class RuleTuning:
                 getattr(self.settings, "take_profit_percent", 0.0),
                 getattr(self.settings, "trail_activate_percent", 0.0),
                 getattr(self.settings, "trail_giveback_percent", 0.0),
+                self._switch_percent(),
             )
             evaluation = self._evaluate(backtester, current)
         except Exception:
