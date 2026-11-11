@@ -72,6 +72,9 @@ SCHEDULED_ACTIONS: Dict[str, str] = {
     # 2호 규칙 자동 검증 (2026-10-29 스펙) — 매일 분봉을 쌓고 금요일에 평가·자동 적용한다
     "collect_minute_bars": "1분봉 수집 (스케줄)",
     "evaluate_rules": "2호 규칙 주간 평가·자동 적용 (스케줄)",
+    # 2호 장중 전환의 매수 단계 (스펙 2026-11-11) — 스케줄 시각이 아니라 엔진이 전환 매도를 낸
+    # 직후에 접수한다 (`TradingEngine.on_switch`). 버튼이 없어 여기 둔다.
+    "switch_buy": "장중 전환 매수 (매도 체결 대기 → 반대 ETF 매수)",
 }
 
 ACTION_LABELS: Dict[str, str] = {**MANUAL_ACTIONS, **SCHEDULED_ACTIONS}
@@ -178,6 +181,11 @@ def manual_steps(runtime, action: str, tickers: Iterable[str] = ()) -> List[Manu
         ],
         "evaluate_rules": lambda: [
             ManualStep(SCHEDULED_ACTIONS["evaluate_rules"], runtime.research.evaluate_rules)
+        ],
+        # 코루틴 단계다 — 매도 체결을 기다리는 동안 루프를 막지 않는다. 매수 주문은 그 안에서
+        # 루프 스레드로 나가므로 실시간 손절 감시와 직렬화된다 (`SwitchFlow`).
+        "switch_buy": lambda: [
+            ManualStep(SCHEDULED_ACTIONS["switch_buy"], runtime.switch.run, touches_orders=True)
         ],
     }
     # 일괄 실행은 '진입'까지만 — 청산과 리포트는 스케줄에 맡긴다.

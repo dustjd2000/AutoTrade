@@ -94,6 +94,7 @@ def test_daily_report_runs_off_the_loop():
 
 def test_every_action_has_a_label_and_steps():
     runtime = make_runtime([])
+    runtime.switch = SimpleNamespace(run=None)
     for action in ACTION_LABELS:
         if action in ("sell_selected", "drop_plan"):
             assert manual_steps(runtime, action, ["005930"])
@@ -270,3 +271,24 @@ def test_submitting_every_scheduled_key_runs_the_daily_flow():
         "final_report",
         "review_exits",
     ]
+
+
+def test_switch_buy_is_a_scheduled_only_coroutine_step_on_the_loop():
+    """전환 매수는 버튼이 없고, 루프 스레드에서 코루틴으로 돈다 — 매도 체결을 기다리는 동안
+    루프를 막지 않는다 (스펙 2026-11-11 5.1)."""
+    import asyncio
+
+    ran = []
+
+    async def flow():
+        ran.append("switch")
+
+    runtime = make_runtime([])
+    runtime.switch = SimpleNamespace(run=flow)
+
+    [step] = manual_steps(runtime, "switch_buy")
+
+    assert "switch_buy" in SCHEDULED_ACTIONS and "switch_buy" not in MANUAL_ACTIONS
+    assert step.touches_orders is True
+    asyncio.run(step.run())
+    assert ran == ["switch"]

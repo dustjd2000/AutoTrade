@@ -79,6 +79,7 @@ def test_run_calls_on_ready_after_engine_start(monkeypatch):
     for name in ("watch_quote_stall", "watch_closeout_report", "watch_buy_result", "watch_cash_refresh", "watch_ai_exit"):
         monkeypatch.setattr(runtime, name, noop)
     monkeypatch.setattr(runtime, "adopt_carried_over_positions", lambda rt: order.append("adopt"))
+    monkeypatch.setattr(runtime, "subscribe_index", lambda rt: None)
     monkeypatch.setattr(runtime, "request_stop", lambda rt: None)
 
     async def idle():

@@ -34,6 +34,7 @@ from src.core.daily_workflow import DailyWorkflow
 from src.core.engine import TradingEngine
 from src.core.events import ExitReason, OrderSide
 from src.core.etf_exit_trigger import StepTrigger
+from src.core.switch_flow import SwitchFlow
 from src.llm.exit_advisor import ExitAdvisor, HoldingView, UserSell, make_exit_prompt_store
 from src.llm.exit_reviewer import ExitReviewer
 from src.llm.exit_tuner import ExitPromptTuner
@@ -180,6 +181,8 @@ class Runtime:
     etf_exit_trigger: StepTrigger = field(default_factory=StepTrigger)
     # 2호 규칙 자동 검증 — 15:45 분봉 수집, 금요일 16:00 평가·자동 적용
     research: Optional[RuleTuning] = None
+    # 2호 장중 전환의 매수 단계 (스펙 2026-11-11) — 엔진이 전환 매도를 내면 실행 큐가 이것을 돌린다
+    switch: Optional[SwitchFlow] = None
     # 엔진이 실제로 시작된 직후(토큰·계좌 조회 성공 뒤)에 부르는 알림 — UI가 '재시작 성공'을 판단한다
     on_ready: Optional[Callable[[], None]] = None
 
@@ -254,6 +257,9 @@ def build_runtime(settings: Settings) -> Runtime:
         emergency_action=settings.emergency_action,
         ai_exit_enabled=settings.ai_exit_enabled,
         ai_exit_drawdown_ratio=settings.ai_exit_drawdown_ratio,
+        etf_switch_enabled=settings.etf_switch_enabled,
+        etf_switch_index_percent=settings.etf_switch_index_percent,
+        etf_switch_strength_minutes=settings.etf_switch_strength_minutes,
     )
     ws_client.on_data(engine.on_market_data)
 
@@ -294,6 +300,9 @@ def build_runtime(settings: Settings) -> Runtime:
         etf_exit_trigger=StepTrigger(settings.ai_exit_step_percent),
     )
     runtime.runner = ActionRunner(runtime)
+    runtime.switch = SwitchFlow(engine, workflow)
+    # 엔진은 시세 콜백(루프 스레드)에서 이 콜백을 부른다 — 매수 단계를 버튼·스케줄과 같은 큐에 넣는다
+    engine.on_switch = lambda: runtime.runner.submit("switch_buy")
     runtime.research = RuleTuning(
         settings=settings,
         market_data=market_data,
@@ -395,6 +404,10 @@ def closeout_report_due(
     now = now or datetime.now()
     closed_at = runtime.engine.closed_out_at
     if closed_at is None:
+        return False
+    # 장중 전환 매도로 보유가 잠시 빈 것이다 — 반대 ETF 매수가 끝나기 전에는 보내지 않는다.
+    # 결과 리포트는 모든 매도가 끝난 뒤 한 번만 나간다 (사용자 지시 2026-11-12).
+    if getattr(runtime.engine, "switch_pending", False):
         return False
     # 자정을 넘겨 앱이 켜져 있는 경우 — 어제 청산으로 오늘 리포트를 보내지 않는다
     if closed_at.date() != now.date():
@@ -847,6 +860,16 @@ def adopt_carried_over_positions(runtime: Runtime) -> List[str]:
     return held
 
 
+def subscribe_index(runtime: Runtime) -> None:
+    """KODEX 200(069500)을 항상 구독한다 — 장중 전환의 지수 가격·체결강도 입력이다 (스펙 2026-11-11 4.4).
+
+    보유 여부나 전환 판정을 켰는지와 무관하게 건다 — 인버스를 든 날에도 필요하고, 체결강도는
+    5분이 차야 값이 나오므로 09:00부터 쌓여 있어야 한다. 재접속 때는 `WebSocketClient.connect`가
+    구독을 복구한다.
+    """
+    runtime.ws_client.subscribe([etf_regime.LONG_ETF[0]])
+
+
 def request_stop(runtime: Runtime) -> None:
     """구동 루프가 스스로 빠져나오도록 표시한다 (다른 스레드에서 호출해도 안전)."""
     runtime.scheduler.stop()
@@ -859,6 +882,7 @@ async def run(runtime: Runtime) -> None:
     runtime.engine.start()
     # 구독은 연결 전에 걸어도 된다 — WebSocketClient.connect가 접속 직후 복구해 보낸다
     adopt_carried_over_positions(runtime)
+    subscribe_index(runtime)
     if runtime.on_ready is not None:
         try:
             runtime.on_ready()

@@ -154,6 +154,14 @@ def test_not_due_for_yesterdays_closeout():
     assert closeout_report_due(runtime, NOW) is False
 
 
+def test_not_due_while_a_switch_buy_is_pending():
+    """전환 매도로 보유가 잠시 비어도 결과 리포트는 모든 매도가 끝난 뒤 한 번만 보낸다
+    (사용자 지시 2026-11-12)."""
+    runtime = make_runtime(NOW - timedelta(seconds=CLOSEOUT_SETTLE_SECONDS + 1))
+    runtime.engine.switch_pending = True
+    assert closeout_report_due(runtime, NOW) is False
+
+
 # ── 워크플로: 하루 한 번, 매수하면 초기화 ───────────────────
 REPORT_DAY = date(2026, 7, 29)
 
