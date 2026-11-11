@@ -3,7 +3,7 @@ import logging
 from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 from src.api.account import AccountClient
 from src.core import exit_review
@@ -14,6 +14,7 @@ from src.core.events import (
     BuyPlanView,
     BuyRecord,
     OrderRequest,
+    OrderResult,
     OrderSide,
     OrderStatus,
     OrderType,
@@ -27,7 +28,7 @@ from src.logger.trade_store import MonthlySummary, TradeStore
 from src.notification.email import EmailNotifier
 from src.notification import chart, templates
 from src.strategy import etf_regime
-from src.strategy.base import StockRecommendation
+from src.strategy.base import BuyPlan, StockRecommendation
 from src.strategy.etf_regime import ETFRegimeStrategy
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,12 @@ logger = logging.getLogger(__name__)
 # 2호 전략 시장가 매수의 증거금 배수 — 키움은 시장가 매수 증거금을 상한가(+30%)로 잡는다.
 # 수량을 이 배수 안에서 정하지 않으면 투입 비율이 높을 때 증거금 부족으로 주문이 거부된다.
 MARKET_BUY_MARGIN = 1.3
+
+# 장중 전환으로 산 종목의 '아침 전망' 칸 — AI 매도 판단이 이것을 시나리오로 읽는다 (스펙 2026-11-11 6절)
+SWITCH_OUTLOOK = (
+    "2호 전략 장중 전환: 시나리오는 '전환 시점의 장중 흐름이 이어진다'이며, "
+    "그 흐름이 다시 꺾였다면 시나리오가 깨진 것이다."
+)
 
 # 최종 리포트를 보낸 날짜를 남기는 마커 파일. 인메모리 필드로 두면 엔진 재시작
 # (설정 저장·앱 재실행)마다 DailyWorkflow가 새로 만들어지면서 표시가 사라져,
@@ -530,6 +537,26 @@ class DailyWorkflow:
             return
 
         plan = plans[0]
+        record, _ = self._place_etf_buy(plan, cash, positions)
+        if record is None:
+            return
+
+        self._set_buy_board(today, self._board_from_records([record]))
+        # 접수된 주문만 남긴다 — 이 파일이 "오늘 이미 주문함" 표시라, 실패까지 남기면 매수 시각
+        # 안전망이 재시도하지 못한다
+        if record.outcome == BuyOutcome.ORDERED:
+            self._write_buy_records(cash, plan.amount, [record])
+            self._begin_switch_leg(1, plan.ticker)
+
+    def _place_etf_buy(
+        self, plan: BuyPlan, cash: float, positions
+    ) -> Tuple[Optional[BuyRecord], Optional[OrderResult]]:
+        """ETF 한 종목을 시장가로 산다 — 아침 매수와 장중 전환 매수가 함께 쓴다.
+
+        수량 계산(배정액·증거금 배수) → 리스크 승인 → 주문 → 기록 → 감시 등록·구독까지다.
+        가격을 알 수 없으면 `(None, None)`. 주문을 냈으면 그 응답을 함께 돌려준다 —
+        전환 매수가 "결과 불명"(`outcome_unknown`)을 가려 재시도를 멈추는 데 쓴다.
+        """
         label = format_stock(plan.ticker, plan.name)
         try:
             price = self.engine.market_data.get_current_price(plan.ticker).price
@@ -538,7 +565,7 @@ class DailyWorkflow:
             price = float(plan.recommend_price or plan.target_price)
         if price <= 0:
             logger.error("2호 전략 매수 가격을 알 수 없습니다 — 매수를 건너뜁니다: %s", label)
-            return
+            return None, None
 
         # 키움은 시장가 매수 증거금을 상한가(+30%) 기준으로 잡는다 — 그 한도 안에서 수량을 정한다
         quantity = int(min(plan.amount // price, cash // (price * MARKET_BUY_MARGIN)))
@@ -547,40 +574,89 @@ class DailyWorkflow:
             record = replace(record, outcome=BuyOutcome.SKIPPED,
                              note=f"1주 {price:,.0f}원을 살 금액이 없습니다 (배정 {plan.amount:,.0f}원)")
             logger.warning("2호 전략 매수 건너뜀: %s — %s", label, record.note)
-        else:
-            request = OrderRequest(
-                ticker=plan.ticker, side=OrderSide.BUY, order_type=OrderType.MARKET,
-                quantity=quantity, price=None, name=plan.name,
-            )
-            if not self.engine.risk_manager.approve(request, positions, reference_price=price):
-                record = replace(record, outcome=BuyOutcome.FAILED, note="리스크 관리 규칙에 걸려 주문하지 않았습니다")
-                self.engine.notify(f"매수 거부 (리스크 관리): {label}")
-            else:
-                result = self.engine.order_client.send_order(request)
-                self.engine.risk_manager.record_order(result)
-                self.trade_store.record_fill(result)
-                if result.status == OrderStatus.REJECTED:
-                    if _is_market_closed_rejection(result.error_message):
-                        self.engine.note_market_closed("주문이 '장이 열리지않는 날'로 거부됐습니다")
-                    self.engine.notify(f"[실패] 2호 전략 매수 거부: {label} x{quantity}주 — {result.error_message}")
-                    record = replace(record, outcome=BuyOutcome.FAILED, order_id=result.order_id,
-                                     note=f"주문 거부: {result.error_message}")
-                else:
-                    record = replace(record, order_id=result.order_id)
-                    self.engine.note_open_position(plan.ticker)
-                    self._clear_report_mark()
-                    if self.ws_client is not None:
-                        self.ws_client.subscribe([plan.ticker])
-                    logger.info(
-                        "2호 전략 시장가 매수 접수: %s %d주 (현재가 %s원, 주문번호 %s)",
-                        label, quantity, f"{price:,.0f}", result.order_id,
-                    )
+            return record, None
 
+        request = OrderRequest(
+            ticker=plan.ticker, side=OrderSide.BUY, order_type=OrderType.MARKET,
+            quantity=quantity, price=None, name=plan.name,
+        )
+        if not self.engine.risk_manager.approve(request, positions, reference_price=price):
+            self.engine.notify(f"매수 거부 (리스크 관리): {label}")
+            return replace(record, outcome=BuyOutcome.FAILED,
+                           note="리스크 관리 규칙에 걸려 주문하지 않았습니다"), None
+
+        result = self.engine.order_client.send_order(request)
+        self.engine.risk_manager.record_order(result)
+        self.trade_store.record_fill(result)
+        if result.status == OrderStatus.REJECTED:
+            if _is_market_closed_rejection(result.error_message):
+                self.engine.note_market_closed("주문이 '장이 열리지않는 날'로 거부됐습니다")
+            self.engine.notify(f"[실패] 2호 전략 매수 거부: {label} x{quantity}주 — {result.error_message}")
+            return replace(record, outcome=BuyOutcome.FAILED, order_id=result.order_id,
+                           note=f"주문 거부: {result.error_message}"), result
+
+        self.engine.note_open_position(plan.ticker)
+        self._clear_report_mark()
+        if self.ws_client is not None:
+            self.ws_client.subscribe([plan.ticker])
+        logger.info(
+            "2호 전략 시장가 매수 접수: %s %d주 (현재가 %s원, 주문번호 %s)",
+            label, quantity, f"{price:,.0f}", result.order_id,
+        )
+        return replace(record, order_id=result.order_id), result
+
+    def _begin_switch_leg(self, leg: int, ticker: str) -> None:
+        """매수가 접수된 종목을 장중 전환 판정 대상으로 연다 (스펙 2026-11-11 3.4).
+
+        주문은 이미 나갔으므로 여기서 실패해도 매수 흐름을 막지 않는다 — 그날 전환 판정만 빠진다.
+        """
+        begin = getattr(self.engine, "begin_switch_leg", None)
+        if begin is None:
+            return
+        try:
+            begin(leg, ticker)
+        except Exception:
+            logger.exception("전환 다리 기록 실패 — 오늘은 전환 판정이 돌지 않습니다: %s", ticker)
+
+    def execute_switch_buy(
+        self, ticker: str, today: date, reason: str
+    ) -> Tuple[Optional[BuyRecord], bool]:
+        """장중 전환 — 반대 ETF를 시장가로 산다 (스펙 2026-11-11 5.1). 엔진 루프 스레드에서 부른다.
+
+        아침 매수(`_execute_etf_buy`)의 "오늘 이미 샀으면 건너뜀"·"결정 없으면 다시 결정" 장치를
+        타지 않는다 — 전환은 아침 매수가 있었던 날에만 일어난다. 수량·리스크 승인·주문·기록·구독은
+        `_place_etf_buy`를 함께 쓴다.
+
+        오늘의 결정을 새 종목으로 갈아끼워 AI 매도 판단 프롬프트가 전환 근거를 읽게 한다.
+        **매수 기록 파일에는 쓰지 않는다** — 쓰면 매수 결과 메일이 한 통 더 나간다(사용자 지시
+        2026-11-12, 전환 알림 메일이 대신한다). 미체결분은 체결내역 조회 기준이라 10:10·15:15가
+        그대로 거둔다. 2번째 다리 기록은 호출부(`SwitchFlow`)가 한다 — 기준 지수 가격이
+        매도 주문 시점 값이어야 하기 때문이다.
+
+        돌려주는 두 번째 값이 True면 주문 결과를 모르는 것이다 — 재시도하면 이중 매수가 된다.
+        잔고·예수금·현재가 조회 실패는 예외로 올린다 (호출부가 재시도한다).
+        """
+        name = dict((etf_regime.LONG_ETF, etf_regime.INVERSE_ETF))[ticker]
+        positions = self.account.get_positions()
+        cash = self.account.get_cash()
+        price = self.engine.market_data.get_current_price(ticker).price
+        recommendation = StockRecommendation(
+            ticker=ticker,
+            name=name,
+            target_price=int(price),
+            reason=reason,
+            recommend_price=price,
+            setup=etf_regime.SETUP,
+            outlook=SWITCH_OUTLOOK,
+        )
+        self.strategy.set_recommendations([recommendation])
+        plan = self.strategy.build_buy_plans(cash)[0]
+
+        record, result = self._place_etf_buy(plan, cash, positions)
+        if record is None:
+            return None, False
         self._set_buy_board(today, self._board_from_records([record]))
-        # 접수된 주문만 남긴다 — 이 파일이 "오늘 이미 주문함" 표시라, 실패까지 남기면 매수 시각
-        # 안전망이 재시도하지 못한다
-        if record.outcome == BuyOutcome.ORDERED:
-            self._write_buy_records(cash, plan.amount, [record])
+        return record, bool(result is not None and result.outcome_unknown)
 
     def _etf_kill_reason(self, today: date) -> Optional[str]:
         """자동 중단 장치 — 2호 ETF 매매 건별 순수익률 누적합이 문턱 이하면 사유를, 아니면 None.

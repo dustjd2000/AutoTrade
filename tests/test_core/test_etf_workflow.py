@@ -75,11 +75,13 @@ class FakeOrderClient:
         self.orders = []
         self.status = status
         self.error = error
+        self.unknown = False
 
     def send_order(self, request):
         self.orders.append(request)
         return OrderResult(order_id=str(len(self.orders)), ticker=request.ticker, side=request.side,
-                           status=self.status, quantity=request.quantity, error_message=self.error)
+                           status=self.status, quantity=request.quantity, error_message=self.error,
+                           outcome_unknown=self.unknown)
 
 
 def make_workflow(rows, returns=(), kill_percent=5.0, start=None, cash=1_000_000, price=30000.0,
@@ -93,6 +95,7 @@ def make_workflow(rows, returns=(), kill_percent=5.0, start=None, cash=1_000_000
     strategy = ETFRegimeStrategy(investable_ratio=0.5)
     store_calls = []
     recorded = []
+    legs = []
 
     def closed_trade_returns(start_day, up_to, tickers):
         store_calls.append((start_day, up_to, tuple(tickers)))
@@ -106,6 +109,7 @@ def make_workflow(rows, returns=(), kill_percent=5.0, start=None, cash=1_000_000
         risk_manager=risk_manager or SimpleNamespace(
             approve=lambda *a, **kw: True, record_order=lambda *a, **kw: None),
         note_open_position=opened.append,
+        begin_switch_leg=lambda leg, ticker, **kw: legs.append((leg, ticker)),
     )
     workflow = DailyWorkflow(
         strategy=strategy,
@@ -128,7 +132,7 @@ def make_workflow(rows, returns=(), kill_percent=5.0, start=None, cash=1_000_000
     return SimpleNamespace(
         workflow=workflow, email=email, notifications=notifications, closed=closed,
         market_data=market_data, strategy=strategy, store_calls=store_calls,
-        order_client=order_client, opened=opened,
+        order_client=order_client, opened=opened, legs=legs,
     )
 
 
@@ -406,3 +410,75 @@ def test_flip_can_be_disabled():
     t.workflow.recommend_and_notify(today=TODAY)
 
     assert [r.ticker for r in t.strategy._recommendations] == [INVERSE_ETF[0]]
+
+
+# ── 장중 전환 (스펙 2026-11-11) ──────────────────────────────
+def test_morning_buy_opens_the_first_switch_leg():
+    t = make_workflow(candles(0.5))
+    t.workflow.recommend_and_notify(today=TODAY)
+
+    t.workflow._execute_etf_buy(TODAY)
+
+    assert t.legs == [(1, LONG_ETF[0])]
+
+
+def test_rejected_morning_buy_opens_no_leg():
+    t = make_workflow(candles(0.5), order_status=OrderStatus.REJECTED, order_error="잔고 부족")
+    t.workflow.recommend_and_notify(today=TODAY)
+
+    t.workflow._execute_etf_buy(TODAY)
+
+    assert t.legs == []
+
+
+def test_switch_buy_ignores_the_already_bought_today_guard():
+    """아침 매수 기록이 있어도 전환 매수는 나간다 — 별도 함수라 '오늘 이미 샀다' 장치를 타지 않는다."""
+    t = make_workflow(candles(0.5), cash=1_000_000, price=1250.0)
+    t.workflow.recommend_and_notify(today=TODAY)
+    t.workflow._execute_etf_buy(TODAY)
+
+    record, unknown = t.workflow.execute_switch_buy(INVERSE_ETF[0], TODAY, "10:20 전환 — 사유")
+
+    assert [o.ticker for o in t.order_client.orders] == [LONG_ETF[0], INVERSE_ETF[0]]
+    assert t.order_client.orders[1].order_type == OrderType.MARKET
+    assert t.order_client.orders[1].quantity == 400            # 1,000,000 × 50% ÷ 1,250
+    assert record.outcome.is_ordered and unknown is False
+    assert t.opened == [LONG_ETF[0], INVERSE_ETF[0]]
+
+
+def test_switch_buy_replaces_the_decision_for_the_ai_exit_prompt():
+    t = make_workflow(candles(0.5))
+    t.workflow.recommend_and_notify(today=TODAY)
+    t.workflow._execute_etf_buy(TODAY)
+
+    t.workflow.execute_switch_buy(INVERSE_ETF[0], TODAY, "10:20 전환 — 사유")
+
+    [rec] = t.strategy._recommendations
+    assert rec.ticker == INVERSE_ETF[0]
+    assert rec.reason == "10:20 전환 — 사유"
+    assert "장중 전환" in rec.outlook
+
+
+def test_switch_buy_writes_no_buy_record_and_does_not_wake_the_safety_net():
+    """전환 매수에는 매수 결과 메일을 따로 보내지 않는다 (사용자 지시 2026-11-12) — 기록 파일은 아침 것 그대로."""
+    t = make_workflow(candles(0.5))
+    t.workflow.recommend_and_notify(today=TODAY)
+    t.workflow._execute_etf_buy(TODAY)
+
+    t.workflow.execute_switch_buy(INVERSE_ETF[0], TODAY, "사유")
+    t.workflow._execute_etf_buy(TODAY)                          # 매수 시각 안전망
+
+    assert [r.ticker for r in t.workflow._read_buy_records(TODAY).records] == [LONG_ETF[0]]
+    assert len(t.order_client.orders) == 2
+    assert t.legs == [(1, LONG_ETF[0])]                         # 2번째 다리는 SwitchFlow가 연다
+
+
+def test_switch_buy_reports_a_rejection_and_an_unknown_result():
+    t = make_workflow(candles(0.5), order_status=OrderStatus.REJECTED, order_error="증거금 부족")
+
+    record, unknown = t.workflow.execute_switch_buy(INVERSE_ETF[0], TODAY, "사유")
+    assert not record.outcome.is_ordered and unknown is False
+
+    t.order_client.unknown = True
+    record, unknown = t.workflow.execute_switch_buy(INVERSE_ETF[0], TODAY, "사유")
+    assert not record.outcome.is_ordered and unknown is True
