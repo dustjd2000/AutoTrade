@@ -645,6 +645,15 @@ class MainWindow(QMainWindow):
         risk_form.addRow("고점 반납 시작 (%)", self._trail_activate_percent)
         risk_form.addRow("고점 반납 폭 (%p)", self._trail_giveback_percent)
         risk_form.addRow("AI 판단 단계 (%p)", self._ai_exit_step)
+        self._etf_switch_enabled = QCheckBox("장중 전환")
+        self._etf_switch_enabled.setChecked(True)
+        self._etf_switch_enabled.setToolTip(
+            "아침에 산 ETF가 틀린 방향이면(KODEX 200 산 시점 대비 반대 0.5% 이상 + 5분 체결강도 반대 + "
+            "순손익 마이너스) 팔고 반대 ETF로 갈아탑니다. 하루 1회, 14:30까지. 끄면 새 판정만 멈추고 "
+            "이미 진행 중인 전환 매수는 끝까지 갑니다."
+        )
+        self._etf_switch_enabled.toggled.connect(self._on_switch_flag_toggled)
+        risk_form.addRow("장중 전환", self._etf_switch_enabled)
         # 종목별 판정이라는 점과 AI 판단을 언제 부르는지를 입력란 바로 아래에서 알린다
         exit_hint = QLabel(
             "손절선입니다. 순손익률이 이 값에 닿으면 실시간으로 시장가 매도합니다. 순손익률은 "
@@ -1236,6 +1245,24 @@ class MainWindow(QMainWindow):
         """
         self._refresh_exit_flag_hint()
 
+    def _on_switch_flag_toggled(self) -> None:
+        """장중 전환 체크박스를 돌고 있는 엔진에 밀어 넣고 `.env`에 저장한다 (재시작하지 않는다).
+
+        `_on_exit_flag_toggled`와 같은 방식이다. 끄면 새 판정만 멈추고 이미 진행 중인
+        전환 매수는 끝까지 간다.
+        """
+        if self._syncing_exit_flags:
+            return
+
+        on = self._etf_switch_enabled.isChecked()
+        thread = self._engine_thread
+        applied = thread is not None and thread.set_switch_enabled(on)
+
+        save_env(ENV_PATH, {"ETF_SWITCH_ENABLED": "1" if on else "0"})
+
+        if applied:
+            logger.info("장중 전환 %s", "적용" if on else "해제")
+
     def _on_exit_flag_toggled(self) -> None:
         """체크박스 상태를 돌고 있는 엔진에 밀어 넣고 `.env`에 저장한다 (재시작하지 않는다).
 
@@ -1374,6 +1401,7 @@ class MainWindow(QMainWindow):
         try:
             self._ai_exit_enabled.setChecked(parse_flag(env.get("AI_EXIT_ENABLED"), True))
             self._stop_loss_enabled.setChecked(parse_flag(env.get("STOP_LOSS_ENABLED"), True))
+            self._etf_switch_enabled.setChecked(parse_flag(env.get("ETF_SWITCH_ENABLED"), True))
         finally:
             self._syncing_exit_flags = False
         self._schedule_times.setText(
@@ -1808,6 +1836,7 @@ class MainWindow(QMainWindow):
         # 여기서 다시 밀어 넣어야 시작·재시작 뒤에도 어긋나지 않는다
         if running:
             self._on_exit_flag_toggled()
+            self._on_switch_flag_toggled()
         # 정지 상태에서는 읽을 잔고가 없으므로 표 갱신도 멈춘다
         if running:
             self._holdings_timer.start()

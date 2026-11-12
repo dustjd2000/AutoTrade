@@ -141,6 +141,19 @@ class EngineThread(QThread):
         runtime.engine.risk_manager.stop_loss_enabled = stop_loss
         return True
 
+    def set_switch_enabled(self, enabled: bool) -> bool:
+        """장중 전환 적용 여부를 돌고 있는 엔진에 바로 반영한다. 반영했으면 True.
+
+        `set_exit_flags`와 같은 이유로 재시작 경로를 타지 않는다. bool 대입은 원자적이고
+        주문을 내지 않으므로 루프 스레드로 넘길 필요가 없다 — 다음 틱의 전환 판정부터
+        바뀐 값이 쓰인다. `.env` 저장은 호출하는 쪽인 `MainWindow`가 맡는다.
+        """
+        runtime = self._runtime
+        if runtime is None:
+            return False
+        runtime.engine.etf_switch_enabled = enabled
+        return True
+
     # ── 즉시 실행 ────────────────────────────────────────────
     @property
     def action_busy(self) -> bool:
