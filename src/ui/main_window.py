@@ -653,7 +653,8 @@ class MainWindow(QMainWindow):
             "이미 진행 중인 전환 매수는 끝까지 갑니다."
         )
         self._etf_switch_enabled.toggled.connect(self._on_switch_flag_toggled)
-        risk_form.addRow("장중 전환", self._etf_switch_enabled)
+        # 체크박스 글자가 이름을 겸한다 — 행 라벨까지 달면 '장중 전환'이 두 번 찍힌다
+        risk_form.addRow("", self._etf_switch_enabled)
         # 종목별 판정이라는 점과 AI 판단을 언제 부르는지를 입력란 바로 아래에서 알린다
         exit_hint = QLabel(
             "손절선입니다. 순손익률이 이 값에 닿으면 실시간으로 시장가 매도합니다. 순손익률은 "
