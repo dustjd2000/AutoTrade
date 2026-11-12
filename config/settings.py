@@ -251,7 +251,9 @@ class Settings:
     )
 
     # 2호 장중 전환 (스펙 2026-11-11) — 산 ETF가 틀린 방향이면 팔고 반대 ETF로 갈아탄다.
-    # 0이면 판정만 끈다 (KODEX 200 구독과 체결강도 계산은 그대로 돈다). `.env` 전용.
+    # 0이면 판정만 끈다 (KODEX 200 구독과 체결강도 계산은 그대로 돈다). UI '장중 전환' 체크박스가
+    # 켜고 끌 때마다 `.env`에 저장하고 돌고 있는 엔진에 바로 반영한다 — 여기 값은 엔진이 새로 뜰 때 쓰인다.
+    # 아래 두 값은 `.env` 전용이다.
     etf_switch_enabled: bool = field(
         default_factory=lambda: parse_flag(os.getenv("ETF_SWITCH_ENABLED"), True)
     )

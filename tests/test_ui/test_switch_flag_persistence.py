@@ -116,11 +116,10 @@ def test_engine_start_pushes_state(monkeypatch):
     fake._set_actions_enabled = lambda running: None
     fake._holdings_timer = MagicMock()
     fake._refresh_holdings = lambda: None
+    # 시작 경로가 뒤에서 건드리는 위젯은 MagicMock으로 채운다 — 예외를 삼키지 않아야 회귀가 드러난다
+    fake._status_dot = fake._btn_start = fake._btn_stop = MagicMock()
 
-    try:
-        MainWindow._set_engine_running(fake, True)
-    except AttributeError:
-        pass  # 이 시험이 보는 것은 앞쪽의 밀어 넣기뿐이다
+    MainWindow._set_engine_running(fake, True)
 
     assert thread.calls == [False]
 
