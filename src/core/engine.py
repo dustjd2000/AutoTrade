@@ -32,6 +32,7 @@ from src.core.etf_switch import (
     SwitchState,
     opposite_etf,
 )
+from src.core.switch_flow import FILL_MAX_WAIT_SECONDS
 from src.core.trade_strength import TradeStrength
 from src.strategy.etf_regime import ETF_TICKERS, LONG_ETF
 from src.logger.trade_store import TradeStore
@@ -223,6 +224,9 @@ class TradingEngine:
         self._index_price: Optional[float] = None
         self._index_at: Optional[datetime] = None
         self._index_logged_at: Optional[datetime] = None
+        # 분당 체결강도 기록용 — 마지막 키움 누적 체결강도(필드 228)와 마지막으로 기록한 분 (HHMM)
+        self._index_strength_cum: Optional[float] = None
+        self._index_minute_written: Optional[str] = None
         # 종목별 마지막 청산 주문번호 — 전환이 그 매도의 체결을 기다릴 때 쓴다
         self._exit_order_ids: Dict[str, str] = {}
         # 전환 매도는 나갔고 반대 ETF 매수는 아직인 상태. 이 동안 '전량 매도 완료' 리포트를
@@ -654,6 +658,7 @@ class TradingEngine:
         # 전환 상태는 날짜가 바뀌면 `SwitchState`가 스스로 비운다 — 여기서는 엔진 쪽 잔여물만 지운다
         self.pending_switch = None
         self._exit_order_ids.clear()
+        self._index_minute_written = None
         logger.info("새 거래일 준비 — 일일 손실 한도와 매매 중지 상태를 초기화했습니다.")
 
     def start(self) -> None:
@@ -695,11 +700,26 @@ class TradingEngine:
         self.switch_state.restore(rows, today)
         logger.info("전환 다리를 복원했습니다: %s", [(r.leg, r.ticker, r.end_reason) for r in rows])
         if self.switch_state.switched_today and not any(r.leg >= 2 for r in rows):
-            # 전환 매도 뒤·매수 전에 꺼졌다. 다시 사면 이중 매수 위험이 있어 현금으로 둔다
-            self.notify(
-                "[경고] 장중 전환 매도 뒤 반대 ETF를 사기 전에 엔진이 재시작됐습니다 — "
-                "오늘은 다시 사지 않고 현금으로 마감합니다. 잔고를 확인하세요."
-            )
+            # 다시 사면 이중 매수 위험이 있어 어느 경우든 오늘은 사지 않는다. 경고는 참일 때만 보낸다.
+            held_etfs = sorted(t for t in self._open_tickers if t in ETF_TICKERS)
+            leg1_ended = next((r.ended_at for r in rows if r.leg == 1), None)
+            if held_etfs:
+                # 2번째 다리를 샀는데 기록만 빠진 경우 — 이 종목은 전환 판정이 돌지 않는다
+                self.notify(
+                    "[경고] 장중 전환 기록이 빠졌습니다 — ETF를 보유 중인데 오늘 2번째 종목 기록이 없습니다. "
+                    f"이 종목은 오늘 전환 판정이 돌지 않습니다. 잔고를 확인하세요: {', '.join(held_etfs)}"
+                )
+            elif (
+                leg1_ended is not None
+                and (datetime.now() - leg1_ended).total_seconds() <= FILL_MAX_WAIT_SECONDS
+            ):
+                # 전환 매도 직후라 매수 단계가 실제로 끊겼을 수 있다
+                self.notify(
+                    "[경고] 장중 전환 매도 뒤 반대 ETF를 사기 전에 엔진이 재시작됐습니다 — "
+                    "오늘은 다시 사지 않고 현금으로 마감합니다. 잔고를 확인하세요."
+                )
+            else:
+                logger.info("전환 매수가 이미 끝난 뒤의 재시작입니다 — 오늘은 다시 사지 않습니다.")
 
     def _restore_exit_peaks(self) -> None:
         """오늘 남긴 당일 고점을 트래커에 되살린다 (스펙 2026-09-22 2.2).
@@ -893,8 +913,10 @@ class TradingEngine:
             # 매도했어도 이번 틱에 새로 찍힌 고점은 남긴다 — 15:35 검증의 "순이익 기회"가
             # 여기서 끊기면 안 된다 (force_close_all_positions와 같은 이유).
             self.flush_exit_peaks(positions)
+            self._flush_index_minute(data)
             return
         self.flush_exit_peaks(positions)
+        self._flush_index_minute(data)
         self._sample_exit_trace(positions)
         # 기존 청산(손절·익절·고점 반납)이 걸리지 않은 틱에서만 전환을 판정한다 — 손절이 항상 먼저다
         self._check_etf_switch(positions)
@@ -1108,6 +1130,7 @@ class TradingEngine:
         now = datetime.now()
         self._index_price = data.price
         self._index_at = now
+        self._index_strength_cum = data.strength_cum
         if data.signed_volume is not None:
             self.trade_strength.add(now, data.signed_volume)
         if (
@@ -1125,6 +1148,28 @@ class TradingEngine:
             self.trade_strength.window_minutes,
             "모름" if strength is None else f"{strength:.1f}",
         )
+
+    def _flush_index_minute(self, data: MarketData) -> None:
+        """KODEX 200 틱이면 그 분의 가격·체결강도를 DB에 남긴다 (분당 한 번, 2026-11-12).
+
+        손절 판정 **뒤에서만** 부른다 — SQLite 쓰기 대기가 손절 결정을 지연시키면 안 된다.
+        실패해도 예외를 올리지 않는다 (시세 콜백 경로).
+        """
+        if data.ticker != LONG_ETF[0] or self.trade_store is None or self._index_price is None:
+            return
+        now = datetime.now()
+        minute_key = now.strftime("%H%M")
+        if self._index_minute_written == minute_key:
+            return
+        # 실패해도 같은 분 안에서 다시 시도하지 않는다 (틱마다 SQLite 대기가 붙지 않게)
+        self._index_minute_written = minute_key
+        try:
+            self.trade_store.save_index_strength(
+                now.date(), minute_key, self._index_price,
+                self.trade_strength.value(now), self._index_strength_cum,
+            )
+        except Exception:
+            logger.warning("분당 체결강도 기록 실패 — 이 분은 건너뜁니다.", exc_info=True)
 
     def _fresh_index_price(self, now: datetime) -> Optional[float]:
         """최근 KODEX 200 틱 가격. 틱이 없거나 `INDEX_STALE_SECONDS`보다 묵었으면 None."""

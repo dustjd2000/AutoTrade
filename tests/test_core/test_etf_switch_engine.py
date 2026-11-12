@@ -2,6 +2,7 @@
 
 반대 ETF 매수(매도 체결 대기·재시도)는 `SwitchFlow`가 맡아 `test_switch_flow.py`에서 본다.
 """
+import sqlite3
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -289,3 +290,64 @@ def test_begin_leg_uses_the_latest_index_tick_when_no_entry_is_given(tmp_path):
     engine.begin_switch_leg(1, INVERSE)
 
     assert legs(engine)[0].index_entry == 10020.0
+
+
+def test_index_strength_is_stored_once_per_minute(tmp_path):
+    engine, _, _, _ = make_engine({}, tmp_path)
+    engine.on_market_data(long_tick(10000.0))
+    engine.on_market_data(long_tick(10010.0))                 # 같은 분 — 다시 쓰지 않는다
+    Clock.current = NOW + timedelta(minutes=1)
+    engine.on_market_data(long_tick(10020.0))
+
+    rows = engine.trade_store.index_strength_for(NOW.date())
+    assert [(m, p) for m, p, _, _ in rows] == [("1000", 10000.0), ("1001", 10020.0)]
+    assert rows[0][2] is None                                  # 창이 아직 차지 않았다
+
+
+def test_index_strength_is_stored_when_the_window_is_full(tmp_path):
+    engine, _, _, _ = make_engine({}, tmp_path)
+    load_strength(engine, buy=30, sell=10)
+    engine.on_market_data(long_tick(10000.0))
+
+    assert engine.trade_store.index_strength_for(NOW.date())[0][2] is not None
+
+
+def test_index_strength_write_failure_does_not_break_the_tick_or_stop_loss(tmp_path):
+    engine, orders, _, _ = make_engine({LONG: held(LONG, 10000.0)}, tmp_path)
+
+    def boom(*args):
+        raise sqlite3.OperationalError("locked")
+
+    engine.trade_store.save_index_strength = boom
+    engine.on_market_data(long_tick(10000.0))                  # 기록 실패 — 예외 없음
+    Clock.current = NOW + timedelta(minutes=1)
+    engine.on_market_data(long_tick(9700.0))                   # -3% — 손절
+
+    assert len(orders) == 1 and orders[0].side == OrderSide.SELL
+
+
+def test_restart_long_after_the_switch_sell_without_a_second_leg_is_quiet(tmp_path):
+    engine, _, _, _ = make_engine({LONG: held(LONG, 10000.0)}, tmp_path)
+    engine.begin_switch_leg(1, LONG, index_entry=10000.0, at=BOUGHT)
+    load_strength(engine, buy=10, sell=30)
+    engine.on_market_data(long_tick(9940.0))
+
+    Clock.current = NOW + timedelta(minutes=10)
+    restarted, _, alerts, _ = make_engine({}, tmp_path)
+
+    assert restarted.switch_state.switched_today is True
+    assert alerts == []
+
+
+def test_restart_holding_an_etf_without_a_second_leg_warns_about_the_missing_record(tmp_path):
+    engine, _, _, _ = make_engine({LONG: held(LONG, 10000.0)}, tmp_path)
+    engine.begin_switch_leg(1, LONG, index_entry=10000.0, at=BOUGHT)
+    load_strength(engine, buy=10, sell=30)
+    engine.on_market_data(long_tick(9940.0))
+
+    Clock.current = NOW + timedelta(minutes=10)
+    restarted, _, alerts, _ = make_engine({INVERSE: held(INVERSE, 1000.0)}, tmp_path)
+
+    assert restarted.switch_state.switched_today is True
+    assert len(alerts) == 1 and "기록이 빠졌습니다" in alerts[0] and INVERSE in alerts[0]
+

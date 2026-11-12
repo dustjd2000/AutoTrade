@@ -69,13 +69,13 @@ class RuleTuning:
         return Rule(s.etf_signal_band_percent, s.etf_flip_enabled, s.recommend_time.strftime("%H:%M"), s.stop_loss_percent)
 
     def _switch_percent(self) -> float:
-        """백테스트에 넣을 장중 전환 문턱(%) — 실전에서 전환을 껐으면 0 (스펙 2026-11-11 8절).
+        """백테스트에 넣을 장중 전환 문턱(%) — 항상 0, 주간 평가는 전환을 넣지 않는다 (2026-11-12 사용자 지시).
 
-        실전 규칙에서 체결강도 조건만 뺀 것을 평가한다. 문턱 자체는 자동 조정 후보가 아니다.
+        과거 1분봉(ka10080)에는 매수·매도 체결 구분이 없어 체결강도 조건을 재현할 수 없고, 지수만
+        보는 전환은 실전보다 훨씬 자주 걸려 다른 설정의 자동 조정을 왜곡한다. `index_strength_minutes`에
+        일수가 충분히 쌓이면 백테스트가 그것을 읽을 수 있다 (아직 구현하지 않음).
         """
-        if not getattr(self.settings, "etf_switch_enabled", False):
-            return 0.0
-        return getattr(self.settings, "etf_switch_index_percent", 0.0)
+        return 0.0
 
     def collect_minute_bars(self) -> None:
         """마지막 저장일부터 오늘까지 1분봉을 받아 쌓는다. 종목 하나가 실패해도 다른 종목은 받는다."""

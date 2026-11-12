@@ -130,6 +130,19 @@ CREATE TABLE IF NOT EXISTS etf_switch_legs (
 )
 """
 
+# KODEX 200 분당 체결강도 — 주간 평가가 나중에 체결강도 조건을 백테스트에 넣을 수 있도록 쌓는다.
+# 엔진이 떠 있던 분만 남는다 (2026-11-12).
+INDEX_STRENGTH_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS index_strength_minutes (
+    day TEXT NOT NULL,
+    minute TEXT NOT NULL,
+    price REAL NOT NULL,
+    strength REAL,
+    strength_cum REAL,
+    PRIMARY KEY (day, minute)
+)
+"""
+
 # 부분체결도 실제 매매이므로 집계에 포함한다
 FILLED_STATUSES = (OrderStatus.FILLED.value, OrderStatus.PARTIALLY_FILLED.value)
 
@@ -342,6 +355,7 @@ class TradeStore:
             conn.execute(EXIT_REVIEW_SCHEMA_SQL)
             conn.execute(RULE_EVALUATION_SCHEMA_SQL)
             conn.execute(ETF_SWITCH_LEG_SCHEMA_SQL)
+            conn.execute(INDEX_STRENGTH_SCHEMA_SQL)
             self._migrate(conn, "trades", MIGRATIONS)
             conn.commit()
 
@@ -726,6 +740,36 @@ class TradeStore:
             )
             for row in rows
         ]
+
+    def save_index_strength(
+        self,
+        day: date,
+        minute: str,
+        price: float,
+        strength: Optional[float],
+        strength_cum: Optional[float],
+    ) -> None:
+        """그 분의 KODEX 200 가격·체결강도를 남긴다. 같은 분을 다시 쓰면 마지막 값이 이긴다."""
+        with closing(self._connect()) as conn:
+            conn.execute(
+                """INSERT INTO index_strength_minutes (day, minute, price, strength, strength_cum)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(day, minute) DO UPDATE SET price=excluded.price,
+                       strength=excluded.strength, strength_cum=excluded.strength_cum""",
+                (day.isoformat(), minute, price, strength, strength_cum),
+            )
+            conn.commit()
+
+    def index_strength_for(
+        self, day: date
+    ) -> List[Tuple[str, float, Optional[float], Optional[float]]]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """SELECT minute, price, strength, strength_cum FROM index_strength_minutes
+                   WHERE day = ? ORDER BY minute""",
+                (day.isoformat(),),
+            ).fetchall()
+        return [(r["minute"], r["price"], r["strength"], r["strength_cum"]) for r in rows]
 
     def save_rule_evaluation(self, row: RuleEvaluationRow) -> None:
         """평가 기록을 남긴다. 같은 날은 덮어쓴다 — 적용 여부를 정한 뒤 같은 줄을 다시 쓴다."""

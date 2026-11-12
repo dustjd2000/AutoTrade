@@ -299,15 +299,15 @@ def test_collect_survives_last_day_failure_for_one_ticker(tmp_path):
     assert real_last_day("114800") == "20261029"
 
 
-def test_weekly_evaluation_backtests_with_the_live_switch_threshold(tmp_path):
-    """실전 규칙에서 체결강도만 뺀 것을 평가한다 — 전환을 끄면 0을 넘긴다 (스펙 2026-11-11 8절)."""
+def test_weekly_evaluation_leaves_the_switch_out(tmp_path):
+    """주간 평가는 장중 전환을 넣지 않는다 — 켜져 있어도 0을 넘긴다 (2026-11-12)."""
     captured = []
 
     def factory(*args):
         captured.append(args)
         return SimpleNamespace(days=list(range(200)))
 
-    for enabled, expected in ((True, 0.5), (False, 0.0)):
+    for enabled, expected in ((True, 0.0), (False, 0.0)):
         settings = FakeSettings()
         settings.etf_switch_enabled = enabled
         settings.etf_switch_index_percent = 0.5

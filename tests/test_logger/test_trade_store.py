@@ -657,3 +657,17 @@ def test_switch_leg_is_not_overwritten_or_closed_twice(tmp_path):
     [row] = store.switch_legs_for(day)
     assert (row.ticker, row.index_entry, row.end_reason) == ("069500", 35000.0, "stop_loss")
     assert row.switch_against is None
+
+
+def test_index_strength_round_trip_upsert_and_nulls(tmp_path):
+    store = TradeStore(tmp_path / "t.db")
+    day = date(2026, 11, 12)
+    store.save_index_strength(day, "0931", 100.0, None, None)
+    store.save_index_strength(day, "0930", 99.0, 55.5, 120.0)
+    store.save_index_strength(day, "0931", 101.0, 60.0, None)  # 같은 분 — 마지막 값이 이긴다
+
+    assert store.index_strength_for(day) == [
+        ("0930", 99.0, 55.5, 120.0),
+        ("0931", 101.0, 60.0, None),
+    ]
+    assert store.index_strength_for(date(2026, 11, 13)) == []
