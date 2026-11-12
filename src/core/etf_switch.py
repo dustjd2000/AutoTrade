@@ -14,8 +14,12 @@ from typing import Iterable, Optional, Set, Tuple
 
 from src.strategy.etf_regime import INVERSE_ETF, LONG_ETF
 
-# 15:15 강제청산과 겹치지 않기 위한 여유 — 이 시각을 넘으면 판정하지 않는다
-SWITCH_END_TIME = dt_time(15, 14)
+# 이 시각을 넘으면 판정하지 않는다 (2026-11-12 사용자 지시로 15:14 → 14:30) — 늦게 갈아타면
+# 곧 15:15 강제청산이라 왕복 비용만 낸다. 1절 백테스트도 14:30 마감으로 돌렸다
+SWITCH_END_TIME = dt_time(14, 30)
+# 전환 매수(매도 체결 대기 포함)의 마감 — 15:15 강제청산과 겹치지 않기 위한 여유.
+# 판정 마감과 따로 둔다: 14:29에 판 종목의 반대 ETF를 14:30에 포기하면 안 된다
+SWITCH_BUY_END_TIME = dt_time(15, 14)
 # KODEX 200 틱이 이보다 오래됐으면 지수 가격을 모르는 것으로 본다
 INDEX_STALE_SECONDS = 60.0
 # `ExitReason.ETF_SWITCH.value` — 다리가 전환으로 끝났는지 가리는 데 쓴다

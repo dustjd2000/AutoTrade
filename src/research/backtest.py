@@ -21,7 +21,7 @@ CLOSE_OUT_HHMM = "1515"
 # 시장가 체결이 호가 한 칸을 건너간다고 보고 체결마다 반칸(ETF 호가단위 5원)을 잃는다
 HALF_TICK_WON = 2.5
 # 장중 전환 판정 마감 — 실전(`etf_switch.SWITCH_END_TIME`)과 같다
-SWITCH_END_HHMM = "1514"
+SWITCH_END_HHMM = "1430"
 
 
 @dataclass(frozen=True)
@@ -72,7 +72,7 @@ def _leg(
     청산 조건(실전과 같은 순서): 순손익률 ≤ −손절, ≥ +익절, 고점(≥ 활성 문턱)에서 반납폭만큼 하락,
     15:15 이후 첫 봉. 그 어느 것도 아니면 전환 조건을 본다 — `switch_percent`가 0보다 크고, 지수
     (`index_bars` = KODEX 200)가 산 봉 대비 보유 방향과 반대로 그만큼 움직였고, 순손익이 마이너스이며
-    15:14 이전이다. 익절·고점 반납·전환은 0이면 끈다. 산 뒤에 봉이 없으면 순손익률은 None.
+    14:30 이전이다. 익절·고점 반납·전환은 0이면 끈다. 산 뒤에 봉이 없으면 순손익률은 None.
     """
     entry_time, entry_price = bars[entry_index]
     entry = entry_price + half_tick

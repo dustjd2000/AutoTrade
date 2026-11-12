@@ -12,7 +12,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Awaitable, Callable, Iterable
 
-from src.core.etf_switch import SWITCH_END_TIME, PendingSwitch
+from src.core.etf_switch import SWITCH_BUY_END_TIME, PendingSwitch
 from src.core.events import BuyOutcome, FillRecord, OrderSide, format_stock
 
 logger = logging.getLogger(__name__)
@@ -62,7 +62,7 @@ class SwitchFlow:
             if not await self._wait_sell_fill(pending):
                 logger.error("장중 전환: 매도 체결을 확인하지 못해 매수를 포기합니다: %s", pending.sold_summary)
                 self.engine.notify(
-                    f"[경고] 장중 전환: 매도 체결을 판정 후 5분 안에(또는 {SWITCH_END_TIME:%H:%M}까지) "
+                    f"[경고] 장중 전환: 매도 체결을 판정 후 5분 안에(또는 {SWITCH_BUY_END_TIME:%H:%M}까지) "
                     f"확인하지 못해 반대 ETF를 사지 않았습니다 — 15:15 마감 정리가 남은 것을 거둡니다: "
                     f"{pending.sold_summary}"
                 )
@@ -79,7 +79,7 @@ class SwitchFlow:
         warned = False
         deadline = min(
             pending.at + timedelta(seconds=FILL_MAX_WAIT_SECONDS),
-            datetime.combine(pending.at.date(), SWITCH_END_TIME),
+            datetime.combine(pending.at.date(), SWITCH_BUY_END_TIME),
         )
         while True:
             if self._now() >= deadline:
@@ -112,7 +112,7 @@ class SwitchFlow:
             f"체결강도 {decision.strength:.0f}"
         )
         for attempt in range(1, BUY_ATTEMPTS + 1):
-            if self._now().time() > SWITCH_END_TIME:
+            if self._now().time() > SWITCH_BUY_END_TIME:
                 break
             record, unknown = None, False
             try:

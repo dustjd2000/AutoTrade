@@ -59,10 +59,10 @@ def test_second_leg_only_sells():
         is SwitchKind.SELL_ONLY
 
 
-def test_no_decision_after_1514():
+def test_no_decision_after_1430():
     s = state()
-    assert decide(s, now=NOW.replace(hour=15, minute=14, second=0)) is not None
-    assert decide(s, now=NOW.replace(hour=15, minute=14, second=1)) is None
+    assert decide(s, now=NOW.replace(hour=14, minute=30, second=0)) is not None
+    assert decide(s, now=NOW.replace(hour=14, minute=30, second=1)) is None
 
 
 def test_stale_index_tick_means_no_decision():

@@ -156,13 +156,13 @@ def test_no_switch_while_the_index_move_is_below_the_threshold():
     assert result == pytest.approx(net(10000, 9960))
 
 
-def test_no_switch_after_1514():
-    long_bars = flat_day(10000, {"1515": 9940})
-    inverse_bars = flat_day(1000, {"1520": 1100})
+def test_no_switch_after_1430():
+    long_bars = flat_day(10000, {"1431": 9940})
+    inverse_bars = flat_day(1000, {"1440": 1100})
     result = switch_day_return(
         long_bars, inverse_bars, long_bars, True, "0910", 2.0, COMMISSION, 0.5, half_tick=0.0
     )
-    assert result == pytest.approx(net(10000, 9940))             # 15:15 청산일 뿐 전환이 아니다
+    assert result == pytest.approx(net(10000, 9940))             # 14:30 뒤라 전환하지 않고 15:15에 청산한다
 
 
 def test_inverse_first_leg_switches_to_long_when_the_index_rises():
