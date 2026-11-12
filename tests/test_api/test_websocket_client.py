@@ -92,3 +92,18 @@ def test_parse_trade_leaves_missing_fields_as_none():
 
     assert data.signed_volume is None
     assert data.strength_cum is None
+
+
+def test_parse_trade_survives_non_numeric_optional_fields():
+    """가정한 필드(15·228)에 숫자가 아닌 값이 와도 틱은 읽히고 수신 루프는 죽지 않는다."""
+    data = make_client()._parse_trade(trade_item({"15": "abc", "228": "N/A"}))
+
+    assert (data.price, data.volume) == (35000.0, 1000)
+    assert data.signed_volume is None
+    assert data.strength_cum is None
+
+
+def test_parse_trade_treats_blank_and_lone_sign_as_none():
+    for raw in (" ", "-", "+"):
+        data = make_client()._parse_trade(trade_item({"15": raw, "228": raw}))
+        assert data.signed_volume is None and data.strength_cum is None

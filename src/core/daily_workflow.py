@@ -586,24 +586,36 @@ class DailyWorkflow:
                            note="리스크 관리 규칙에 걸려 주문하지 않았습니다"), None
 
         result = self.engine.order_client.send_order(request)
-        self.engine.risk_manager.record_order(result)
-        self.trade_store.record_fill(result)
+        # 주문이 나간 뒤의 기록·등록은 하나가 실패해도 예외로 올리지 않는다 — 올리면 전환 매수가
+        # 실패로 오해해 같은 시장가 매수를 한 번 더 보낸다 (이중 매수)
+        self._after_order("리스크 기록", self.engine.risk_manager.record_order, result)
+        self._after_order("체결 기록", self.trade_store.record_fill, result)
         if result.status == OrderStatus.REJECTED:
+            if result.outcome_unknown and self.ws_client is not None:
+                # 결과를 모르는 주문은 체결됐을 수 있다 — 체결됐다면 실시간 손절이 돌도록 구독해 둔다
+                self._after_order("실시간 구독", self.ws_client.subscribe, [plan.ticker])
             if _is_market_closed_rejection(result.error_message):
-                self.engine.note_market_closed("주문이 '장이 열리지않는 날'로 거부됐습니다")
+                self._after_order("휴장 표시", self.engine.note_market_closed, "주문이 '장이 열리지않는 날'로 거부됐습니다")
             self.engine.notify(f"[실패] 2호 전략 매수 거부: {label} x{quantity}주 — {result.error_message}")
             return replace(record, outcome=BuyOutcome.FAILED, order_id=result.order_id,
                            note=f"주문 거부: {result.error_message}"), result
 
-        self.engine.note_open_position(plan.ticker)
-        self._clear_report_mark()
+        self._after_order("보유 감시 등록", self.engine.note_open_position, plan.ticker)
+        self._after_order("리포트 표시 해제", self._clear_report_mark)
         if self.ws_client is not None:
-            self.ws_client.subscribe([plan.ticker])
+            self._after_order("실시간 구독", self.ws_client.subscribe, [plan.ticker])
         logger.info(
             "2호 전략 시장가 매수 접수: %s %d주 (현재가 %s원, 주문번호 %s)",
             label, quantity, f"{price:,.0f}", result.order_id,
         )
         return replace(record, order_id=result.order_id), result
+
+    def _after_order(self, what: str, fn, *args) -> None:
+        """주문 뒤 후속 처리 하나를 실행한다 — 실패해도 로그만 남기고 삼킨다."""
+        try:
+            fn(*args)
+        except Exception:
+            logger.exception("주문은 나갔으나 후속 처리(%s) 실패 — 주문 흐름은 계속합니다", what)
 
     def _begin_switch_leg(self, leg: int, ticker: str) -> None:
         """매수가 접수된 종목을 장중 전환 판정 대상으로 연다 (스펙 2026-11-11 3.4).
@@ -627,7 +639,8 @@ class DailyWorkflow:
         타지 않는다 — 전환은 아침 매수가 있었던 날에만 일어난다. 수량·리스크 승인·주문·기록·구독은
         `_place_etf_buy`를 함께 쓴다.
 
-        오늘의 결정을 새 종목으로 갈아끼워 AI 매도 판단 프롬프트가 전환 근거를 읽게 한다.
+        오늘의 결정 맨 앞에 전환 종목을 끼워 AI 매도 판단 프롬프트가 전환 근거를 읽게 한다
+        (아침 결정도 남긴다). 매수 현황판(`_set_buy_board`)은 건드리지 않는다.
         **매수 기록 파일에는 쓰지 않는다** — 쓰면 매수 결과 메일이 한 통 더 나간다(사용자 지시
         2026-11-12, 전환 알림 메일이 대신한다). 미체결분은 체결내역 조회 기준이라 10:10·15:15가
         그대로 거둔다. 2번째 다리 기록은 호출부(`SwitchFlow`)가 한다 — 기준 지수 가격이
@@ -638,6 +651,13 @@ class DailyWorkflow:
         """
         name = dict((etf_regime.LONG_ETF, etf_regime.INVERSE_ETF))[ticker]
         positions = self.account.get_positions()
+        held = [t for t in etf_regime.ETF_TICKERS if t in positions and positions[t].quantity > 0]
+        if held:
+            logger.warning("장중 전환 매수: 이미 ETF를 보유 중입니다 (%s) — 주문하지 않습니다.", ", ".join(held))
+            return BuyRecord(
+                ticker=ticker, name=name, outcome=BuyOutcome.SKIPPED,
+                note="이미 ETF를 보유 중이라 전환 매수를 하지 않았습니다",
+            ), False
         cash = self.account.get_cash()
         price = self.engine.market_data.get_current_price(ticker).price
         recommendation = StockRecommendation(
@@ -649,13 +669,14 @@ class DailyWorkflow:
             setup=etf_regime.SETUP,
             outlook=SWITCH_OUTLOOK,
         )
-        self.strategy.set_recommendations([recommendation])
+        # 전환 종목을 맨 앞에 두고 아침 결정은 남긴다 — 15:40 검증이 1번째 다리의 시나리오를 읽는다
+        morning = [r for r in self.strategy._recommendations if r.ticker != ticker]
+        self.strategy.set_recommendations([recommendation] + morning)
         plan = self.strategy.build_buy_plans(cash)[0]
 
         record, result = self._place_etf_buy(plan, cash, positions)
         if record is None:
             return None, False
-        self._set_buy_board(today, self._board_from_records([record]))
         return record, bool(result is not None and result.outcome_unknown)
 
     def _etf_kill_reason(self, today: date) -> Optional[str]:

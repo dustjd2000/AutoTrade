@@ -9,7 +9,7 @@
 """
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Awaitable, Callable, Iterable
 
 from src.core.etf_switch import SWITCH_END_TIME, PendingSwitch
@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 FILL_POLL_SECONDS = 5.0
 FILL_FAST_WINDOW_SECONDS = 60.0
 FILL_SLOW_POLL_SECONDS = 30.0
+# 판정 시각으로부터 이 시간 안에 체결이 확인되지 않으면 포기한다 (15:14는 그 안에서도 지킨다)
+FILL_MAX_WAIT_SECONDS = 300.0
 # 반대 ETF 매수 재시도 (거부·조회 오류). 결과를 모르는 실패는 재시도하지 않는다
 BUY_ATTEMPTS = 3
 BUY_RETRY_SECONDS = 10.0
@@ -60,8 +62,8 @@ class SwitchFlow:
             if not await self._wait_sell_fill(pending):
                 logger.error("장중 전환: 매도 체결을 확인하지 못해 매수를 포기합니다: %s", pending.sold_summary)
                 self.engine.notify(
-                    f"[경고] 장중 전환: 매도 체결을 {SWITCH_END_TIME:%H:%M}까지 확인하지 못해 "
-                    f"반대 ETF를 사지 않았습니다 — 15:15 마감 정리가 남은 것을 거둡니다: "
+                    f"[경고] 장중 전환: 매도 체결을 판정 후 5분 안에(또는 {SWITCH_END_TIME:%H:%M}까지) "
+                    f"확인하지 못해 반대 ETF를 사지 않았습니다 — 15:15 마감 정리가 남은 것을 거둡니다: "
                     f"{pending.sold_summary}"
                 )
                 return
@@ -71,12 +73,16 @@ class SwitchFlow:
             self.engine.finish_switch()
 
     async def _wait_sell_fill(self, pending: PendingSwitch) -> bool:
-        """매도 체결을 기다린다. 15:14를 넘기면 False."""
+        """매도 체결을 기다린다. 판정 후 5분이나 15:14 중 먼저 오는 시각을 넘기면 False."""
         loop = asyncio.get_running_loop()
         waited = 0.0
         warned = False
+        deadline = min(
+            pending.at + timedelta(seconds=FILL_MAX_WAIT_SECONDS),
+            datetime.combine(pending.at.date(), SWITCH_END_TIME),
+        )
         while True:
-            if self._now().time() > SWITCH_END_TIME:
+            if self._now() >= deadline:
                 return False
             try:
                 # 체결내역 조회는 블로킹 HTTP라 루프 밖에서 부른다
@@ -135,6 +141,8 @@ class SwitchFlow:
                 return
             if record is not None and record.outcome == BuyOutcome.SKIPPED:
                 break  # 살 금액이 없다 — 다시 해도 같다
+            if record is not None and record.outcome == BuyOutcome.FAILED and record.order_id is None:
+                break  # 주문 전에 리스크 관리가 막았다 — 다시 해도 같다
             if attempt < BUY_ATTEMPTS:
                 await self._sleep(BUY_RETRY_SECONDS)
 

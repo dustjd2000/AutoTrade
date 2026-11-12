@@ -229,7 +229,7 @@ class TradingEngine:
         # 보류한다 (`runtime.closeout_report_due`).
         self.pending_switch: Optional[PendingSwitch] = None
         # 전환 매도가 접수된 직후 부른다 — 런타임이 매수 단계를 실행 큐에 넣는다
-        self.on_switch: Optional[Callable[[], None]] = None
+        self.on_switch: Optional[Callable[[], bool]] = None
 
     @property
     def open_tickers(self) -> List[str]:
@@ -1198,7 +1198,10 @@ class TradingEngine:
         )
         if self.on_switch is not None:
             try:
-                self.on_switch()
+                if not self.on_switch():
+                    # 실행 큐가 접수를 거절했다 — 남겨 두면 종일 2번째 다리 판정과 리포트를 막는다
+                    logger.warning("전환 매수 접수가 거절됐습니다 — 오늘은 현금으로 마감합니다.")
+                    self.pending_switch = None
             except Exception:
                 logger.exception("전환 매수 접수 실패 — 오늘은 현금으로 마감합니다.")
                 self.pending_switch = None

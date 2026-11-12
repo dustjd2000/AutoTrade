@@ -85,7 +85,7 @@ def make_engine(positions, tmp_path, sell_status=OrderStatus.FILLED, enabled=Tru
         etf_switch_index_percent=0.5,
         etf_switch_strength_minutes=5,
     )
-    engine.on_switch = lambda: switched.append(1)
+    engine.on_switch = lambda: (switched.append(1), True)[1]   # 큐가 접수했다
     engine.start()
     return engine, orders, alerts, switched
 
@@ -126,6 +126,20 @@ def test_first_leg_switches_when_index_strength_and_loss_all_agree(tmp_path):
     assert row.switch_net == pytest.approx(-0.6)
     assert engine.switch_state.switched_today is True
     assert engine.switch_pending is True
+
+
+def test_refused_queue_submit_clears_the_pending_switch(tmp_path):
+    """실행 큐가 접수를 거절하면 pending이 종일 남아 2번째 다리 판정·리포트를 막지 않게 비운다."""
+    engine, orders, _, _ = make_engine({LONG: held(LONG, 10000.0)}, tmp_path)
+    engine.on_switch = lambda: False
+    engine.begin_switch_leg(1, LONG, index_entry=10000.0, at=BOUGHT)
+    load_strength(engine, buy=10, sell=30)
+
+    engine.on_market_data(long_tick(9940.0))
+
+    assert len(orders) == 1                              # 매도는 이미 나갔다
+    assert engine.pending_switch is None
+    assert engine.switch_state.switched_today is True
 
 
 def test_stop_loss_runs_first_and_no_switch_follows(tmp_path):

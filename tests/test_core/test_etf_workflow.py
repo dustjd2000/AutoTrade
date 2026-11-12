@@ -10,7 +10,7 @@ import pytest
 from src.core import daily_workflow
 from src.core.daily_workflow import DailyWorkflow
 from src.core import actions
-from src.core.events import MarketData, OrderResult, OrderStatus, OrderType
+from src.core.events import BuyOutcome, MarketData, OrderResult, OrderStatus, OrderType
 from src.strategy.etf_regime import INVERSE_ETF, LONG_ETF, ETFRegimeStrategy
 
 TODAY = date(2026, 10, 23)
@@ -446,17 +446,62 @@ def test_switch_buy_ignores_the_already_bought_today_guard():
     assert t.opened == [LONG_ETF[0], INVERSE_ETF[0]]
 
 
-def test_switch_buy_replaces_the_decision_for_the_ai_exit_prompt():
+def test_switch_buy_puts_the_switch_first_and_keeps_the_morning_decision():
     t = make_workflow(candles(0.5))
     t.workflow.recommend_and_notify(today=TODAY)
     t.workflow._execute_etf_buy(TODAY)
 
     t.workflow.execute_switch_buy(INVERSE_ETF[0], TODAY, "10:20 전환 — 사유")
 
-    [rec] = t.strategy._recommendations
-    assert rec.ticker == INVERSE_ETF[0]
-    assert rec.reason == "10:20 전환 — 사유"
-    assert "장중 전환" in rec.outlook
+    recs = t.strategy._recommendations
+    assert [r.ticker for r in recs] == [INVERSE_ETF[0], LONG_ETF[0]]
+    assert recs[0].reason == "10:20 전환 — 사유"
+    assert "장중 전환" in recs[0].outlook
+
+
+def test_switch_buy_leaves_the_buy_board_alone():
+    t = make_workflow(candles(0.5))
+    calls = []
+    t.workflow._set_buy_board = lambda *a, **kw: calls.append(a)
+
+    t.workflow.execute_switch_buy(INVERSE_ETF[0], TODAY, "사유")
+
+    assert calls == []
+
+
+def test_switch_buy_skips_when_an_etf_is_already_held():
+    held = {LONG_ETF[0]: SimpleNamespace(quantity=10)}
+    t = make_workflow(candles(0.5), get_positions=lambda: held)
+
+    record, unknown = t.workflow.execute_switch_buy(INVERSE_ETF[0], TODAY, "사유")
+
+    assert record.outcome == BuyOutcome.SKIPPED and unknown is False
+    assert t.order_client.orders == []
+
+
+def test_switch_buy_survives_bookkeeping_failure_after_the_order_went_out():
+    """주문이 나간 뒤 기록이 터져도 ORDERED로 돌아온다 — 아니면 SwitchFlow가 다시 산다."""
+    t = make_workflow(candles(0.5))
+    def boom(result):
+        raise RuntimeError("db locked")
+    t.workflow.trade_store.record_fill = boom
+
+    record, unknown = t.workflow.execute_switch_buy(INVERSE_ETF[0], TODAY, "사유")
+
+    assert record.outcome.is_ordered and unknown is False
+    assert len(t.order_client.orders) == 1
+
+
+def test_unknown_switch_buy_still_subscribes_the_ticker():
+    t = make_workflow(candles(0.5), order_status=OrderStatus.REJECTED, order_error="timeout")
+    t.order_client.unknown = True
+    subscribed = []
+    t.workflow.ws_client = SimpleNamespace(subscribe=subscribed.append)
+
+    _, unknown = t.workflow.execute_switch_buy(INVERSE_ETF[0], TODAY, "사유")
+
+    assert unknown is True
+    assert subscribed == [[INVERSE_ETF[0]]]
 
 
 def test_switch_buy_writes_no_buy_record_and_does_not_wake_the_safety_net():

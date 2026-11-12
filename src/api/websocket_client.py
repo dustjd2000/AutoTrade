@@ -12,6 +12,21 @@ from src.core.events import MarketData
 
 logger = logging.getLogger(__name__)
 
+
+def _optional_int(value) -> Optional[int]:
+    """가정한 필드용 — 비었거나 숫자가 아니면 None (한 틱 때문에 수신 루프가 죽지 않게)."""
+    try:
+        return to_int(value) if str(value).strip() not in ("", "+", "-", "None") else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _optional_float(value) -> Optional[float]:
+    try:
+        return to_float(value) if str(value).strip() not in ("", "+", "-", "None") else None
+    except (ValueError, TypeError):
+        return None
+
 # 실시간 등록 타입: 0B = 주식체결
 REALTIME_TYPE_TRADE = "0B"
 
@@ -163,14 +178,12 @@ class WebSocketClient:
         price = abs(to_float(values.get("10")))
         if price <= 0:
             return None
-        signed = values.get("15")
-        strength = values.get("228")
         return MarketData(
             ticker=ticker,
             price=price,
             volume=to_int(values.get("13")),
-            signed_volume=to_int(signed) if signed not in (None, "") else None,
-            strength_cum=to_float(strength) if strength not in (None, "") else None,
+            signed_volume=_optional_int(values.get("15")),
+            strength_cum=_optional_float(values.get("228")),
         )
 
     def _dispatch(self, data: MarketData) -> None:

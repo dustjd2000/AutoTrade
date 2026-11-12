@@ -141,6 +141,39 @@ def test_gives_up_after_1514_without_buying():
     assert t.engine.pending_switch is None
 
 
+def test_gives_up_five_minutes_after_the_decision_when_the_sell_never_fills():
+    t = make([[]], [])
+
+    run(t)
+
+    assert 300 <= sum(t.sleeps) < 330
+    assert t.buys == [] and t.legs == []
+    assert len(t.notes) == 1 and "[경고]" in t.notes[0] and "사지 않았습니다" in t.notes[0]
+    assert t.engine.pending_switch is None
+
+
+def test_the_1514_cap_still_wins_over_the_five_minute_wait():
+    late = NOW.replace(hour=15, minute=12)
+    t = make([[]], [], now=late)
+    t.engine.pending_switch = PendingSwitch(**{**vars(pending()), "at": late})
+
+    run(t)
+
+    assert 120 <= sum(t.sleeps) < 150                    # 15:14까지 — 5분 상한이 아니다
+    assert t.buys == [] and len(t.notes) == 1
+
+
+def test_a_risk_rejection_without_an_order_is_not_retried():
+    rejected = BuyRecord(ticker=INVERSE, name="KODEX 인버스", outcome=BuyOutcome.FAILED, quantity=50,
+                         note="리스크 관리 규칙에 걸려 주문하지 않았습니다")
+    t = make([[sell_fill()]], [(rejected, False), bought()])
+
+    run(t)
+
+    assert len(t.buys) == 1 and t.sleeps == []
+    assert "현금으로 마감" in t.notes[0]
+
+
 def test_three_failed_buys_end_the_day_in_cash():
     t = make([[sell_fill()]], [bought(BuyOutcome.FAILED), RuntimeError("조회 실패"), bought(BuyOutcome.FAILED)])
 
