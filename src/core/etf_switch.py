@@ -42,7 +42,7 @@ class Decision:
 
 @dataclass(frozen=True)
 class Leg:
-    leg: int                   # 1 = 아침 매수, 2 = 전환 매수
+    leg: int                   # 절대 번호 — 홀수 = 첫 종목(아침·버튼 매수), 짝수 = 전환 매수
     ticker: str
     index_entry: float         # 이 종목을 산 시점의 KODEX 200 가격
     started_at: datetime
@@ -67,7 +67,12 @@ def opposite_etf(ticker: str) -> Tuple[str, str]:
 
 
 class SwitchState:
-    """오늘의 다리 상태. 날짜가 바뀌면 스스로 비운다."""
+    """오늘의 다리 상태. 날짜가 바뀌면 스스로 비운다.
+
+    다리 번호는 회차로 이어 붙인다 (2026-11-13 사용자 지시): 1회차는 1·2, 버튼으로 다시 사면
+    3·4, 그다음은 5·6… 홀수가 첫 종목, 짝수가 전환 종목이다. `switched_today`는 이름과 달리
+    "현재 회차의 전환 1회를 썼는지"를 뜻한다.
+    """
 
     def __init__(self, index_percent: float = 0.5):
         self.index_percent = index_percent
@@ -75,6 +80,11 @@ class SwitchState:
         self.switched_today = False
         self._open: Optional[Leg] = None
         self._seen: Set[int] = set()
+        self._base = 0  # 현재 회차의 다리는 _base+1(첫 종목)·_base+2(전환 종목)
+
+    @property
+    def round_base(self) -> int:
+        return self._base
 
     def _roll(self, today: date) -> None:
         if self.day != today:
@@ -82,16 +92,30 @@ class SwitchState:
             self.switched_today = False
             self._open = None
             self._seen = set()
+            self._base = 0
+
+    def start_round(self, today: date) -> None:
+        """버튼 매수 — 현재 회차가 이미 시작됐으면 새 회차를 연다 (아직이면 그대로 쓴다)."""
+        self._roll(today)
+        if self._base + 1 in self._seen:
+            self._base = ((max(self._seen) + 1) // 2) * 2
+            self.switched_today = False
+            self._open = None
+
+    def absolute(self, position: int) -> int:
+        """현재 회차 안의 위치(1 = 첫 종목, 2 = 전환 종목)를 절대 다리 번호로 바꾼다."""
+        return self._base + position
 
     def has_leg(self, leg: int, today: date) -> bool:
-        """오늘 이 번호의 다리를 이미 시작했는지 (끝났어도 True)."""
+        """오늘 이 번호(절대)의 다리를 이미 시작했는지 (끝났어도 True)."""
         return self.day == today and leg in self._seen
 
     def begin_leg(self, leg: int, ticker: str, index_entry: float, at: datetime) -> None:
+        """`leg`는 절대 다리 번호다."""
         self._roll(at.date())
         self._open = Leg(leg, ticker, index_entry, at)
         self._seen.add(leg)
-        if leg >= 2:
+        if leg % 2 == 0:
             self.switched_today = True
 
     def open_leg(self, ticker: str, today: date) -> Optional[Leg]:
@@ -110,12 +134,17 @@ class SwitchState:
         """엔진 재시작 뒤 `etf_switch_legs`의 오늘 행으로 상태를 되살린다 (스펙 5.4).
 
         전환으로 끝난 1번째 다리만 있고 2번째 다리가 없으면(매도 뒤·매수 전에 재시작) 전환을
-        쓴 것으로 본다 — 다시 사면 이중 매수 위험이 있다.
+        쓴 것으로 본다 — 다시 사면 이중 매수 위험이 있다. 현재 회차보다 큰 홀수 다리가 나오면
+        그 다리부터 새 회차다.
         """
         self._roll(today)
         for row in sorted(rows, key=lambda r: r.leg):
+            if row.leg % 2 == 1 and row.leg > self._base + 1:
+                self._base = row.leg - 1
+                self.switched_today = False
+                self._open = None
             self._seen.add(row.leg)
-            if row.leg >= 2 or row.end_reason == SWITCH_REASON:
+            if row.leg % 2 == 0 or row.end_reason == SWITCH_REASON:
                 self.switched_today = True
             if row.ended_at is None:
                 self._open = Leg(row.leg, row.ticker, row.index_entry, row.started_at)
@@ -148,5 +177,5 @@ class SwitchState:
         strength_against = strength < 100 if long else strength > 100
         if against < self.index_percent or not strength_against or net >= 0:
             return None
-        kind = SwitchKind.SWITCH if leg.leg == 1 and not self.switched_today else SwitchKind.SELL_ONLY
+        kind = SwitchKind.SWITCH if leg.leg % 2 == 1 and not self.switched_today else SwitchKind.SELL_ONLY
         return Decision(kind, against, strength, net)

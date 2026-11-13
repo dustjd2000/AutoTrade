@@ -604,9 +604,12 @@ class TradingEngine:
         기준 지수 가격을 넘기지 않으면 KODEX 200 최근 틱을, 틱이 없으면 현재가 조회를 쓴다.
         그것도 실패하면 기록하지 않는다 — 그날은 이 종목의 전환 판정이 돌지 않는다.
         같은 다리를 두 번 열지 않는다 (매수 시각 안전망이 다시 불러도 처음 값이 남는다).
+        `leg`는 현재 회차 안의 위치(1 = 첫 종목, 2 = 전환 종목)다 — 기록·상태에는 절대 번호를 쓴다.
         """
         at = at or datetime.now()
-        if self.switch_state.has_leg(leg, at.date()):
+        self.switch_state._roll(at.date())  # 새 날이면 회차 기준(_base)을 0으로 되돌린 뒤 번호를 계산한다
+        absolute = self.switch_state.absolute(leg)
+        if self.switch_state.has_leg(absolute, at.date()):
             return
         if index_entry is None:
             index_entry = self._fresh_index_price(at)
@@ -621,16 +624,25 @@ class TradingEngine:
                 ticker,
             )
             return
-        self.switch_state.begin_leg(leg, ticker, index_entry, at)
+        self.switch_state.begin_leg(absolute, ticker, index_entry, at)
         logger.info(
-            "전환 판정 시작: %d번째 종목 %s, 기준 KODEX 200 %s원", leg, ticker, f"{index_entry:,.0f}"
+            "전환 판정 시작: %d번째 종목 %s (다리 %d), 기준 KODEX 200 %s원",
+            leg, ticker, absolute, f"{index_entry:,.0f}",
         )
         if self.trade_store is None:
             return
         try:
-            self.trade_store.save_switch_leg(at.date(), leg, ticker, at, index_entry)
+            self.trade_store.save_switch_leg(at.date(), absolute, ticker, at, index_entry)
         except Exception:
             logger.warning("전환 다리 기록 실패 — 재시작하면 판정 상태가 사라집니다.", exc_info=True)
+
+    def start_switch_round(self) -> None:
+        """버튼 매수 — 장중 전환을 새 회차로 시작한다 (2026-11-13 사용자 지시). 이미 쓴 회차가 있을 때만."""
+        before = self.switch_state.round_base
+        self.switch_state.start_round(datetime.now().date())
+        after = self.switch_state.round_base
+        if after != before:
+            logger.info("버튼 매수 — 장중 전환을 새로 시작합니다 (다리 %d부터)", after + 1)
 
     def reset_for_new_day(self) -> None:
         """장 시작 전 일일 리스크 카운터를 초기화한다.
@@ -725,10 +737,12 @@ class TradingEngine:
             return
         self.switch_state.restore(rows, today)
         logger.info("전환 다리를 복원했습니다: %s", [(r.leg, r.ticker, r.end_reason) for r in rows])
-        if self.switch_state.switched_today and not any(r.leg >= 2 for r in rows):
+        # 현재 회차(버튼 매수로 여러 회차가 쌓일 수 있다)의 첫·둘째 다리만 본다
+        base = self.switch_state.round_base
+        if self.switch_state.switched_today and not any(r.leg == base + 2 for r in rows):
             # 다시 사면 이중 매수 위험이 있어 어느 경우든 오늘은 사지 않는다. 경고는 참일 때만 보낸다.
             held_etfs = sorted(t for t in self._open_tickers if t in ETF_TICKERS)
-            leg1_ended = next((r.ended_at for r in rows if r.leg == 1), None)
+            leg1_ended = next((r.ended_at for r in rows if r.leg == base + 1), None)
             if held_etfs:
                 # 2번째 다리를 샀는데 기록만 빠진 경우 — 이 종목은 전환 판정이 돌지 않는다
                 self.notify(

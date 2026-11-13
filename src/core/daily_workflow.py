@@ -512,6 +512,10 @@ class DailyWorkflow:
         # 2026-10-30에 파일만 보다가 09:13 안전망이 한 번 더 샀다 (`TradeStore.has_buy_order`)
         # 버튼(`manual`)은 누른 그대로 수행한다 — 이 검사는 스케줄 중복 실행(2026-09-01 3중 실행)을
         # 막는 장치라 사람이 직접 누른 재매수까지 막으면 안 된다 (2026-11-13 사용자 지시)
+        # 전환 매도와 전환 매수 사이에는 보유 ETF가 없어 아래 보유 검사가 이중 매수를 못 막는다
+        if manual and getattr(self.engine, "switch_pending", False):
+            logger.info("2호 전략: 장중 전환 매수를 기다리는 중이라 버튼 매수를 건너뜁니다.")
+            return
         already = (
             self._read_buy_records(today) is not None
             or self.trade_store.has_buy_order(today, etf_regime.ETF_TICKERS)
@@ -554,6 +558,8 @@ class DailyWorkflow:
         # 안전망이 재시도하지 못한다
         if record.outcome == BuyOutcome.ORDERED:
             self._write_buy_records(cash, plan.amount, [record])
+            if manual:
+                self._start_switch_round()
             self._begin_switch_leg(1, plan.ticker)
 
     def _place_etf_buy(
@@ -624,6 +630,16 @@ class DailyWorkflow:
             fn(*args)
         except Exception:
             logger.exception("주문은 나갔으나 후속 처리(%s) 실패 — 주문 흐름은 계속합니다", what)
+
+    def _start_switch_round(self) -> None:
+        """버튼 매수는 장중 전환을 새 회차로 시작한다 (2026-11-13 사용자 지시). 실패해도 매수 흐름은 계속."""
+        start = getattr(self.engine, "start_switch_round", None)
+        if start is None:
+            return
+        try:
+            start()
+        except Exception:
+            logger.exception("전환 회차 시작 실패 — 이 종목은 전환 판정이 돌지 않을 수 있습니다")
 
     def _begin_switch_leg(self, leg: int, ticker: str) -> None:
         """매수가 접수된 종목을 장중 전환 판정 대상으로 연다 (스펙 2026-11-11 3.4).
