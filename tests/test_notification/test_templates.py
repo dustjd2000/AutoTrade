@@ -517,7 +517,30 @@ def test_rule_evaluation_email_for_an_applied_change():
     )
 
     assert "자동 변경" in subject
-    assert "ETF_FLIP_ENABLED: 1 → 0" in body
+    assert "방향 뒤집기: 켬 → 끔" in body
+    assert "ETF_FLIP_ENABLED" not in body
+
+
+def test_rule_evaluation_email_labels_every_applied_key():
+    row = _RuleEvaluationRow(day=date(2026, 11, 27), status="evaluated",
+                             current_rule=_Rule(0.0, True, "09:10", 2.0).to_json(),
+                             best_rule=_Rule(0.2, True, "09:20", 1.5).to_json(),
+                             select_current=0.0, select_best=0.2, test_current=0.0, test_best=0.1,
+                             beats=True, positive=True, applied=True, note="자동 적용")
+    applied = {
+        "ETF_SIGNAL_BAND_PERCENT": ("0", "0.2"),
+        "DECISION_TIME": ("09:10", "09:20"),
+        "BUY_FALLBACK_TIME": ("09:13", "09:23"),
+        "STOP_LOSS_PERCENT": ("2", "1.5"),
+    }
+    _, body = templates.rule_evaluation_email(row, streak=4, cooldown=0, applied_values=applied)
+
+    assert "신호 문턱: 0% → 0.2%" in body
+    assert "결정 시각: 09:10 → 09:20" in body
+    assert "매수 시각(안전망): 09:13 → 09:23" in body
+    assert "손절: 2% → 1.5%" in body
+    for key in applied:
+        assert key not in body
 
 
 def test_rule_evaluation_email_when_not_evaluated():

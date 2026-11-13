@@ -700,8 +700,9 @@ class DailyWorkflow:
         since = self.etf_start_date.isoformat() if self.etf_start_date else "처음"
         return (
             f"{since}부터 {len(returns)}건 누적 순수익률 {total:+.2f}%가 "
-            f"한도 -{self.etf_kill_loss_percent:g}%에 닿았습니다. 다시 시작하려면 .env의 "
-            f"ETF_START_DATE 또는 ETF_KILL_LOSS_PERCENT를 바꾸고 엔진을 재시작하세요."
+            f"한도 -{self.etf_kill_loss_percent:g}%에 닿아 매수를 멈췄습니다. 다시 시작하려면 .env에서 "
+            f"집계 시작일(ETF_START_DATE)을 오늘로 바꾸거나 누적 손실 한도(ETF_KILL_LOSS_PERCENT)를 "
+            f"늘린 뒤 엔진을 재시작하세요."
         )
 
     def _send_etf_mail(

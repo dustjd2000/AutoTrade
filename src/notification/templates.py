@@ -636,6 +636,24 @@ def _rule_text(rule_json: str) -> str:
     )
 
 
+# 규칙 자동 적용이 바꾸는 `.env` 키 → 메일에 쓸 한글 이름과 단위 (`rule_tuning._env_values`와 같은 키)
+_ENV_KEY_LABELS: Dict[str, tuple] = {
+    "ETF_SIGNAL_BAND_PERCENT": ("신호 문턱", "%"),
+    "ETF_FLIP_ENABLED": ("방향 뒤집기", ""),
+    "DECISION_TIME": ("결정 시각", ""),
+    "BUY_FALLBACK_TIME": ("매수 시각(안전망)", ""),
+    "STOP_LOSS_PERCENT": ("손절", "%"),
+}
+
+
+def _env_change_line(key: str, old: str, new: str) -> str:
+    """'ETF_FLIP_ENABLED', '0', '1' → ' - 방향 뒤집기: 끔 → 켬'. 모르는 키는 이름 그대로."""
+    label, unit = _ENV_KEY_LABELS.get(key, (key, ""))
+    if key == "ETF_FLIP_ENABLED":
+        old, new = ("켬" if v == "1" else "끔" for v in (old, new))
+    return f" - {label}: {old}{unit} → {new}{unit}"
+
+
 def _daily_pct(value: Optional[float]) -> str:
     return "-" if value is None else f"{value:+.3f}%"
 
@@ -672,8 +690,8 @@ def rule_evaluation_email(
         f" 4. 휴지 기간: {'충족' if cooldown == 0 else f'{cooldown}회 남음'}",
     ])
     if applied_values:
-        lines.extend(["", "바꾼 값 (.env)"])
-        lines.extend(f" - {key}: {old} → {new}" for key, (old, new) in applied_values.items())
+        lines.extend(["", "바꾼 값"])
+        lines.extend(_env_change_line(key, old, new) for key, (old, new) in applied_values.items())
     if row.note:
         lines.extend(["", f"비고: {row.note}"])
     lines.extend(["", "※ 평가는 손절·익절·고점 반납·15:15 청산으로 한다 — AI 매도 판단은 재현하지 않는다."])

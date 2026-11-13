@@ -101,7 +101,7 @@ def test_does_not_apply_when_switched_off(tmp_path):
     tuning, written = make(tmp_path, good, settings=FakeSettings(rule_auto_apply_enabled=False))
     run_weeks(tuning, 4)
     assert written == []
-    assert "자동 적용 꺼짐" in tuning.trade_store.rule_evaluations()[-1].note
+    assert "자동 적용이 꺼져" in tuning.trade_store.rule_evaluations()[-1].note
 
 
 def test_postpones_while_holding(tmp_path):

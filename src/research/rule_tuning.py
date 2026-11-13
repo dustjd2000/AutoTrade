@@ -177,7 +177,7 @@ class RuleTuning:
     def _apply(self, best: Rule, current: Rule) -> Tuple[Optional[Dict[str, Tuple[str, str]]], str]:
         """`.env`를 바꾼다. 바꾼 값 {키: (이전, 이후)}와 비고를 돌려준다. 못 바꿨으면 (None, 사유)."""
         if not self.settings.rule_auto_apply_enabled:
-            return None, "자동 적용 꺼짐 (RULE_AUTO_APPLY_ENABLED=0)"
+            return None, "자동 적용이 꺼져 있어 바꾸지 않음"
         try:
             holding = self.open_tickers()
         except Exception:
