@@ -312,6 +312,30 @@ def test_button_buys_again_after_the_morning_position_was_sold():
     assert len(t.order_client.orders) == 2
 
 
+def test_button_buy_starts_a_new_switch_round_but_the_schedule_does_not():
+    t = make_workflow(candles(0.5))
+    rounds = []
+    t.workflow.engine.start_switch_round = lambda: rounds.append(len(t.legs))
+    t.workflow.recommend_and_notify(today=TODAY)
+
+    t.workflow._execute_etf_buy(TODAY)                 # 아침 — 회차 시작 없음
+    t.workflow._execute_etf_buy(TODAY, manual=True)    # 버튼 — 다리를 열기 전에 회차 시작
+
+    assert rounds == [1]
+    assert t.legs == [(1, LONG_ETF[0]), (1, LONG_ETF[0])]
+
+
+def test_button_does_not_buy_while_a_switch_buy_is_pending():
+    """전환 매도와 전환 매수 사이에는 보유 ETF가 없다 — 보유 검사로는 이중 매수를 못 막는다."""
+    t = make_workflow(candles(0.5))
+    t.workflow.engine.switch_pending = True
+    t.workflow.recommend_and_notify(today=TODAY)
+
+    t.workflow._execute_etf_buy(TODAY, manual=True)
+
+    assert t.order_client.orders == []
+
+
 def test_button_still_does_not_buy_while_an_etf_is_held():
     held = {LONG_ETF[0]: SimpleNamespace(quantity=10)}
     t = make_workflow(candles(0.5), get_positions=lambda: held)

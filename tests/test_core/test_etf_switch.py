@@ -120,6 +120,62 @@ def test_restore_after_a_switch_sell_without_a_buy_stays_in_cash():
     assert s.switched_today is True
 
 
+# ── 버튼 재매수 회차 (2026-11-13) ──
+def used_round_one():
+    """오늘처럼 1·2를 다 쓴 상태 — 1은 전환으로, 2는 AI 매도로 끝났다."""
+    s = state()
+    s.end_leg(switched=True)
+    s.begin_leg(2, INVERSE, 9940.0, NOW)
+    s.end_leg()
+    return s
+
+
+def test_start_round_opens_legs_three_and_four_after_round_one():
+    s = used_round_one()
+
+    s.start_round(NOW.date())
+
+    assert s.absolute(1) == 3 and s.switched_today is False
+    s.begin_leg(3, LONG, 10000.0, NOW)
+    assert decide(s).kind is SwitchKind.SWITCH
+    s.end_leg(switched=True)
+    s.begin_leg(4, INVERSE, 9940.0, NOW)
+    assert decide(s, ticker=INVERSE, index_now=10060.0, strength=130.0).kind is SwitchKind.SELL_ONLY
+
+    s.end_leg()
+    s.start_round(NOW.date())
+    assert s.absolute(1) == 5
+
+
+def test_start_round_after_a_first_leg_sold_without_a_switch():
+    s = state()
+    s.end_leg()              # 손절·AI 매도로 끝남 — 전환 없음
+
+    s.start_round(NOW.date())
+
+    assert s.absolute(1) == 3
+
+
+def test_start_round_before_any_leg_today_changes_nothing():
+    s = SwitchState(0.5)
+    s.start_round(NOW.date())
+    assert s.absolute(1) == 1
+
+
+def test_restore_picks_up_the_latest_round():
+    s = SwitchState(0.5)
+    rows = [row(1, LONG, ended=True, reason="etf_switch"), row(2, INVERSE, ended=True, reason="ai_judgment"),
+            row(3, LONG)]
+    s.restore(rows, NOW.date())
+
+    assert s.round_base == 2 and s.switched_today is False
+    assert s.open_leg(LONG, NOW.date()).leg == 3
+
+    s2 = SwitchState(0.5)
+    s2.restore(rows[:2] + [row(3, LONG, ended=True, reason="etf_switch"), row(4, INVERSE)], NOW.date())
+    assert s2.switched_today is True and s2.open_leg(INVERSE, NOW.date()).leg == 4
+
+
 def test_opposite_etf():
     assert opposite_etf(LONG)[0] == INVERSE
     assert opposite_etf(INVERSE)[0] == LONG

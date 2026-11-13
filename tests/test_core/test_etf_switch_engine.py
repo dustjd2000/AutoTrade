@@ -275,6 +275,23 @@ def test_restart_between_the_switch_sell_and_buy_stays_in_cash_and_warns(tmp_pat
     assert len(alerts) == 1 and "재시작" in alerts[0]
 
 
+def test_button_round_records_leg_three_and_survives_a_restart(tmp_path):
+    """2026-11-13 — 1·2를 다 쓴 날 버튼으로 다시 사면 3번 다리로 새로 판정한다."""
+    engine, _, _, _ = make_engine({LONG: held(LONG, 10000.0)}, tmp_path)
+    engine.begin_switch_leg(1, LONG, index_entry=10000.0, at=BOUGHT)
+    engine.switch_state.end_leg(switched=True)
+    engine.begin_switch_leg(2, INVERSE, index_entry=9940.0, at=BOUGHT)
+    engine.switch_state.end_leg()
+
+    engine.start_switch_round()
+    engine.begin_switch_leg(1, LONG, index_entry=10000.0, at=BOUGHT)
+
+    assert [row.leg for row in legs(engine)] == [1, 2, 3]
+    restarted, _, _, _ = make_engine({LONG: held(LONG, 10000.0)}, tmp_path)
+    assert restarted.switch_state.open_leg(LONG, NOW.date()).leg == 3
+    assert restarted.switch_state.switched_today is False
+
+
 def test_begin_leg_is_recorded_once(tmp_path):
     engine, _, _, _ = make_engine({LONG: held(LONG, 10000.0)}, tmp_path)
     engine.begin_switch_leg(1, LONG, index_entry=10000.0, at=BOUGHT)
