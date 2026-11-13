@@ -389,9 +389,12 @@ class DailyWorkflow:
         (`actions.manual_steps`의 'recommend')."""
         self._recommend_etf(today or date.today())
 
-    def execute_buys(self) -> None:
-        """매수(버튼 ②, 매수 시각 안전망) — 정한 ETF를 시장가로 즉시 산다 (`_execute_etf_buy`)."""
-        self._execute_etf_buy(date.today())
+    def execute_buys(self, manual: bool = False) -> None:
+        """매수(버튼 ②, 매수 시각 안전망) — 정한 ETF를 시장가로 즉시 산다 (`_execute_etf_buy`).
+
+        `manual`(UI 버튼)이면 "오늘 이미 주문함" 검사를 건너뛴다. ETF 보유 중이면 여전히 사지 않는다.
+        """
+        self._execute_etf_buy(date.today(), manual=manual)
 
     def _retry_note(self) -> str:
         """조회 실패 알림 끝에 붙일 재시도 안내 — 오늘 아직 주문하지 않았으면 안전망이 다시 산다."""
@@ -494,7 +497,7 @@ class DailyWorkflow:
         )
         self._send_etf_mail(today, signal, recommendation, None)
 
-    def _execute_etf_buy(self, today: date) -> None:
+    def _execute_etf_buy(self, today: date, manual: bool = False) -> None:
         """2호 전략 매수 — 결정한 ETF를 **시장가로 즉시** 산다 (PRD 5.5-C '매수', 확정 2026-10-23).
 
         추천 단계 직후(같은 실행)와 매수 시각(안전망) 두 번 불린다. 오늘 이미 주문했으면
@@ -507,12 +510,17 @@ class DailyWorkflow:
         """
         # 매수 기록 파일은 결과 메일 발송 때 지워지므로 DB 매수 기록도 함께 본다 —
         # 2026-10-30에 파일만 보다가 09:13 안전망이 한 번 더 샀다 (`TradeStore.has_buy_order`)
-        if (
+        # 버튼(`manual`)은 누른 그대로 수행한다 — 이 검사는 스케줄 중복 실행(2026-09-01 3중 실행)을
+        # 막는 장치라 사람이 직접 누른 재매수까지 막으면 안 된다 (2026-11-13 사용자 지시)
+        already = (
             self._read_buy_records(today) is not None
             or self.trade_store.has_buy_order(today, etf_regime.ETF_TICKERS)
-        ):
+        )
+        if already and not manual:
             logger.info("2호 전략: 오늘 이미 매수 주문을 냈습니다 — 건너뜁니다.")
             return
+        if already:
+            logger.info("2호 전략: 오늘 이미 매수 주문을 냈지만 버튼 실행이라 다시 삽니다.")
         # 모호한 실패로 거부 처리된 주문은 위 기록에 안 잡히지만 실제로는 체결됐을 수 있다 —
         # 실제 보유를 한 번 더 본다. 잔고를 못 읽으면 이중 매수 위험이 더 커서 사지 않는다.
         try:

@@ -299,6 +299,29 @@ def test_buy_is_not_repeated_after_the_result_mail_cleared_the_record_file():
     assert len(t.order_client.orders) == 1
 
 
+def test_button_buys_again_after_the_morning_position_was_sold():
+    """2026-11-13 — 아침 매수를 다 판 뒤 일괄 수행을 눌렀는데 '오늘 이미 주문함'으로 건너뛰었다.
+    버튼은 누른 그대로 수행한다. 스케줄(manual=False)은 여전히 건너뛴다."""
+    t = make_workflow(candles(0.5))
+    t.workflow.recommend_and_notify(today=TODAY)
+    t.workflow._execute_etf_buy(TODAY)
+
+    t.workflow._execute_etf_buy(TODAY)                 # 안전망
+    t.workflow._execute_etf_buy(TODAY, manual=True)    # 버튼
+
+    assert len(t.order_client.orders) == 2
+
+
+def test_button_still_does_not_buy_while_an_etf_is_held():
+    held = {LONG_ETF[0]: SimpleNamespace(quantity=10)}
+    t = make_workflow(candles(0.5), get_positions=lambda: held)
+    t.workflow.recommend_and_notify(today=TODAY)
+
+    t.workflow._execute_etf_buy(TODAY, manual=True)
+
+    assert t.order_client.orders == []
+
+
 def test_buy_is_skipped_when_an_etf_is_already_held():
     """매수 주문이 모호하게 실패해 REJECTED로 기록돼도 실제로는 체결됐을 수 있다 — 보유를 본다."""
     held = {LONG_ETF[0]: SimpleNamespace(quantity=10)}

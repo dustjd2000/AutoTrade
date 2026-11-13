@@ -178,7 +178,8 @@ class EngineThread(QThread):
             logger.warning("엔진이 실행 중이 아니어서 즉시 실행할 수 없습니다.")
             return False
 
-        loop.call_soon_threadsafe(runtime.runner.submit, action, tuple(tickers))
+        # 버튼에서 온 실행이다 — 매수 단계가 "오늘 이미 주문함" 검사를 건너뛴다 (`manual_steps`)
+        loop.call_soon_threadsafe(runtime.runner.submit, action, tuple(tickers), True)
         return True
 
     def _await_action(self) -> None:

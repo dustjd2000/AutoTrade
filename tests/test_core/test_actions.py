@@ -54,6 +54,20 @@ def test_scheduled_action_runs_matching_step(action, expected):
     assert calls == expected
 
 
+@pytest.mark.parametrize("action", ["recommend", "buy", "full"])
+def test_button_buy_steps_pass_manual(action):
+    calls = []
+    runtime = make_runtime(calls)
+    runtime.workflow.execute_buys = lambda manual=False: calls.append(f"buy:{manual}")
+
+    for step in manual_steps(runtime, action, manual=True):
+        step.run()
+    for step in manual_steps(runtime, action):
+        step.run()
+
+    assert [c for c in calls if c.startswith("buy")] == ["buy:True", "buy:False"]
+
+
 def test_scheduled_actions_are_not_buttons():
     """버튼 그리드에 뜨면 안 된다 — 사용자에게 노출하지 않는 내부 액션이다."""
     assert not (set(SCHEDULED_ACTIONS) & set(MANUAL_ACTIONS))

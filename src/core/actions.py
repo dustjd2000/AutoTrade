@@ -98,13 +98,23 @@ class ManualStep:
     touches_orders: bool = False
 
 
-def manual_steps(runtime, action: str, tickers: Iterable[str] = ()) -> List[ManualStep]:
+def manual_steps(
+    runtime, action: str, tickers: Iterable[str] = (), manual: bool = False
+) -> List[ManualStep]:
     """액션 이름을 실행 단계 목록으로 바꾼다. '전체'는 하루 흐름의 진입 단계를 순서대로 이어 붙인다.
 
     `tickers`는 '선택 매도'와 '선택 삭제'만 쓴다 — 다른 액션은 대상이 잔고 전체이거나
-    추천 결과로 정해진다.
+    추천 결과로 정해진다. `manual`(UI 버튼)이면 매수 단계가 "오늘 이미 주문함" 검사를 건너뛴다 —
+    버튼은 누른 그대로 수행한다 (2026-11-13 사용자 지시). 같은 이름의 스케줄(09:05·안전망)은
+    하루 한 번 검사를 그대로 받는다.
     """
     selected = tuple(tickers)
+    # 아래 지연 평가 원칙대로 runtime.workflow는 매수 단계가 실제로 돌 때 읽는다
+    def execute_buys() -> None:
+        if manual:
+            runtime.workflow.execute_buys(manual=True)
+        else:
+            runtime.workflow.execute_buys()
     # 값을 람다로 감싸 요청된 액션만 지연 평가한다 — 딕셔너리를 즉시 구성하면 요청하지
     # 않은 액션의 속성(예: 스케줄 전용 액션이 쓰는 runtime.engine.reset_for_new_day)까지
     # 미리 참조해, 그 속성이 없는 호출자(예: 스케줄 전용 액션을 모르는 옛 테스트의 가짜
@@ -115,10 +125,10 @@ def manual_steps(runtime, action: str, tickers: Iterable[str] = ()) -> List[Manu
     step_factories: Dict[str, Callable[[], List[ManualStep]]] = {
         "recommend": lambda: [
             ManualStep(MANUAL_ACTIONS["recommend"], runtime.workflow.recommend_and_notify),
-            ManualStep(MANUAL_ACTIONS["buy"], runtime.workflow.execute_buys, touches_orders=True),
+            ManualStep(MANUAL_ACTIONS["buy"], execute_buys, touches_orders=True),
         ],
         "buy": lambda: [
-            ManualStep(MANUAL_ACTIONS["buy"], runtime.workflow.execute_buys, touches_orders=True)
+            ManualStep(MANUAL_ACTIONS["buy"], execute_buys, touches_orders=True)
         ],
         "cancel_unfilled": lambda: [
             ManualStep(
@@ -228,10 +238,11 @@ class ActionRunner:
         self.on_started: Optional[Callable[[str], None]] = None
         self.on_finished: Optional[Callable[[str, bool, str], None]] = None
 
-    def submit(self, action: str, tickers: Iterable[str] = ()) -> bool:
+    def submit(self, action: str, tickers: Iterable[str] = (), manual: bool = False) -> bool:
         """실행을 큐에 넣는다. 접수했으면 True.
 
-        모르는 액션이거나 같은 액션이 이미 대기·실행 중이면 False다.
+        모르는 액션이거나 같은 액션이 이미 대기·실행 중이면 False다. `manual`은 UI 버튼에서 온
+        실행이다 — 매수 단계가 "오늘 이미 주문함" 검사를 건너뛴다 (`manual_steps` 참고).
         """
         if action not in ACTION_LABELS:
             logger.error("알 수 없는 실행 액션: %s", action)
@@ -241,7 +252,7 @@ class ActionRunner:
             return False
 
         self._pending.add(action)
-        self._queue.append((action, tuple(tickers)))
+        self._queue.append((action, tuple(tickers), manual))
         self.busy = True
         self._idle.clear()
         self._wakeup.set()
@@ -258,9 +269,9 @@ class ActionRunner:
                 self._wakeup.clear()
                 continue
 
-            action, tickers = self._queue.pop(0)
+            action, tickers, manual = self._queue.pop(0)
             try:
-                await self._execute(action, tickers)
+                await self._execute(action, tickers, manual)
             finally:
                 # 실행이 끝난 뒤에 풀어야 도는 중에 같은 액션이 또 들어오지 않는다
                 self._pending.discard(action)
@@ -269,9 +280,9 @@ class ActionRunner:
         """큐가 비고 실행 중인 것이 없을 때까지 기다린다 (정지 전에 쓴다)."""
         await self._idle.wait()
 
-    async def _execute(self, action: str, tickers: tuple) -> None:
+    async def _execute(self, action: str, tickers: tuple, manual: bool = False) -> None:
         try:
-            steps = manual_steps(self._runtime, action, tickers)
+            steps = manual_steps(self._runtime, action, tickers, manual=manual)
         except ValueError:
             logger.error("알 수 없는 실행 액션: %s", action)
             return

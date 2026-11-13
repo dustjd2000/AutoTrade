@@ -79,7 +79,7 @@ pytest tests/test_strategy/test_etf_regime.py -k name    # 테스트 단위 (-k 
   부른다. 직전 20거래일 KODEX 200 장중(시가→종가) 수익률 평균이 0 이상이면 KODEX 200
   (069500), 음수이면 KODEX 인버스(114800)를 1종목, 투입 비율만큼 **시장가**로 산다
   (시장가 증거금이 상한가로 잡혀 수량은 `MARKET_BUY_MARGIN`=1.3으로 나눈 예수금까지). 쉬는 구간은
-  없다(2026-10-29) — 신호를 못 구할 때(일봉 20개 미만)만 쉰다. 문턱(`ETF_SIGNAL_BAND_PERCENT`)·뒤집기(`ETF_FLIP_ENABLED`)·결정 시각·손절은 금요일 규칙 자동 평가가 `.env`를 바꿀 수 있다(조건은 스펙 2026-10-29 4.2, 끄려면 `RULE_AUTO_APPLY_ENABLED=0`). 결정은 메모리(`_recommendations`)에 있고, 매수 기록 파일로 같은 날 중복 매수를 막는다.
+  없다(2026-10-29) — 신호를 못 구할 때(일봉 20개 미만)만 쉰다. 문턱(`ETF_SIGNAL_BAND_PERCENT`)·뒤집기(`ETF_FLIP_ENABLED`)·결정 시각·손절은 금요일 규칙 자동 평가가 `.env`를 바꿀 수 있다(조건은 스펙 2026-10-29 4.2, 끄려면 `RULE_AUTO_APPLY_ENABLED=0`). 결정은 메모리(`_recommendations`)에 있고, 매수 기록 파일로 같은 날 중복 매수를 막는다 — 단 UI 버튼(①·②·일괄 수행)은 이 검사를 건너뛰고 누른 그대로 산다(2026-11-13 사용자 지시, `ActionRunner.submit(manual=True)`). ETF를 보유 중이면 버튼도 사지 않는다.
   ETF 매매 건별 순수익률 누적합이 `-ETF_KILL_LOSS_PERCENT`(기본 5)에 닿으면 매수를 멈추고, 풀려면
   사람이 `ETF_START_DATE`나 한도를 바꾼다. 근거는 2024년 이후 국면뿐이다(27년 장기로는 손실) —
   1호 방식이 1분봉 검증에서 어떤 조정으로도 음수였던 것이 도입 계기다(PRD 5.5-B 추세 추종 철회 항목).
