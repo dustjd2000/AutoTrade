@@ -333,3 +333,22 @@ def test_etf_switch_reads_env(monkeypatch):
 def test_etf_switch_values_must_be_positive(monkeypatch, key):
     with pytest.raises(ValueError, match=key):
         _strategy_settings(monkeypatch, **{key: "0"}).validate()
+
+
+# ── 저장 전 검사: 키움 키 없이 조합만 본다 ─────────────────────────
+def test_validate_without_credentials_passes_with_empty_keys(monkeypatch):
+    monkeypatch.delenv("KIWOOM_APP_KEY", raising=False)
+    monkeypatch.delenv("KIWOOM_APP_SECRET", raising=False)
+    monkeypatch.setenv("TRADE_MODE", "paper")
+
+    Settings().validate(require_credentials=False)
+    with pytest.raises(ValueError, match="KIWOOM_APP_KEY"):
+        Settings().validate()
+
+
+def test_validate_without_credentials_still_checks_the_rest(monkeypatch):
+    monkeypatch.delenv("KIWOOM_APP_KEY", raising=False)
+    monkeypatch.setenv("ETF_START_DATE", "2026/11/13")
+
+    with pytest.raises(ValueError, match="손실 집계 시작일"):
+        Settings().validate(require_credentials=False)

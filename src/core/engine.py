@@ -829,7 +829,10 @@ class TradingEngine:
         emergency_action == "hold" (기본값): 포지션은 그대로 두고 신규 매매만 정지
         """
         logger.error("Fatal error encountered (%s). Emergency action: %s", reason, self.emergency_action)
-        self.notify(f"[긴급] 장애 발생: {reason} (대응: {self.emergency_action})")
+        action_label = {"hold": "보유 유지", "close_all": "전량 청산"}.get(
+            self.emergency_action, self.emergency_action
+        )
+        self.notify(f"[긴급] 장애 발생: {reason} (대응: {action_label})")
         if self.emergency_action == "close_all":
             self.force_close_all_positions(reason=f"emergency:{reason}")
         self.stop()

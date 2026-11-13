@@ -89,6 +89,9 @@ class LoadDouble:
         self._etf_switch_enabled = FakeCheckbox(True)
         self._ai_exit_enabled = FakeCheckbox(True)
         self._stop_loss_enabled = FakeCheckbox(True)
+        # 인덱스를 비교하는 코드가 닿는 위젯은 MagicMock으로는 안 된다
+        self._emergency_action = SimpleNamespace(findData=lambda data: 0, setCurrentIndex=lambda i: None)
+        self._decision_time = self._buy_fallback_time = SimpleNamespace(setTime=lambda t: None)
 
     def __getattr__(self, name):
         mock = MagicMock()

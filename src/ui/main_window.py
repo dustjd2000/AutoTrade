@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+import os
+from datetime import date
 from html import escape
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QDoubleValidator, QFont, QIcon, QPalette
+from PyQt6.QtCore import Qt, QThread, QTime, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QDoubleValidator, QFont, QIcon, QIntValidator, QPalette
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -31,6 +33,7 @@ from PyQt6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -40,6 +43,8 @@ from dotenv import load_dotenv
 from config.settings import (
     DEFAULT_BUY_TIME_HHMM,
     DEFAULT_RECOMMEND_TIME_HHMM,
+    DEFAULT_TUNE_SKIP_MONTHLY_RETURN_PERCENT,
+    TUNE_SKIP_MONTHLY_RETURN_CHOICES,
     Settings,
     parse_flag,
 )
@@ -91,6 +96,10 @@ HOLDINGS_REFRESH_MS = 2000
 # AI 판단 단계(%p) 선택지 — `.env`에 쓰는 문자열 그대로다 (`AI_EXIT_STEP_PERCENT`)
 AI_EXIT_STEP_CHOICES = tuple(f"{tenths / 10:g}" for tenths in range(5, 51, 5))   # 0.5 ~ 5, 0.5 단위
 DEFAULT_AI_EXIT_STEP = "0.5"
+# 이메일·AI 모델 칸의 기본값 — `Settings`의 기본값과 같아야 한다
+DEFAULT_SMTP_HOST = "smtp.gmail.com"
+DEFAULT_SMTP_PORT = "587"
+DEFAULT_LLM_MODEL = "claude-sonnet-5"
 # 0번 열은 '선택 매도' 대상 체크 — 표가 NoEditTriggers라 셀 체크박스는 클릭으로 토글되지
 # 않는다(실측). 체크 표시만 아이템으로 그리고 토글은 cellClicked에서 직접 처리한다.
 HOLDINGS_COLUMNS = ("선택", "종목", "수량", "평단", "현재가", "순손익")
@@ -184,6 +193,27 @@ def _parse_trail_giveback(text: str) -> float:
         return max(float(text.strip().replace(",", ".") or 0.25), 0.0)
     except ValueError:
         return 0.0
+
+
+def _validate_env_values(merged: dict) -> Optional[str]:
+    """저장하려는 `.env` 전체 값으로 `Settings`를 만들어 검사한다. 문제가 없으면 None, 있으면 메시지.
+
+    `Settings`는 `os.environ`에서 읽으므로 잠시 덮어쓰고, 끝나면 원래대로 되돌린다
+    (원래 없던 키는 다시 지운다). 키움 키가 비어 있어도 저장은 되어야 해서 키 검사는 건너뛴다.
+    """
+    saved = {key: os.environ.get(key) for key in merged}
+    try:
+        os.environ.update({key: str(value) for key, value in merged.items()})
+        Settings().validate(require_credentials=False)
+        return None
+    except Exception as e:
+        return str(e)
+    finally:
+        for key, old in saved.items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
 
 
 def _with_toggle(field: QLineEdit, *toggles: QCheckBox) -> QWidget:
@@ -499,11 +529,14 @@ class MainWindow(QMainWindow):
         self._anthropic_key = QLineEdit()
         self._anthropic_key.setPlaceholderText("console.anthropic.com 발급 — 없으면 AI 매도 판단이 실패한다")
         self._anthropic_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._llm_model = QLineEdit()
+        self._llm_model.setPlaceholderText(DEFAULT_LLM_MODEL)
 
         api_form.addRow("Kiwoom App Key", self._app_key)
         api_form.addRow("Kiwoom App Secret", self._app_secret)
         api_form.addRow("Kiwoom 계좌번호", self._account)
         api_form.addRow("Anthropic Key", self._anthropic_key)
+        api_form.addRow("AI 모델", self._llm_model)
         root.addWidget(api_box)
 
         # 매매 모드
@@ -544,9 +577,8 @@ class MainWindow(QMainWindow):
         fund_form.setSpacing(8)
         fund_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # 결정·매수 안전망 시각은 `.env`로만 바꾼다 — 여기서는 현재 값을 보여주기만 한다.
-        # 고를 수 있게 두면 개장 전 결정처럼 성립하지 않는 조합이 UI에서 만들어진다.
-        self._schedule_times = QLabel()
+        # 결정·매수 안전망 시각은 아래 "세부 설정"에서 고른다 — 여기서는 고정 시각만 알린다.
+        self._schedule_times = QLabel("매수 결과 메일 10:10  ·  청산 15:15")
         self._schedule_times.setWordWrap(True)
 
         self._investable_ratio = _NoScrollComboBox()
@@ -561,7 +593,8 @@ class MainWindow(QMainWindow):
         strategy_hint = QLabel(
             "직전 20거래일 KODEX 200 장중 평균이 0 이상이면 KODEX 200, 음수이면 "
             "KODEX 인버스를 결정 시각에 시장가로 삽니다. 매일 둘 중 하나를 삽니다. "
-            "ETF 매매 누적 순수익률이 -ETF_KILL_LOSS_PERCENT에 닿으면 매수가 자동으로 멈춥니다(.env)."
+            "ETF 매매 누적 순수익률이 아래 '누적 손실 한도'에 닿으면 매수가 자동으로 멈춥니다. "
+            "다시 사게 하려면 '손실 집계 시작일'을 오늘로 바꾸거나 한도를 늘리고 설정 저장."
         )
         strategy_hint.setWordWrap(True)
         strategy_hint.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
@@ -671,7 +704,9 @@ class MainWindow(QMainWindow):
 
         root.addLayout(fund_risk_row)
 
-        # 이메일 알림 — 발송/수신 주소만 UI에서 관리하고, SMTP 서버·포트·비밀번호는 .env로만 다룬다
+        root.addWidget(self._build_detail_box())
+
+        # 이메일 알림 — 주소와 SMTP 서버·포트·비밀번호까지 UI에서 관리한다 (2026-11-13)
         email_box = QGroupBox("이메일 알림")
         email_form = QFormLayout(email_box)
         email_form.setSpacing(8)
@@ -682,8 +717,20 @@ class MainWindow(QMainWindow):
         self._email_to = QLineEdit()
         self._email_to.setPlaceholderText("받는 메일 주소")
 
+        self._smtp_host = QLineEdit()
+        self._smtp_host.setPlaceholderText(DEFAULT_SMTP_HOST)
+        self._smtp_port = QLineEdit()
+        self._smtp_port.setValidator(QIntValidator(1, 65535))
+        self._smtp_port.setPlaceholderText(DEFAULT_SMTP_PORT)
+        self._smtp_password = QLineEdit()
+        self._smtp_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self._smtp_password.setPlaceholderText("Gmail은 앱 비밀번호")
+
         email_form.addRow("발송 메일", self._email_from)
         email_form.addRow("수신 메일", self._email_to)
+        email_form.addRow("SMTP 서버", self._smtp_host)
+        email_form.addRow("SMTP 포트", self._smtp_port)
+        email_form.addRow("SMTP 비밀번호(앱 비밀번호)", self._smtp_password)
         root.addWidget(email_box)
 
         # 설정 저장 버튼
@@ -697,6 +744,85 @@ class MainWindow(QMainWindow):
 
         root.addStretch()
         return page
+
+    def _build_detail_box(self) -> QGroupBox:
+        """세부 설정 — 예전에는 `.env`로만 바꾸던 값들 (2026-11-13, 사용자 지시).
+
+        '설정 저장'을 눌러야 반영되고, 바뀌었으면 엔진이 재시작된다. 기본값은 `Settings`와 같다.
+        """
+        box = QGroupBox("세부 설정")
+        form = QFormLayout(box)
+        form.setSpacing(8)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        def number_edit(default: str, decimals: int = 2, maximum: float = 100.0) -> QLineEdit:
+            edit = QLineEdit()
+            edit.setValidator(QDoubleValidator(0.0, maximum, decimals))
+            edit.setPlaceholderText(default)
+            return edit
+
+        def time_edit(hhmm: str) -> QTimeEdit:
+            edit = QTimeEdit(QTime.fromString(hhmm, "HH:mm"))
+            edit.setDisplayFormat("HH:mm")
+            return edit
+
+        form.addRow(_section_label("2호 전략"))
+        self._decision_time = time_edit(DEFAULT_RECOMMEND_TIME_HHMM)
+        self._buy_fallback_time = time_edit(DEFAULT_BUY_TIME_HHMM)
+        self._etf_signal_band = number_edit("0")
+        self._etf_flip_enabled = QCheckBox("장중 방향 뒤집기")
+        self._etf_flip_enabled.setChecked(True)
+        self._rule_auto_apply = QCheckBox("금요일 규칙 자동 적용")
+        self._rule_auto_apply.setChecked(True)
+        self._etf_start_date = QLineEdit()
+        self._etf_start_date.setPlaceholderText("YYYY-MM-DD (비우면 처음부터)")
+        btn_today = QPushButton("오늘")
+        btn_today.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_today.setStyleSheet(
+            f"background: {COLOR_SURFACE}; color: {COLOR_TEXT}; border: 1px solid {COLOR_BORDER};"
+            " padding: 4px 12px;"
+        )
+        btn_today.clicked.connect(lambda: self._etf_start_date.setText(date.today().isoformat()))
+        self._etf_kill_loss = number_edit("5")
+        form.addRow("결정·시장가 매수 시각", self._decision_time)
+        form.addRow("매수 안전망 시각", self._buy_fallback_time)
+        form.addRow("신호 문턱 (%)", self._etf_signal_band)
+        form.addRow("", self._etf_flip_enabled)
+        form.addRow("", self._rule_auto_apply)
+        form.addRow("손실 집계 시작일", _with_toggle(self._etf_start_date, btn_today))
+        form.addRow("누적 손실 한도 (%)", self._etf_kill_loss)
+
+        form.addRow(_section_label("장중 전환"))
+        self._switch_index_percent = number_edit("0.5")
+        self._switch_strength_minutes = number_edit("5")
+        form.addRow("지수 반대 이동 문턱 (%)", self._switch_index_percent)
+        form.addRow("체결강도 기간 (분)", self._switch_strength_minutes)
+
+        form.addRow(_section_label("AI 매도 판단"))
+        self._ai_exit_drawdown = number_edit("1")
+        self._tune_skip_percent = _NoScrollComboBox()
+        for choice in TUNE_SKIP_MONTHLY_RETURN_CHOICES:
+            self._tune_skip_percent.addItem(f"{choice:g}", f"{choice:g}")
+        self._tune_skip_percent.setCurrentIndex(
+            self._tune_skip_percent.findData(f"{DEFAULT_TUNE_SKIP_MONTHLY_RETURN_PERCENT:g}")
+        )
+        form.addRow("반납 수치를 보여 줄 최소 고점 (%)", self._ai_exit_drawdown)
+        form.addRow("프롬프트 자동 수정 건너뛸 월 수익률 (%)", self._tune_skip_percent)
+
+        form.addRow(_section_label("비용 (순손익 계산)"))
+        self._commission_percent = number_edit("0.015", decimals=4)
+        self._tax_percent = number_edit("0.20")
+        self._slippage_percent = number_edit("0.1")
+        form.addRow("매매 수수료 (%)", self._commission_percent)
+        form.addRow("증권거래세 (%, ETF는 면제)", self._tax_percent)
+        form.addRow("슬리피지 (%)", self._slippage_percent)
+
+        form.addRow(_section_label("장애 대응"))
+        self._emergency_action = _NoScrollComboBox()
+        self._emergency_action.addItem("보유 유지 (신규 매매만 정지)", "hold")
+        self._emergency_action.addItem("전량 청산 후 정지", "close_all")
+        form.addRow("장중 치명적 오류 때", self._emergency_action)
+        return box
 
     def _build_operation_page(self) -> QWidget:
         """운영 탭 — 지금 무슨 일이 벌어지고 있는지 보여주는 쪽."""
@@ -1405,12 +1531,31 @@ class MainWindow(QMainWindow):
             self._etf_switch_enabled.setChecked(parse_flag(env.get("ETF_SWITCH_ENABLED"), True))
         finally:
             self._syncing_exit_flags = False
-        self._schedule_times.setText(
-            f"결정·시장가 매수 {env.get('DECISION_TIME', DEFAULT_RECOMMEND_TIME_HHMM)}"
-            f" (안전망 {env.get('BUY_FALLBACK_TIME', DEFAULT_BUY_TIME_HHMM)})"
-            "  ·  매수 결과 메일 10:10  ·  청산 15:15"
-            "  —  시각은 .env에서 바꾸고 다시 시작해야 반영됩니다"
-        )
+        self._llm_model.setText(env.get("LLM_MODEL", DEFAULT_LLM_MODEL))
+        self._smtp_host.setText(env.get("SMTP_HOST", DEFAULT_SMTP_HOST))
+        self._smtp_port.setText(env.get("SMTP_PORT", DEFAULT_SMTP_PORT))
+        self._smtp_password.setText(env.get("SMTP_PASSWORD", ""))
+        # 세부 설정 — 시각이 깨져 있으면 `Settings`처럼 기본값으로 보여준다
+        for edit, key, default in (
+            (self._decision_time, "DECISION_TIME", DEFAULT_RECOMMEND_TIME_HHMM),
+            (self._buy_fallback_time, "BUY_FALLBACK_TIME", DEFAULT_BUY_TIME_HHMM),
+        ):
+            parsed = QTime.fromString(env.get(key, default).strip(), "HH:mm")
+            edit.setTime(parsed if parsed.isValid() else QTime.fromString(default, "HH:mm"))
+        self._etf_signal_band.setText(env.get("ETF_SIGNAL_BAND_PERCENT", "0"))
+        self._etf_flip_enabled.setChecked(parse_flag(env.get("ETF_FLIP_ENABLED"), True))
+        self._rule_auto_apply.setChecked(parse_flag(env.get("RULE_AUTO_APPLY_ENABLED"), True))
+        self._etf_start_date.setText(env.get("ETF_START_DATE", "").strip())
+        self._etf_kill_loss.setText(env.get("ETF_KILL_LOSS_PERCENT", "5"))
+        self._switch_index_percent.setText(env.get("ETF_SWITCH_INDEX_PERCENT", "0.5"))
+        self._switch_strength_minutes.setText(env.get("ETF_SWITCH_STRENGTH_MINUTES", "5"))
+        self._ai_exit_drawdown.setText(env.get("AI_EXIT_DRAWDOWN_PERCENT", "1"))
+        self._select_tune_skip_value(env.get("TUNE_SKIP_MONTHLY_RETURN_PERCENT"))
+        self._commission_percent.setText(env.get("COMMISSION_PERCENT", "0.015"))
+        self._tax_percent.setText(env.get("TAX_PERCENT", "0.20"))
+        self._slippage_percent.setText(env.get("SLIPPAGE_PERCENT", "0.1"))
+        emergency_index = self._emergency_action.findData(env.get("EMERGENCY_ACTION", "hold"))
+        self._emergency_action.setCurrentIndex(max(emergency_index, 0))
         mode = env.get("TRADE_MODE", "paper")
         if mode == "live":
             self._radio_live.setChecked(True)
@@ -1439,8 +1584,23 @@ class MainWindow(QMainWindow):
             index if index >= 0 else self._ai_exit_step.findData(DEFAULT_AI_EXIT_STEP)
         )
 
-    def _save_settings(self, show_popup: bool = False) -> dict:
+    def _select_tune_skip_value(self, raw_value: Optional[str]) -> None:
+        """월 수익률 게이트 값을 고른다. 비었거나 목록에 없으면 기본값 (`Settings`와 같은 폴백)."""
+        default = f"{DEFAULT_TUNE_SKIP_MONTHLY_RETURN_PERCENT:g}"
+        try:
+            value = f"{float(raw_value):g}" if raw_value else default
+        except ValueError:
+            value = default
+        index = self._tune_skip_percent.findData(value)
+        self._tune_skip_percent.setCurrentIndex(
+            index if index >= 0 else self._tune_skip_percent.findData(default)
+        )
+
+    def _save_settings(self, show_popup: bool = False) -> Optional[dict]:
         """화면 값을 `.env`에 저장하고, 저장한 값을 그대로 돌려준다.
+
+        저장하기 전에 합친 결과로 `Settings.validate`를 돌려, 성립하지 않는 조합이면 `.env`를
+        건드리지 않고 None을 돌려준다. 팝업은 `show_popup`일 때만 — 시작 경로는 무인으로 돈다.
 
         돌려준 값은 `_start_engine`이 "지금 돌고 있는 엔진이 읽어간 설정"으로 기억해 두었다가
         나중에 저장된 값과 비교하는 데 쓴다 (`_needs_restart_for_changed_settings`).
@@ -1451,10 +1611,11 @@ class MainWindow(QMainWindow):
             "KIWOOM_APP_KEY": self._app_key.text().strip(),
             "KIWOOM_APP_SECRET": self._app_secret.text().strip(),
             "KIWOOM_ACCOUNT": self._account.text().strip(),
-            # LLM 모델명(LLM_MODEL)은 UI에서 다루지 않는다 — 키만 화면에서 채운다
             "ANTHROPIC_API_KEY": self._anthropic_key.text().strip(),
-            # SMTP 서버/포트/비밀번호는 UI에서 다루지 않으므로 저장 대상에서 제외한다
-            # (save_env는 전달된 키만 갱신하므로 .env의 기존 값은 그대로 보존된다)
+            "LLM_MODEL": self._llm_model.text().strip() or DEFAULT_LLM_MODEL,
+            "SMTP_HOST": self._smtp_host.text().strip() or DEFAULT_SMTP_HOST,
+            "SMTP_PORT": self._smtp_port.text().strip() or DEFAULT_SMTP_PORT,
+            "SMTP_PASSWORD": self._smtp_password.text().strip(),
             "SMTP_USER": self._email_from.text().strip(),  # 로그인 계정 = 발송 주소
             "EMAIL_FROM": self._email_from.text().strip(),
             "EMAIL_TO": self._email_to.text().strip(),
@@ -1464,11 +1625,36 @@ class MainWindow(QMainWindow):
             "TRAIL_GIVEBACK_PERCENT": self._trail_giveback_percent.text().strip() or "0.25",
             "AI_EXIT_STEP_PERCENT": self._ai_exit_step.currentData(),
             "INVESTABLE_RATIO_PERCENT": str(self._investable_ratio.currentData()),
+            # 세부 설정 — 숫자 칸이 비면 기본값 문자열로 떨어진다
+            "DECISION_TIME": self._decision_time.time().toString("HH:mm"),
+            "BUY_FALLBACK_TIME": self._buy_fallback_time.time().toString("HH:mm"),
+            "ETF_SIGNAL_BAND_PERCENT": self._etf_signal_band.text().strip() or "0",
+            "ETF_FLIP_ENABLED": "1" if self._etf_flip_enabled.isChecked() else "0",
+            "RULE_AUTO_APPLY_ENABLED": "1" if self._rule_auto_apply.isChecked() else "0",
+            "ETF_START_DATE": self._etf_start_date.text().strip(),
+            "ETF_KILL_LOSS_PERCENT": self._etf_kill_loss.text().strip() or "5",
+            "ETF_SWITCH_INDEX_PERCENT": self._switch_index_percent.text().strip() or "0.5",
+            "ETF_SWITCH_STRENGTH_MINUTES": self._switch_strength_minutes.text().strip() or "5",
+            "AI_EXIT_DRAWDOWN_PERCENT": self._ai_exit_drawdown.text().strip() or "1",
+            "TUNE_SKIP_MONTHLY_RETURN_PERCENT": self._tune_skip_percent.currentData(),
+            "COMMISSION_PERCENT": self._commission_percent.text().strip() or "0.015",
+            "TAX_PERCENT": self._tax_percent.text().strip() or "0.20",
+            "SLIPPAGE_PERCENT": self._slippage_percent.text().strip() or "0.1",
+            "EMERGENCY_ACTION": self._emergency_action.currentData(),
         }
         if mode == "live":
             values["LIVE_TRADE_CONFIRMED"] = "YES_I_UNDERSTAND"
         else:
             values["LIVE_TRADE_CONFIRMED"] = ""
+
+        # 쓰기 전에 합친 결과를 검사한다 — 성립하지 않는 조합이 `.env`에 남으면 다음 시작이 막힌다
+        error = _validate_env_values({**load_env(ENV_PATH), **values})
+        if error:
+            logger.error("설정이 올바르지 않아 저장하지 않았습니다: %s", error)
+            self._statusbar.showMessage(f"설정 오류: {error}", 8000)
+            if show_popup:
+                QMessageBox.warning(self, "설정 오류", f"저장하지 않았습니다.\n\n{error}")
+            return None
 
         save_env(ENV_PATH, values)
         logger.info("설정 저장 완료 (mode=%s)", mode)
@@ -1573,6 +1759,10 @@ class MainWindow(QMainWindow):
 
         # 화면의 현재 입력값을 그대로 반영해 시작한다
         applied = self._save_settings()
+        if applied is None:
+            # 저장하지 않은 잘못된 조합 — 이유는 `_save_settings`가 로그·상태줄에 남겼다
+            self._alert_rule_restart_failure("설정 오류: 화면 값 검사 실패")
+            return
         load_dotenv(ENV_PATH, override=True)
 
         try:

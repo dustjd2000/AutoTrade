@@ -7,8 +7,8 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# 결정 시각(`DECISION_TIME`)과 매수 안전망 시각(`BUY_FALLBACK_TIME`) 기본값 — 둘 다 `.env`로만 바꾼다
-# (UI에서는 값을 보여주기만 한다). 결정 시각에 당일 거래 여부(휴장 판정)를 보므로 개장 뒤여야
+# 결정 시각(`DECISION_TIME`)과 매수 안전망 시각(`BUY_FALLBACK_TIME`) 기본값 — UI "세부 설정"에서 고르고
+# 저장 전에 `validate()`로 관계를 검사한다 (2026-11-13). 결정 시각에 당일 거래 여부(휴장 판정)를 보므로 개장 뒤여야
 # 하고, 결정 직후 시장가 매수가 같은 실행에서 나간다 (PRD 5.5-C). 매수 시각은 그 사이 엔진이
 # 재시작돼 결정이 사라진 날의 안전망이라, 결정보다 `MIN_RECOMMEND_TO_BUY_MINUTES`분 이상 뒤다.
 DEFAULT_RECOMMEND_TIME_HHMM = "09:05"
@@ -19,7 +19,7 @@ MIN_AI_EXIT_STEP_PERCENT = 0.1
 MARKET_OPEN_HHMM = "09:00"
 
 # 이번 달 순수익률이 이 값(%) 이상이면 15:40 매도 프롬프트 자동 수정을 건너뛴다
-# (스펙 2026-09-22 4-A, 2026-10-29 복구). `.env` 전용 — 허용 값은 1~10%, 0.5 단위.
+# (스펙 2026-09-22 4-A, 2026-10-29 복구). UI "세부 설정"에서 고른다 — 허용 값은 1~10%, 0.5 단위.
 TUNE_SKIP_MONTHLY_RETURN_CHOICES = tuple(step / 2 for step in range(2, 21))
 DEFAULT_TUNE_SKIP_MONTHLY_RETURN_PERCENT = 5.0
 
@@ -113,7 +113,7 @@ class Settings:
     # 계좌번호
     account_number: str = field(default_factory=lambda: os.getenv("KIWOOM_ACCOUNT", ""))
 
-    # 이메일 알림 (SMTP) — 서버/포트/비밀번호는 UI에서 다루지 않고 .env로만 관리한다
+    # 이메일 알림 (SMTP) — 서버/포트/비밀번호도 UI "이메일 알림"에서 바꾼다 (2026-11-13)
     smtp_host: str = field(default_factory=lambda: os.getenv("SMTP_HOST", "smtp.gmail.com"))
     smtp_port: int = field(default_factory=lambda: int(os.getenv("SMTP_PORT", "587")))
     smtp_user: str = field(default_factory=lambda: os.getenv("SMTP_USER", ""))
@@ -125,7 +125,7 @@ class Settings:
     emergency_action: str = field(default_factory=lambda: os.getenv("EMERGENCY_ACTION", "hold"))
 
     # LLM 연동 — AI 매도 판단 (PRD 5.5-C '매도 판단'). Anthropic Claude API.
-    # 키는 UI "계좌 / API 설정"의 'Anthropic Key' 칸에서 다룬다(2026-08-25). 모델명은 .env 전용이다.
+    # 키와 모델명은 UI "계좌 / API 설정"에서 다룬다(키 2026-08-25, 모델명 2026-11-13).
     anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
     llm_model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "claude-sonnet-5"))
 
@@ -177,7 +177,7 @@ class Settings:
     trail_activate_percent: float = field(default_factory=lambda: float(os.getenv("TRAIL_ACTIVATE_PERCENT", "0.5")))
     trail_giveback_percent: float = field(default_factory=lambda: float(os.getenv("TRAIL_GIVEBACK_PERCENT", "0.25")))
     # AI 매도 판단 프롬프트에 '고점 대비 반납' 수치를 실을 최소 고점(%) — 이보다 낮은 고점은
-    # 노이즈라 반납 수치를 주지 않는다 (`exit_advisor._peak_text`). `.env` 전용.
+    # 노이즈라 반납 수치를 주지 않는다 (`exit_advisor._peak_text`). UI "세부 설정"에서 바꾼다.
     ai_exit_drawdown_percent: float = field(
         default_factory=lambda: float(os.getenv("AI_EXIT_DRAWDOWN_PERCENT", "1"))
     )
@@ -189,7 +189,7 @@ class Settings:
     )
 
     # 월 순수익 게이트 (스펙 2026-09-22 4-A) — 잘 되고 있을 때는 프롬프트를 건드리지 않는다.
-    # 매도 프롬프트 자동 수정(`tune_exit_prompt`)에 걸린다. `.env` 전용.
+    # 매도 프롬프트 자동 수정(`tune_exit_prompt`)에 걸린다. UI "세부 설정"에서 바꾼다.
     tune_skip_monthly_return_percent: float = field(
         default_factory=lambda: _parse_tune_skip_percent(os.getenv("TUNE_SKIP_MONTHLY_RETURN_PERCENT"))
     )
@@ -253,7 +253,7 @@ class Settings:
     # 2호 장중 전환 (스펙 2026-11-11) — 산 ETF가 틀린 방향이면 팔고 반대 ETF로 갈아탄다.
     # 0이면 판정만 끈다 (KODEX 200 구독과 체결강도 계산은 그대로 돈다). UI '장중 전환' 체크박스가
     # 켜고 끌 때마다 `.env`에 저장하고 돌고 있는 엔진에 바로 반영한다 — 여기 값은 엔진이 새로 뜰 때 쓰인다.
-    # 아래 두 값은 `.env` 전용이다.
+    # 아래 두 값은 UI "세부 설정"에서 바꾼다.
     etf_switch_enabled: bool = field(
         default_factory=lambda: parse_flag(os.getenv("ETF_SWITCH_ENABLED"), True)
     )
@@ -284,7 +284,11 @@ class Settings:
     def slippage_ratio(self) -> float:
         return self.slippage_percent / 100
 
-    def validate(self) -> None:
+    def validate(self, require_credentials: bool = True) -> None:
+        """설정을 검사한다. `require_credentials=False`면 키움 앱키/시크릿 검사만 건너뛴다.
+
+        UI가 저장 전에 화면 값의 조합만 검사할 때 쓴다 — 키가 아직 비어 있어도 저장은 되어야 한다.
+        """
         if self.mode not in ("live", "paper"):
             raise ValueError(f"TRADE_MODE must be 'live' or 'paper', got: {self.mode}")
         # 시각 두 개의 관계는 여기서 막는다 — 값이 깨진 경우(기본값 폴백)와 달리, 순서가
@@ -292,39 +296,39 @@ class Settings:
         open_time = _parse_hhmm(MARKET_OPEN_HHMM, MARKET_OPEN_HHMM, "MARKET_OPEN")
         if _minutes(self.recommend_time) < _minutes(open_time):
             raise ValueError(
-                f"DECISION_TIME은 개장({MARKET_OPEN_HHMM}) 이후여야 합니다: {self.recommend_time_hhmm}"
+                f"결정 시각(DECISION_TIME)은 개장({MARKET_OPEN_HHMM}) 이후여야 합니다: {self.recommend_time_hhmm}"
             )
         gap = _minutes(self.buy_time) - _minutes(self.recommend_time)
         if gap < MIN_RECOMMEND_TO_BUY_MINUTES:
             raise ValueError(
-                f"BUY_FALLBACK_TIME은 DECISION_TIME보다 {MIN_RECOMMEND_TO_BUY_MINUTES}분 이상 뒤여야 "
-                f"합니다: 추천 {self.recommend_time_hhmm} / 매수 {self.buy_time_hhmm}"
+                f"매수 안전망 시각(BUY_FALLBACK_TIME)은 결정 시각보다 {MIN_RECOMMEND_TO_BUY_MINUTES}분 이상 "
+                f"뒤여야 합니다: 결정 {self.recommend_time_hhmm} / 매수 {self.buy_time_hhmm}"
             )
         if self.ai_exit_step_percent < MIN_AI_EXIT_STEP_PERCENT:
             raise ValueError(
-                f"AI_EXIT_STEP_PERCENT는 {MIN_AI_EXIT_STEP_PERCENT} 이상이어야 합니다: "
+                f"AI 판단 단계(AI_EXIT_STEP_PERCENT)는 {MIN_AI_EXIT_STEP_PERCENT} 이상이어야 합니다: "
                 f"{self.ai_exit_step_percent}"
             )
         if self.take_profit_percent < 0:
-            raise ValueError(f"TAKE_PROFIT_PERCENT는 0 이상이어야 합니다: {self.take_profit_percent}")
+            raise ValueError(f"익절(TAKE_PROFIT_PERCENT)은 0 이상이어야 합니다: {self.take_profit_percent}")
         if self.trail_activate_percent < 0:
-            raise ValueError(f"TRAIL_ACTIVATE_PERCENT는 0 이상이어야 합니다: {self.trail_activate_percent}")
+            raise ValueError(f"고점 반납 시작(TRAIL_ACTIVATE_PERCENT)은 0 이상이어야 합니다: {self.trail_activate_percent}")
         if self.trail_giveback_percent < 0:
-            raise ValueError(f"TRAIL_GIVEBACK_PERCENT는 0 이상이어야 합니다: {self.trail_giveback_percent}")
+            raise ValueError(f"고점 반납 폭(TRAIL_GIVEBACK_PERCENT)은 0 이상이어야 합니다: {self.trail_giveback_percent}")
         if self.etf_switch_index_percent <= 0:
             raise ValueError(
-                f"ETF_SWITCH_INDEX_PERCENT는 0보다 커야 합니다: {self.etf_switch_index_percent}"
+                f"지수 반대 이동 문턱(ETF_SWITCH_INDEX_PERCENT)은 0보다 커야 합니다: {self.etf_switch_index_percent}"
             )
         if self.etf_switch_strength_minutes <= 0:
             raise ValueError(
-                f"ETF_SWITCH_STRENGTH_MINUTES는 0보다 커야 합니다: {self.etf_switch_strength_minutes}"
+                f"체결강도 기간(ETF_SWITCH_STRENGTH_MINUTES)은 0보다 커야 합니다: {self.etf_switch_strength_minutes}"
             )
         if self.etf_start_date:
             try:
                 date.fromisoformat(self.etf_start_date)
             except ValueError:
-                raise ValueError(f"ETF_START_DATE는 YYYY-MM-DD 형식이어야 합니다: {self.etf_start_date}")
-        if not self.app_key or not self.app_secret:
+                raise ValueError(f"손실 집계 시작일(ETF_START_DATE)은 YYYY-MM-DD 형식이어야 합니다: {self.etf_start_date}")
+        if require_credentials and (not self.app_key or not self.app_secret):
             raise ValueError("KIWOOM_APP_KEY and KIWOOM_APP_SECRET must be set")
         if self.mode == "live":
             # 실전 계좌 전환 시 명시적 확인 강제
