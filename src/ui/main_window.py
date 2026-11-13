@@ -170,6 +170,20 @@ def _section_label(text: str) -> QLabel:
     return lbl
 
 
+def _number_edit(default: str, decimals: int = 2, maximum: float = 100.0) -> QLineEdit:
+    """숫자 입력란 — 비워 두면 저장 때 `default`로 떨어진다 (자리표시로 보여준다)."""
+    edit = QLineEdit()
+    edit.setValidator(QDoubleValidator(0.0, maximum, decimals))
+    edit.setPlaceholderText(default)
+    return edit
+
+
+def _time_edit(hhmm: str) -> QTimeEdit:
+    edit = QTimeEdit(QTime.fromString(hhmm, "HH:mm"))
+    edit.setDisplayFormat("HH:mm")
+    return edit
+
+
 def _in_scroll(page: QWidget) -> QScrollArea:
     """탭 내용이 창보다 길어져도 잘리지 않게 스크롤에 담는다."""
     scroll = QScrollArea()
@@ -577,7 +591,9 @@ class MainWindow(QMainWindow):
         fund_form.setSpacing(8)
         fund_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # 결정·매수 안전망 시각은 아래 "세부 설정"에서 고른다 — 여기서는 고정 시각만 알린다.
+        # 결정·매수 안전망 시각은 고를 수 있고(2026-11-13), 나머지 시각은 코드 상수라 알리기만 한다.
+        self._decision_time = _time_edit(DEFAULT_RECOMMEND_TIME_HHMM)
+        self._buy_fallback_time = _time_edit(DEFAULT_BUY_TIME_HHMM)
         self._schedule_times = QLabel("매수 결과 메일 10:10  ·  청산 15:15")
         self._schedule_times.setWordWrap(True)
 
@@ -587,7 +603,9 @@ class MainWindow(QMainWindow):
         self._investable_ratio.setCurrentIndex(self._investable_ratio.findData(50))
         self._investable_ratio.currentIndexChanged.connect(self._refresh_investable_amount)
 
-        fund_form.addRow("매매 시각", self._schedule_times)
+        fund_form.addRow("결정·시장가 매수 시각", self._decision_time)
+        fund_form.addRow("매수 안전망 시각", self._buy_fallback_time)
+        fund_form.addRow("고정 시각", self._schedule_times)
 
         # 무엇을 사는지가 화면 어디에도 없으면 '추천'이 사라진 이유를 알 수 없다 (PRD 5.5-C)
         strategy_hint = QLabel(
@@ -608,6 +626,33 @@ class MainWindow(QMainWindow):
         self._investable_amount.setStyleSheet(f"color: {COLOR_TEXT_DIM}; font-size: 11px;")
         self._investable_amount.setVisible(False)
         fund_form.addRow("총 매수가능 금액", self._investable_amount)
+
+        # 2호 전략 세부 값 (2026-11-13까지 `.env` 전용이었다)
+        self._etf_signal_band = _number_edit("0")
+        # '장중 전환'(산 뒤 갈아타기)과 다른 기능이다 — 사기 전에 고르는 종목만 바꾼다
+        self._etf_flip_enabled = QCheckBox("매수 때 방향 뒤집기 (시가 대비)")
+        self._etf_flip_enabled.setChecked(True)
+        self._etf_flip_enabled.setToolTip(
+            "결정 시각에 오늘 KODEX 200이 시가 대비 신호와 반대로 0.2% 이상 움직였으면 "
+            "처음부터 반대 ETF를 삽니다. 산 뒤에 갈아타는 '장중 전환'과는 별개입니다."
+        )
+        self._rule_auto_apply = QCheckBox("금요일 규칙 자동 적용")
+        self._rule_auto_apply.setChecked(True)
+        self._etf_start_date = QLineEdit()
+        self._etf_start_date.setPlaceholderText("YYYY-MM-DD (비우면 처음부터)")
+        btn_today = QPushButton("오늘")
+        btn_today.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_today.setStyleSheet(
+            f"background: {COLOR_SURFACE}; color: {COLOR_TEXT}; border: 1px solid {COLOR_BORDER};"
+            " padding: 4px 12px;"
+        )
+        btn_today.clicked.connect(lambda: self._etf_start_date.setText(date.today().isoformat()))
+        self._etf_kill_loss = _number_edit("5")
+        fund_form.addRow("신호 문턱 (%)", self._etf_signal_band)
+        fund_form.addRow("", self._etf_flip_enabled)
+        fund_form.addRow("", self._rule_auto_apply)
+        fund_form.addRow("손실 집계 시작일", _with_toggle(self._etf_start_date, btn_today))
+        fund_form.addRow("누적 손실 한도 (%)", self._etf_kill_loss)
         fund_risk_row.addWidget(fund_box, 1)
 
         risk_box = QGroupBox("리스크 관리 (손절 / AI 매도 판단)")
@@ -678,6 +723,15 @@ class MainWindow(QMainWindow):
         risk_form.addRow("고점 반납 시작 (%)", self._trail_activate_percent)
         risk_form.addRow("고점 반납 폭 (%p)", self._trail_giveback_percent)
         risk_form.addRow("AI 판단 단계 (%p)", self._ai_exit_step)
+        self._ai_exit_drawdown = _number_edit("1")
+        self._tune_skip_percent = _NoScrollComboBox()
+        for choice in TUNE_SKIP_MONTHLY_RETURN_CHOICES:
+            self._tune_skip_percent.addItem(f"{choice:g}", f"{choice:g}")
+        self._tune_skip_percent.setCurrentIndex(
+            self._tune_skip_percent.findData(f"{DEFAULT_TUNE_SKIP_MONTHLY_RETURN_PERCENT:g}")
+        )
+        risk_form.addRow("반납 수치를 보여 줄 최소 고점 (%)", self._ai_exit_drawdown)
+        risk_form.addRow("프롬프트 자동 수정 건너뛸 월 수익률 (%)", self._tune_skip_percent)
         self._etf_switch_enabled = QCheckBox("장중 전환")
         self._etf_switch_enabled.setChecked(True)
         self._etf_switch_enabled.setToolTip(
@@ -688,6 +742,10 @@ class MainWindow(QMainWindow):
         self._etf_switch_enabled.toggled.connect(self._on_switch_flag_toggled)
         # 체크박스 글자가 이름을 겸한다 — 행 라벨까지 달면 '장중 전환'이 두 번 찍힌다
         risk_form.addRow("", self._etf_switch_enabled)
+        self._switch_index_percent = _number_edit("0.5")
+        self._switch_strength_minutes = _number_edit("5")
+        risk_form.addRow("지수 반대 이동 문턱 (%)", self._switch_index_percent)
+        risk_form.addRow("체결강도 기간 (분)", self._switch_strength_minutes)
         # 종목별 판정이라는 점과 AI 판단을 언제 부르는지를 입력란 바로 아래에서 알린다
         exit_hint = QLabel(
             "손절선입니다. 순손익률이 이 값에 닿으면 실시간으로 시장가 매도합니다. 순손익률은 "
@@ -746,73 +804,20 @@ class MainWindow(QMainWindow):
         return page
 
     def _build_detail_box(self) -> QGroupBox:
-        """세부 설정 — 예전에는 `.env`로만 바꾸던 값들 (2026-11-13, 사용자 지시).
+        """비용·장애 대응 — 예전에는 `.env`로만 바꾸던 값들 (2026-11-13, 사용자 지시).
 
+        2호 전략·장중 전환·AI 매도 판단 값은 이름이 겹치지 않게 각자의 상자에 둔다.
         '설정 저장'을 눌러야 반영되고, 바뀌었으면 엔진이 재시작된다. 기본값은 `Settings`와 같다.
         """
-        box = QGroupBox("세부 설정")
+        box = QGroupBox("비용 / 장애 대응")
         form = QFormLayout(box)
         form.setSpacing(8)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        def number_edit(default: str, decimals: int = 2, maximum: float = 100.0) -> QLineEdit:
-            edit = QLineEdit()
-            edit.setValidator(QDoubleValidator(0.0, maximum, decimals))
-            edit.setPlaceholderText(default)
-            return edit
-
-        def time_edit(hhmm: str) -> QTimeEdit:
-            edit = QTimeEdit(QTime.fromString(hhmm, "HH:mm"))
-            edit.setDisplayFormat("HH:mm")
-            return edit
-
-        form.addRow(_section_label("2호 전략"))
-        self._decision_time = time_edit(DEFAULT_RECOMMEND_TIME_HHMM)
-        self._buy_fallback_time = time_edit(DEFAULT_BUY_TIME_HHMM)
-        self._etf_signal_band = number_edit("0")
-        self._etf_flip_enabled = QCheckBox("장중 방향 뒤집기")
-        self._etf_flip_enabled.setChecked(True)
-        self._rule_auto_apply = QCheckBox("금요일 규칙 자동 적용")
-        self._rule_auto_apply.setChecked(True)
-        self._etf_start_date = QLineEdit()
-        self._etf_start_date.setPlaceholderText("YYYY-MM-DD (비우면 처음부터)")
-        btn_today = QPushButton("오늘")
-        btn_today.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_today.setStyleSheet(
-            f"background: {COLOR_SURFACE}; color: {COLOR_TEXT}; border: 1px solid {COLOR_BORDER};"
-            " padding: 4px 12px;"
-        )
-        btn_today.clicked.connect(lambda: self._etf_start_date.setText(date.today().isoformat()))
-        self._etf_kill_loss = number_edit("5")
-        form.addRow("결정·시장가 매수 시각", self._decision_time)
-        form.addRow("매수 안전망 시각", self._buy_fallback_time)
-        form.addRow("신호 문턱 (%)", self._etf_signal_band)
-        form.addRow("", self._etf_flip_enabled)
-        form.addRow("", self._rule_auto_apply)
-        form.addRow("손실 집계 시작일", _with_toggle(self._etf_start_date, btn_today))
-        form.addRow("누적 손실 한도 (%)", self._etf_kill_loss)
-
-        form.addRow(_section_label("장중 전환"))
-        self._switch_index_percent = number_edit("0.5")
-        self._switch_strength_minutes = number_edit("5")
-        form.addRow("지수 반대 이동 문턱 (%)", self._switch_index_percent)
-        form.addRow("체결강도 기간 (분)", self._switch_strength_minutes)
-
-        form.addRow(_section_label("AI 매도 판단"))
-        self._ai_exit_drawdown = number_edit("1")
-        self._tune_skip_percent = _NoScrollComboBox()
-        for choice in TUNE_SKIP_MONTHLY_RETURN_CHOICES:
-            self._tune_skip_percent.addItem(f"{choice:g}", f"{choice:g}")
-        self._tune_skip_percent.setCurrentIndex(
-            self._tune_skip_percent.findData(f"{DEFAULT_TUNE_SKIP_MONTHLY_RETURN_PERCENT:g}")
-        )
-        form.addRow("반납 수치를 보여 줄 최소 고점 (%)", self._ai_exit_drawdown)
-        form.addRow("프롬프트 자동 수정 건너뛸 월 수익률 (%)", self._tune_skip_percent)
-
         form.addRow(_section_label("비용 (순손익 계산)"))
-        self._commission_percent = number_edit("0.015", decimals=4)
-        self._tax_percent = number_edit("0.20")
-        self._slippage_percent = number_edit("0.1")
+        self._commission_percent = _number_edit("0.015", decimals=4)
+        self._tax_percent = _number_edit("0.20")
+        self._slippage_percent = _number_edit("0.1")
         form.addRow("매매 수수료 (%)", self._commission_percent)
         form.addRow("증권거래세 (%, ETF는 면제)", self._tax_percent)
         form.addRow("슬리피지 (%)", self._slippage_percent)
@@ -1535,7 +1540,7 @@ class MainWindow(QMainWindow):
         self._smtp_host.setText(env.get("SMTP_HOST", DEFAULT_SMTP_HOST))
         self._smtp_port.setText(env.get("SMTP_PORT", DEFAULT_SMTP_PORT))
         self._smtp_password.setText(env.get("SMTP_PASSWORD", ""))
-        # 세부 설정 — 시각이 깨져 있으면 `Settings`처럼 기본값으로 보여준다
+        # 새로 올린 값들 — 시각이 깨져 있으면 `Settings`처럼 기본값으로 보여준다
         for edit, key, default in (
             (self._decision_time, "DECISION_TIME", DEFAULT_RECOMMEND_TIME_HHMM),
             (self._buy_fallback_time, "BUY_FALLBACK_TIME", DEFAULT_BUY_TIME_HHMM),
@@ -1625,7 +1630,7 @@ class MainWindow(QMainWindow):
             "TRAIL_GIVEBACK_PERCENT": self._trail_giveback_percent.text().strip() or "0.25",
             "AI_EXIT_STEP_PERCENT": self._ai_exit_step.currentData(),
             "INVESTABLE_RATIO_PERCENT": str(self._investable_ratio.currentData()),
-            # 세부 설정 — 숫자 칸이 비면 기본값 문자열로 떨어진다
+            # 새로 올린 값들 — 숫자 칸이 비면 기본값 문자열로 떨어진다
             "DECISION_TIME": self._decision_time.time().toString("HH:mm"),
             "BUY_FALLBACK_TIME": self._buy_fallback_time.time().toString("HH:mm"),
             "ETF_SIGNAL_BAND_PERCENT": self._etf_signal_band.text().strip() or "0",

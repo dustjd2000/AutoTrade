@@ -1,4 +1,4 @@
-"""설정 탭 "세부 설정" 등 새로 UI에 올라온 `.env` 값들의 불러오기·저장·저장 전 검사.
+"""설정 탭 새로 UI에 올라온 `.env` 값들의 불러오기·저장·저장 전 검사.
 
 `test_switch_flag_persistence.py`와 같은 방식 — QApplication 없이 더블에 실제 메서드를 바인딩한다.
 실제 `.env`는 건드리지 않는다(`save_env`·`load_env`를 가로챈다).

@@ -7,7 +7,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# 결정 시각(`DECISION_TIME`)과 매수 안전망 시각(`BUY_FALLBACK_TIME`) 기본값 — UI "세부 설정"에서 고르고
+# 결정 시각(`DECISION_TIME`)과 매수 안전망 시각(`BUY_FALLBACK_TIME`) 기본값 — UI "2호 전략" 상자에서 고르고
 # 저장 전에 `validate()`로 관계를 검사한다 (2026-11-13). 결정 시각에 당일 거래 여부(휴장 판정)를 보므로 개장 뒤여야
 # 하고, 결정 직후 시장가 매수가 같은 실행에서 나간다 (PRD 5.5-C). 매수 시각은 그 사이 엔진이
 # 재시작돼 결정이 사라진 날의 안전망이라, 결정보다 `MIN_RECOMMEND_TO_BUY_MINUTES`분 이상 뒤다.
@@ -19,7 +19,7 @@ MIN_AI_EXIT_STEP_PERCENT = 0.1
 MARKET_OPEN_HHMM = "09:00"
 
 # 이번 달 순수익률이 이 값(%) 이상이면 15:40 매도 프롬프트 자동 수정을 건너뛴다
-# (스펙 2026-09-22 4-A, 2026-10-29 복구). UI "세부 설정"에서 고른다 — 허용 값은 1~10%, 0.5 단위.
+# (스펙 2026-09-22 4-A, 2026-10-29 복구). UI "리스크 관리" 상자에서 고른다 — 허용 값은 1~10%, 0.5 단위.
 TUNE_SKIP_MONTHLY_RETURN_CHOICES = tuple(step / 2 for step in range(2, 21))
 DEFAULT_TUNE_SKIP_MONTHLY_RETURN_PERCENT = 5.0
 
@@ -177,7 +177,7 @@ class Settings:
     trail_activate_percent: float = field(default_factory=lambda: float(os.getenv("TRAIL_ACTIVATE_PERCENT", "0.5")))
     trail_giveback_percent: float = field(default_factory=lambda: float(os.getenv("TRAIL_GIVEBACK_PERCENT", "0.25")))
     # AI 매도 판단 프롬프트에 '고점 대비 반납' 수치를 실을 최소 고점(%) — 이보다 낮은 고점은
-    # 노이즈라 반납 수치를 주지 않는다 (`exit_advisor._peak_text`). UI "세부 설정"에서 바꾼다.
+    # 노이즈라 반납 수치를 주지 않는다 (`exit_advisor._peak_text`). UI "리스크 관리" 상자에서 바꾼다.
     ai_exit_drawdown_percent: float = field(
         default_factory=lambda: float(os.getenv("AI_EXIT_DRAWDOWN_PERCENT", "1"))
     )
@@ -189,7 +189,7 @@ class Settings:
     )
 
     # 월 순수익 게이트 (스펙 2026-09-22 4-A) — 잘 되고 있을 때는 프롬프트를 건드리지 않는다.
-    # 매도 프롬프트 자동 수정(`tune_exit_prompt`)에 걸린다. UI "세부 설정"에서 바꾼다.
+    # 매도 프롬프트 자동 수정(`tune_exit_prompt`)에 걸린다. UI "리스크 관리" 상자에서 바꾼다.
     tune_skip_monthly_return_percent: float = field(
         default_factory=lambda: _parse_tune_skip_percent(os.getenv("TUNE_SKIP_MONTHLY_RETURN_PERCENT"))
     )
@@ -253,7 +253,7 @@ class Settings:
     # 2호 장중 전환 (스펙 2026-11-11) — 산 ETF가 틀린 방향이면 팔고 반대 ETF로 갈아탄다.
     # 0이면 판정만 끈다 (KODEX 200 구독과 체결강도 계산은 그대로 돈다). UI '장중 전환' 체크박스가
     # 켜고 끌 때마다 `.env`에 저장하고 돌고 있는 엔진에 바로 반영한다 — 여기 값은 엔진이 새로 뜰 때 쓰인다.
-    # 아래 두 값은 UI "세부 설정"에서 바꾼다.
+    # 아래 두 값은 UI "리스크 관리" 상자의 '장중 전환' 아래에서 바꾼다.
     etf_switch_enabled: bool = field(
         default_factory=lambda: parse_flag(os.getenv("ETF_SWITCH_ENABLED"), True)
     )
