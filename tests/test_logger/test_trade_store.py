@@ -662,12 +662,32 @@ def test_switch_leg_is_not_overwritten_or_closed_twice(tmp_path):
 def test_index_strength_round_trip_upsert_and_nulls(tmp_path):
     store = TradeStore(tmp_path / "t.db")
     day = date(2026, 11, 12)
-    store.save_index_strength(day, "0931", 100.0, None, None)
-    store.save_index_strength(day, "0930", 99.0, 55.5, 120.0)
-    store.save_index_strength(day, "0931", 101.0, 60.0, None)  # 같은 분 — 마지막 값이 이긴다
+    store.save_index_strength(day, "0931", 100.0, None, None, None)
+    store.save_index_strength(day, "0930", 99.0, 55.5, 120.0, 5000)
+    store.save_index_strength(day, "0931", 101.0, 60.0, None, None)  # 같은 분 — 마지막 값이 이긴다
 
     assert store.index_strength_for(day) == [
-        ("0930", 99.0, 55.5, 120.0),
-        ("0931", 101.0, 60.0, None),
+        ("0930", 99.0, 55.5, 120.0, 5000),
+        ("0931", 101.0, 60.0, None, None),
     ]
     assert store.index_strength_for(date(2026, 11, 13)) == []
+
+
+def test_index_strength_migration_adds_volume_cum_to_an_old_table(tmp_path):
+    path = tmp_path / "t.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """CREATE TABLE index_strength_minutes (day TEXT NOT NULL, minute TEXT NOT NULL,
+           price REAL NOT NULL, strength REAL, strength_cum REAL, PRIMARY KEY (day, minute))"""
+    )
+    conn.execute("INSERT INTO index_strength_minutes VALUES ('2026-11-12', '0930', 99.0, 55.5, 120.0)")
+    conn.commit()
+    conn.close()
+
+    store = TradeStore(path)
+    store.save_index_strength(date(2026, 11, 12), "0931", 100.0, None, 121.0, 7000)
+
+    assert store.index_strength_for(date(2026, 11, 12)) == [
+        ("0930", 99.0, 55.5, 120.0, None),
+        ("0931", 100.0, None, 121.0, 7000),
+    ]

@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from src.api.auth import AuthClient
@@ -33,7 +33,7 @@ from src.core.etf_switch import (
     opposite_etf,
 )
 from src.core.switch_flow import FILL_MAX_WAIT_SECONDS
-from src.core.trade_strength import TradeStrength
+from src.core.trade_strength import TradeStrength, strength_between
 from src.strategy.etf_regime import ETF_TICKERS, LONG_ETF
 from src.logger.trade_store import TradeStore
 from src.notification.alert import AlertNotifier
@@ -226,6 +226,11 @@ class TradingEngine:
         self._index_logged_at: Optional[datetime] = None
         # 분당 체결강도 기록용 — 마지막 키움 누적 체결강도(필드 228)와 마지막으로 기록한 분 (HHMM)
         self._index_strength_cum: Optional[float] = None
+        self._index_volume_cum: Optional[int] = None
+        # 오늘 분당 스냅샷 (시각, 누적 거래량, 누적 체결강도) — 재시작 직후 틱 창이 비어 있을 때
+        # 5분 체결강도를 누적값으로 이어 계산한다 (`_window_strength`). 틱 경로가 SQLite를 읽지 않게
+        # 메모리에 둔다.
+        self._index_snapshots: List[Tuple[datetime, int, float]] = []
         self._index_minute_written: Optional[str] = None
         # 종목별 마지막 청산 주문번호 — 전환이 그 매도의 체결을 기다릴 때 쓴다
         self._exit_order_ids: Dict[str, str] = {}
@@ -659,6 +664,7 @@ class TradingEngine:
         self.pending_switch = None
         self._exit_order_ids.clear()
         self._index_minute_written = None
+        self._index_snapshots.clear()
         logger.info("새 거래일 준비 — 일일 손실 한도와 매매 중지 상태를 초기화했습니다.")
 
     def start(self) -> None:
@@ -672,6 +678,7 @@ class TradingEngine:
         self._open_tickers = {t for t, p in self._positions.items() if p.quantity > 0}
         self._restore_exit_peaks()
         self._restore_switch_state()
+        self._restore_index_snapshots()
         if self._open_tickers:
             logger.warning(
                 "시작 시점에 이미 보유 중인 종목이 있습니다 (전일 이월 가능): %s",
@@ -679,6 +686,25 @@ class TradingEngine:
             )
         self._running = True
         logger.info("Trading engine started. Strategy: %s", self.strategy.name)
+
+    def _restore_index_snapshots(self) -> None:
+        """오늘 남긴 분당 누적값 스냅샷을 DB에서 읽어 둔다 (재시작 직후 체결강도용). 실패하면 빈 목록."""
+        self._index_snapshots = []
+        if self.trade_store is None:
+            return
+        today = datetime.now().date()
+        try:
+            rows = self.trade_store.index_strength_for(today)
+            self._index_snapshots = [
+                (datetime.combine(today, datetime.strptime(minute, "%H%M").time()), volume, cum)
+                for minute, _, _, cum, volume in rows
+                if volume is not None and cum is not None
+            ]
+        except Exception:
+            logger.warning(
+                "분당 체결강도 스냅샷 복원 실패 — 재시작 직후 5분은 체결강도를 모릅니다.", exc_info=True
+            )
+            self._index_snapshots = []
 
     def _restore_switch_state(self) -> None:
         """오늘의 전환 다리를 DB에서 되살린다 (스펙 2026-11-11 5.4).
@@ -1131,6 +1157,7 @@ class TradingEngine:
         self._index_price = data.price
         self._index_at = now
         self._index_strength_cum = data.strength_cum
+        self._index_volume_cum = data.volume
         if data.signed_volume is not None:
             self.trade_strength.add(now, data.signed_volume)
         if (
@@ -1139,15 +1166,38 @@ class TradingEngine:
         ):
             return
         self._index_logged_at = now
-        strength = self.trade_strength.value(now)
+        strength = self._window_strength(now)
+        snapshot_strength = self._snapshot_strength(now)
         logger.info(
-            "KODEX 200 틱: 가격 %s원, 체결량(필드 15) %s, 키움 누적 체결강도(필드 228) %s, %g분 체결강도 %s",
+            "KODEX 200 틱: 가격 %s원, 체결량(필드 15) %s, 키움 누적 체결강도(필드 228) %s, %g분 체결강도 %s (누적값 기준 %s)",
             f"{data.price:,.0f}",
             data.signed_volume,
             data.strength_cum,
             self.trade_strength.window_minutes,
             "모름" if strength is None else f"{strength:.1f}",
+            "모름" if snapshot_strength is None else f"{snapshot_strength:.1f}",
         )
+
+    def _snapshot_strength(self, now: datetime) -> Optional[float]:
+        """분 스냅샷과 현재 누적값으로 구한 창 체결강도. 창 길이 전후 2분 안의 스냅샷이 없으면 None."""
+        window = timedelta(minutes=self.trade_strength.window_minutes)
+        oldest = now - window - timedelta(minutes=2)
+        past = None
+        for at, volume, cum in reversed(self._index_snapshots):
+            if at <= now - window:
+                if at >= oldest:
+                    past = (volume, cum)
+                break
+        if past is None:
+            return None
+        return strength_between(past[0], past[1], self._index_volume_cum, self._index_strength_cum)
+
+    def _window_strength(self, now: datetime) -> Optional[float]:
+        """창 체결강도 — 틱 창이 차 있으면 그 값, 아니면(재시작 직후) 분 스냅샷 기준 값."""
+        value = self.trade_strength.value(now)
+        if value is not None:
+            return value
+        return self._snapshot_strength(now)
 
     def _flush_index_minute(self, data: MarketData) -> None:
         """KODEX 200 틱이면 그 분의 가격·체결강도를 DB에 남긴다 (분당 한 번, 2026-11-12).
@@ -1166,8 +1216,13 @@ class TradingEngine:
         try:
             self.trade_store.save_index_strength(
                 now.date(), minute_key, self._index_price,
-                self.trade_strength.value(now), self._index_strength_cum,
+                self._window_strength(now), self._index_strength_cum, self._index_volume_cum,
             )
+            if self._index_volume_cum is not None and self._index_strength_cum is not None:
+                self._index_snapshots.append(
+                    (now.replace(second=0, microsecond=0),
+                     self._index_volume_cum, self._index_strength_cum)
+                )
         except Exception:
             logger.warning("분당 체결강도 기록 실패 — 이 분은 건너뜁니다.", exc_info=True)
 
@@ -1188,7 +1243,7 @@ class TradingEngine:
         if not self.etf_switch_enabled or self.pending_switch is not None:
             return
         now = datetime.now()
-        strength = self.trade_strength.value(now)
+        strength = self._window_strength(now)
         for ticker, position in positions.items():
             if ticker not in ETF_TICKERS or ticker in self._exiting or position.quantity <= 0:
                 continue

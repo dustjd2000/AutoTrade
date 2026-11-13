@@ -139,9 +139,15 @@ CREATE TABLE IF NOT EXISTS index_strength_minutes (
     price REAL NOT NULL,
     strength REAL,
     strength_cum REAL,
+    volume_cum INTEGER,
     PRIMARY KEY (day, minute)
 )
 """
+
+# 재시작 뒤 5분 체결강도를 누적값(필드 13·228)으로 이어 계산하려고 뒤늦게 붙인 컬럼 (2026-11-13)
+INDEX_STRENGTH_MIGRATIONS = (
+    ("volume_cum", "ALTER TABLE index_strength_minutes ADD COLUMN volume_cum INTEGER"),
+)
 
 # 부분체결도 실제 매매이므로 집계에 포함한다
 FILLED_STATUSES = (OrderStatus.FILLED.value, OrderStatus.PARTIALLY_FILLED.value)
@@ -357,6 +363,7 @@ class TradeStore:
             conn.execute(ETF_SWITCH_LEG_SCHEMA_SQL)
             conn.execute(INDEX_STRENGTH_SCHEMA_SQL)
             self._migrate(conn, "trades", MIGRATIONS)
+            self._migrate(conn, "index_strength_minutes", INDEX_STRENGTH_MIGRATIONS)
             conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
@@ -748,28 +755,34 @@ class TradeStore:
         price: float,
         strength: Optional[float],
         strength_cum: Optional[float],
+        volume_cum: Optional[int],
     ) -> None:
         """그 분의 KODEX 200 가격·체결강도를 남긴다. 같은 분을 다시 쓰면 마지막 값이 이긴다."""
         with closing(self._connect()) as conn:
             conn.execute(
-                """INSERT INTO index_strength_minutes (day, minute, price, strength, strength_cum)
-                   VALUES (?, ?, ?, ?, ?)
+                """INSERT INTO index_strength_minutes
+                       (day, minute, price, strength, strength_cum, volume_cum)
+                   VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(day, minute) DO UPDATE SET price=excluded.price,
-                       strength=excluded.strength, strength_cum=excluded.strength_cum""",
-                (day.isoformat(), minute, price, strength, strength_cum),
+                       strength=excluded.strength, strength_cum=excluded.strength_cum,
+                       volume_cum=excluded.volume_cum""",
+                (day.isoformat(), minute, price, strength, strength_cum, volume_cum),
             )
             conn.commit()
 
     def index_strength_for(
         self, day: date
-    ) -> List[Tuple[str, float, Optional[float], Optional[float]]]:
+    ) -> List[Tuple[str, float, Optional[float], Optional[float], Optional[int]]]:
         with closing(self._connect()) as conn:
             rows = conn.execute(
-                """SELECT minute, price, strength, strength_cum FROM index_strength_minutes
-                   WHERE day = ? ORDER BY minute""",
+                """SELECT minute, price, strength, strength_cum, volume_cum
+                   FROM index_strength_minutes WHERE day = ? ORDER BY minute""",
                 (day.isoformat(),),
             ).fetchall()
-        return [(r["minute"], r["price"], r["strength"], r["strength_cum"]) for r in rows]
+        return [
+            (r["minute"], r["price"], r["strength"], r["strength_cum"], r["volume_cum"])
+            for r in rows
+        ]
 
     def save_rule_evaluation(self, row: RuleEvaluationRow) -> None:
         """평가 기록을 남긴다. 같은 날은 덮어쓴다 — 적용 여부를 정한 뒤 같은 줄을 다시 쓴다."""

@@ -300,7 +300,7 @@ def test_index_strength_is_stored_once_per_minute(tmp_path):
     engine.on_market_data(long_tick(10020.0))
 
     rows = engine.trade_store.index_strength_for(NOW.date())
-    assert [(m, p) for m, p, _, _ in rows] == [("1000", 10000.0), ("1001", 10020.0)]
+    assert [(m, p) for m, p, _, _, _ in rows] == [("1000", 10000.0), ("1001", 10020.0)]
     assert rows[0][2] is None                                  # 창이 아직 차지 않았다
 
 
@@ -351,3 +351,35 @@ def test_restart_holding_an_etf_without_a_second_leg_warns_about_the_missing_rec
     assert restarted.switch_state.switched_today is True
     assert len(alerts) == 1 and "기록이 빠졌습니다" in alerts[0] and INVERSE in alerts[0]
 
+
+
+def snapshot_engine(tmp_path, snapshot_at):
+    """틱 창은 비어 있고(재시작 직후) `snapshot_at` 분 스냅샷만 있는 엔진 — 현재 누적값은 틱으로 넣는다."""
+    store = TradeStore(tmp_path / "t.db")
+    store.save_index_strength(
+        NOW.date(), snapshot_at.strftime("%H%M"), 10000.0, None, 100.0, 1000
+    )
+    engine, _, _, _ = make_engine({}, tmp_path)
+    engine._index_volume_cum = 1600
+    engine._index_strength_cum = 125.0
+    return engine
+
+
+def test_window_strength_falls_back_to_the_snapshot_after_a_restart(tmp_path):
+    engine = snapshot_engine(tmp_path, NOW - timedelta(minutes=5))
+
+    assert engine.trade_strength.value(NOW) is None
+    assert engine._window_strength(NOW) == pytest.approx(184.2, abs=0.1)
+
+
+def test_window_strength_ignores_a_snapshot_that_is_too_old(tmp_path):
+    engine = snapshot_engine(tmp_path, NOW - timedelta(minutes=10))
+
+    assert engine._window_strength(NOW) is None
+
+
+def test_window_strength_prefers_a_full_tick_window(tmp_path):
+    engine = snapshot_engine(tmp_path, NOW - timedelta(minutes=5))
+    load_strength(engine, buy=30, sell=10)
+
+    assert engine._window_strength(NOW) == pytest.approx(300.0)

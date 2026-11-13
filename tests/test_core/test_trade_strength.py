@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from src.core.trade_strength import MAX_STRENGTH, TradeStrength
+from src.core.trade_strength import MAX_STRENGTH, TradeStrength, strength_between
 
 T0 = datetime(2026, 11, 12, 9, 0, 0)
 
@@ -57,3 +57,35 @@ def test_a_gap_in_ticks_restarts_the_window():
     resumed = T0 + timedelta(minutes=7)             # 2분 공백
     strength.add(resumed, 10)
     assert strength.value(resumed + timedelta(seconds=1)) is None
+
+
+def test_strength_between_hand_computed():
+    # V1=1000,C1=100 -> B1=S1=500 / V2=1600,C2=125 -> B2=888.9,S2=711.1 -> 388.9/211.1
+    assert strength_between(1000, 100.0, 1600, 125.0) == pytest.approx(184.2, abs=0.1)
+
+
+@pytest.mark.parametrize("args", [
+    (None, 100.0, 1600, 125.0),
+    (1000, None, 1600, 125.0),
+    (1000, 100.0, None, 125.0),
+    (1000, 100.0, 1600, None),
+    (1000, 0.0, 1600, 125.0),
+    (1000, 100.0, 1600, 0.0),
+    (1600, 100.0, 1000, 125.0),      # 거래량이 줄었다
+])
+def test_strength_between_unknown_inputs_return_none(args):
+    assert strength_between(*args) is None
+
+
+def test_strength_between_no_sell_volume_hits_the_cap():
+    # 구간 매도량 0 (C를 키워 S2 == S1): V2/(1+r2) == V1/(1+r1)
+    assert strength_between(1000, 100.0, 1500, 200.0) == MAX_STRENGTH
+
+
+def test_strength_between_no_trades_is_unknown():
+    assert strength_between(1000, 100.0, 1000, 100.0) is None
+
+
+def test_strength_between_clamps_negative_buy_delta():
+    # 반올림 오차로 ΔB가 음수 -> 0 으로 자르면 강도 0
+    assert strength_between(1000, 100.0, 1010, 90.0) == pytest.approx(0.0, abs=1e-9)

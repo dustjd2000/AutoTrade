@@ -60,3 +60,32 @@ class TradeStrength:
         if self._sell == 0:
             return MAX_STRENGTH
         return min(self._buy / self._sell * 100, MAX_STRENGTH)
+
+
+def strength_between(
+    past_volume: Optional[int],
+    past_strength_cum: Optional[float],
+    now_volume: Optional[int],
+    now_strength_cum: Optional[float],
+) -> Optional[float]:
+    """두 시점의 누적값(당일 누적 거래량 V, 누적 체결강도 C)으로 그 사이 구간의 체결강도를 구한다.
+
+    C = 누적 매수량 ÷ 누적 매도량 × 100 이므로 r = C/100 일 때 누적 매수 B = V·r/(1+r),
+    누적 매도 S = V/(1+r) 다. 구간 체결강도 = (B2-B1) ÷ (S2-S1) × 100.
+    엔진이 재시작돼 틱 창이 비어 있을 때 분 스냅샷으로 5분 체결강도를 이어 보려는 용도다.
+    C는 소수 둘째 자리로 반올림돼 오므로 ΔB가 살짝 음수가 될 수 있다 — 0으로 자르고 나눈다.
+    입력이 없거나 C가 0 이하이거나 거래량이 줄었으면 None("모름").
+    """
+    if past_volume is None or past_strength_cum is None:
+        return None
+    if now_volume is None or now_strength_cum is None:
+        return None
+    if past_strength_cum <= 0 or now_strength_cum <= 0 or now_volume < past_volume:
+        return None
+    r1 = past_strength_cum / 100
+    r2 = now_strength_cum / 100
+    buy = max(now_volume * r2 / (1 + r2) - past_volume * r1 / (1 + r1), 0.0)
+    sell = now_volume / (1 + r2) - past_volume / (1 + r1)
+    if sell <= 0:
+        return MAX_STRENGTH if buy > 0 else None
+    return min(buy / sell * 100, MAX_STRENGTH)
