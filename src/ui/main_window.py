@@ -1833,11 +1833,6 @@ class MainWindow(QMainWindow):
 
     def _set_engine_running(self, running: bool) -> None:
         self._set_actions_enabled(running)
-        # 새로 뜬 엔진은 기본값(둘 다 적용)으로 시작하므로, 화면에서 해제해 둔 상태를
-        # 여기서 다시 밀어 넣어야 시작·재시작 뒤에도 어긋나지 않는다
-        if running:
-            self._on_exit_flag_toggled()
-            self._on_switch_flag_toggled()
         # 정지 상태에서는 읽을 잔고가 없으므로 표 갱신도 멈춘다
         if running:
             self._holdings_timer.start()
@@ -1867,3 +1862,13 @@ class MainWindow(QMainWindow):
             self._btn_stop.setStyleSheet(
                 f"background: {COLOR_SURFACE}; color: {COLOR_TEXT_DIM}; border: 1px solid {COLOR_BORDER};"
             )
+
+        # 새로 뜬 엔진은 `.env` 값으로 시작하므로, 화면의 체크 상태를 여기서 다시 밀어 넣어야
+        # 시작·재시작 뒤에도 어긋나지 않는다. 화면 상태를 다 바꾼 **뒤에** 하고 실패는 로그만 남긴다 —
+        # 2026-11-13에 `.env` 저장이 PermissionError로 실패해 버튼·보유 종목 표가 '정지'로 남았다.
+        if running:
+            for push in (self._on_exit_flag_toggled, self._on_switch_flag_toggled):
+                try:
+                    push()
+                except Exception:
+                    logger.exception("체크박스 상태 반영·저장 실패 — 엔진은 그대로 돈다")

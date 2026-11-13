@@ -124,6 +124,29 @@ def test_engine_start_pushes_state(monkeypatch):
     assert thread.calls == [False]
 
 
+def test_engine_start_updates_the_screen_even_if_saving_flags_fails(monkeypatch):
+    def locked(path, values):
+        raise PermissionError("locked")
+
+    thread = FakeThread()
+    fake = make_fake_window(checked=False, thread=thread)
+    monkeypatch.setattr(main_window, "save_env", locked)
+    fake._on_exit_flag_toggled = lambda: locked(None, None)
+    fake._set_actions_enabled = lambda running: None
+    fake._holdings_timer = MagicMock()
+    fake._refresh_holdings = lambda: None
+    fake._status_dot = MagicMock()
+    fake._btn_start = MagicMock()
+    fake._btn_stop = MagicMock()
+
+    MainWindow._set_engine_running(fake, True)
+
+    fake._holdings_timer.start.assert_called_once()
+    fake._btn_start.setEnabled.assert_called_with(False)
+    fake._btn_stop.setEnabled.assert_called_with(True)
+    assert thread.calls == [False]  # 저장은 실패해도 엔진에는 밀어 넣었다
+
+
 def test_key_is_not_part_of_the_restart_comparison():
     assert "ETF_SWITCH_ENABLED" not in inspect.getsource(MainWindow._save_settings)
 
